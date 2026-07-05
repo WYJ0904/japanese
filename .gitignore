@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+
+# Local runtime files from the original desktop version
+data/
+tools/
+__pycache__/
+*.pyc
+*.log
+*.pdf
+latest-url.txt
+
+# Codex workspace scratch/output folders
+.agents/
+.codex/
+work/
+outputs/
