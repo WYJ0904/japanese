@@ -1,7 +1,12 @@
-const APP_VERSION = "2026-07-06-0015";
+const APP_VERSION = "2026-07-06-0750";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const DEFAULT_PROFILE = "我";
+const LANGUAGE_LABELS = {
+  english: "英语",
+  japanese: "日语",
+};
+const SKIPPED_ANSWER = "（跳过）";
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,10 +32,32 @@ function profileStorageName(profile) {
   return encodeURIComponent(sanitizeProfile(profile));
 }
 
+function normalizeQuizLanguage(value) {
+  if (value === "english" || value === "japanese") return value;
+  return "";
+}
+
+function quizLanguageLabel(language) {
+  return LANGUAGE_LABELS[language] || "未选语言";
+}
+
+function wordMatchesLanguage(word, language) {
+  const value = String(word || "").trim();
+  if (!value) return false;
+  if (language === "english") return /^[A-Za-z][A-Za-z'-]*$/.test(value);
+  if (language === "japanese") return /[\u3040-\u30ff\u3400-\u9fff々〆ヶ]/u.test(value);
+  return true;
+}
+
+function filterWordsByLanguage(words, language) {
+  return words.filter((word) => wordMatchesLanguage(word, language));
+}
+
 const state = {
   session: localStorage.getItem("vocabSession") || "",
   profile: sanitizeProfile(localStorage.getItem("vocabProfile") || DEFAULT_PROFILE),
   gradingMode: localStorage.getItem("gradingMode") || "normal",
+  quizLanguage: normalizeQuizLanguage(localStorage.getItem("quizLanguage")),
   words: [],
   index: 0,
   score: 0,
@@ -71,6 +98,7 @@ function saveState() {
   localStorage.setItem("vocabAppVersion", APP_VERSION);
   localStorage.setItem("vocabProfile", state.profile);
   localStorage.setItem("gradingMode", state.gradingMode);
+  localStorage.setItem("quizLanguage", state.quizLanguage);
   localStorage.setItem("rubricCache", JSON.stringify(state.rubricCache));
   saveWrongBooks();
 }
@@ -99,6 +127,40 @@ function showWorkspace() {
   $("authPanel").classList.add("hidden");
   $("workspace").classList.remove("hidden");
   $("statusDot").classList.add("online");
+}
+
+function updateLanguageUi() {
+  const language = state.quizLanguage;
+  const languagePanel = $("languagePanel");
+  if (languagePanel) languagePanel.classList.toggle("hidden", Boolean(language));
+
+  const select = $("languageSelect");
+  if (select) select.value = language;
+
+  document.querySelectorAll("[data-language-choice]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.languageChoice === language);
+  });
+
+  const quizLabel = $("quizLanguageLabel");
+  if (quizLabel) quizLabel.textContent = quizLanguageLabel(language);
+}
+
+function setQuizLanguage(value) {
+  const language = normalizeQuizLanguage(value);
+  if (!language) return;
+  state.quizLanguage = language;
+  saveState();
+  updateLanguageUi();
+  updateStats();
+}
+
+function ensureQuizLanguage() {
+  if (state.quizLanguage) return state.quizLanguage;
+  updateLanguageUi();
+  const languagePanel = $("languagePanel");
+  if (languagePanel) languagePanel.scrollIntoView({ block: "center", behavior: "smooth" });
+  alert("请先选择测试英语还是日语。");
+  return "";
 }
 
 async function api(path, body = {}) {
@@ -130,7 +192,9 @@ function setView(id) {
 }
 
 function updateStats() {
-  $("statWords").textContent = parseWords().length || state.words.length;
+  const parsedWords = parseWords();
+  const eligibleWords = state.quizLanguage ? filterWordsByLanguage(parsedWords, state.quizLanguage) : parsedWords;
+  $("statWords").textContent = eligibleWords.length || state.words.length;
   $("statWrong").textContent = Object.keys(state.currentWrongBook).length;
   $("statScore").textContent = state.score;
 }
@@ -202,8 +266,21 @@ function shuffle(items) {
 }
 
 function startQuiz(words, mode = "normal") {
+  const language = ensureQuizLanguage();
+  if (!language) return;
+
   const uniqueWords = [...new Set(words.map((word) => String(word).trim()).filter(Boolean))];
   if (!uniqueWords.length) return;
+
+  const quizWords = filterWordsByLanguage(uniqueWords, language);
+  const excludedCount = uniqueWords.length - quizWords.length;
+  if (!quizWords.length) {
+    alert(`当前选择的是${quizLanguageLabel(language)}，词表里没有可测试的${quizLanguageLabel(language)}词。`);
+    return;
+  }
+  if (excludedCount > 0) {
+    alert(`已按${quizLanguageLabel(language)}模式排除 ${excludedCount} 个其他语言的词。`);
+  }
 
   clearNextTimer();
   hideResultPanel();
@@ -215,7 +292,7 @@ function startQuiz(words, mode = "normal") {
     saveWrongBooks();
   }
 
-  state.words = shuffle(uniqueWords);
+  state.words = shuffle(quizWords);
   state.index = 0;
   state.score = 0;
   state.mode = mode;
@@ -229,6 +306,7 @@ function showWord() {
   $("wordLabel").textContent = word;
   $("progressLabel").textContent = `${state.index + 1}/${state.words.length}`;
   $("scoreLabel").textContent = `得分 ${state.score}`;
+  $("quizLanguageLabel").textContent = quizLanguageLabel(state.quizLanguage);
   $("answerInput").value = "";
   hideResultPanel();
   clearNextTimer();
@@ -244,6 +322,7 @@ function updateWrongEntry(book, word, answer, gloss, accepted) {
     last_answer: answer,
     correct_answer: gloss,
     accepted: accepted || [],
+    skipped: answer === SKIPPED_ANSWER,
     last_time: new Date().toLocaleString(),
   };
 }
@@ -277,6 +356,16 @@ function renderResult(result) {
   scheduleResultHide(resultVisibleMs(result));
 }
 
+function renderSkipResult() {
+  $("resultPanel").classList.remove("hidden", "grading", "ai-review");
+  void $("resultPanel").offsetWidth;
+  $("resultTitle").className = "result-title bad";
+  $("resultTitle").textContent = "已跳过";
+  $("resultGloss").textContent = "已加入错题本";
+  $("acceptedChips").innerHTML = "";
+  scheduleResultHide(900);
+}
+
 function nextWord() {
   clearNextTimer();
   setNextNowEnabled(false);
@@ -286,6 +375,21 @@ function nextWord() {
   } else {
     setView(Object.keys(state.currentWrongBook).length ? "wrongView" : "setupView");
   }
+}
+
+function skipWord() {
+  if (state.busy) return;
+  if (nextTimer) {
+    nextWord();
+    return;
+  }
+
+  const word = state.words[state.index];
+  if (!word) return;
+  markWrong(word, SKIPPED_ANSWER, "跳过：未作答", []);
+  renderSkipResult();
+  updateStats();
+  scheduleNext(900);
 }
 
 async function submitAnswer(event) {
@@ -312,6 +416,7 @@ async function submitAnswer(event) {
       answer,
       rubric: state.rubricCache[word],
       mode: state.gradingMode,
+      language: state.quizLanguage,
     });
     if (result.rubric) state.rubricCache[word] = result.rubric;
 
@@ -366,7 +471,9 @@ function renderWrongBook() {
   entries.forEach(([word, info]) => {
     const node = template.content.cloneNode(true);
     node.querySelector("h3").textContent = word;
-    node.querySelector("p").textContent = `你答：${info.last_answer || ""} · 标准：${info.correct_answer || ""}`;
+    node.querySelector("p").textContent = info.skipped
+      ? `跳过 · ${info.correct_answer || "未作答"}`
+      : `你答：${info.last_answer || ""} · 标准：${info.correct_answer || ""}`;
     node.querySelector("strong").textContent = `${info.wrong_count || 0}次`;
     list.appendChild(node);
   });
@@ -526,6 +633,7 @@ async function boot() {
   $("profileInput").value = state.profile;
   $("gradingModeSelect").value = ["strict", "normal", "lenient"].includes(state.gradingMode) ? state.gradingMode : "normal";
   state.gradingMode = $("gradingModeSelect").value;
+  updateLanguageUi();
 
   $("loginForm").addEventListener("submit", login);
   $("answerForm").addEventListener("submit", submitAnswer);
@@ -541,7 +649,7 @@ async function boot() {
   $("importWordsBtn").addEventListener("click", () => $("wordFileInput").click());
   $("exportWordsBtn").addEventListener("click", exportWords);
   $("wordFileInput").addEventListener("change", importWords);
-  $("skipBtn").addEventListener("click", nextWord);
+  $("skipBtn").addEventListener("click", skipWord);
   $("nextNowBtn").addEventListener("click", nextWord);
   $("backBtn").addEventListener("click", () => setView("setupView"));
   $("reviewBtn").addEventListener("click", () => startWrongReview("current"));
@@ -562,6 +670,10 @@ async function boot() {
   $("historyWrongTab").addEventListener("click", () => setWrongScope("history"));
   $("wordInput").addEventListener("input", updateStats);
   $("profileInput").addEventListener("change", (event) => changeProfile(event.target.value));
+  $("languageSelect").addEventListener("change", (event) => setQuizLanguage(event.target.value));
+  document.querySelectorAll("[data-language-choice]").forEach((button) => {
+    button.addEventListener("click", () => setQuizLanguage(button.dataset.languageChoice));
+  });
   $("gradingModeSelect").addEventListener("change", (event) => {
     state.gradingMode = event.target.value;
     saveState();
