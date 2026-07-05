@@ -8,6 +8,7 @@ const $ = (id) => document.getElementById(id);
 let resultHideTimer = null;
 let nextTimer = null;
 let backendAvailable = false;
+const BACKEND_OFFLINE_MESSAGE = "未连接本地后端，请先运行本地服务并配置 Cloudflare Pages 的 LOCAL_API_BASE。";
 
 function loadJson(key, fallback) {
   try {
@@ -482,7 +483,7 @@ async function login(event) {
   event.preventDefault();
   $("loginError").textContent = "";
   if (!backendAvailable) {
-    $("loginError").textContent = "未连接后端 API，Cloudflare Pages 静态部署只会显示前端。";
+    $("loginError").textContent = BACKEND_OFFLINE_MESSAGE;
     return;
   }
   try {
@@ -548,6 +549,7 @@ async function boot() {
   try {
     const response = await fetch("/api/status", { cache: "no-store" });
     const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "backend unavailable");
     $("modelLabel").textContent = data.model || "qwen3:8b";
     $("statusDot").classList.add("online");
     backendAvailable = true;
@@ -562,10 +564,10 @@ async function boot() {
       $("modelLabel").textContent = data.model || "qwen3:8b";
       showWorkspace();
     } catch (_) {
-      showAuth(backendAvailable ? "登录已失效，请重新输入口令" : "未连接后端 API，Cloudflare Pages 静态部署只会显示前端。");
+      showAuth(backendAvailable ? "登录已失效，请重新输入口令" : BACKEND_OFFLINE_MESSAGE);
     }
   } else {
-    showAuth(backendAvailable ? "" : "未连接后端 API，Cloudflare Pages 静态部署只会显示前端。");
+    showAuth(backendAvailable ? "" : BACKEND_OFFLINE_MESSAGE);
   }
   saveState();
   updateStats();
