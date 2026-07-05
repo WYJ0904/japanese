@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-06-28-1010";
+const APP_VERSION = "2026-07-06-0015";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const DEFAULT_PROFILE = "我";
@@ -384,40 +384,62 @@ function startWrongReview(scope) {
 
 async function exportWrongBook(scope = "current") {
   const book = activeWrongBook(scope);
-  const response = await fetch("/api/export-pdf", {
-    method: "POST",
-    cache: "no-store",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Session-Token": state.session,
-    },
-    body: JSON.stringify({
-      wrongBook: book,
-      title: scope === "history" ? "外语词测历史错题本" : "外语词测本轮错题本",
-      meta: {
-        profile: state.profile,
-        scope: scope === "history" ? "历史错题" : "本轮错题",
-        grading_mode: state.gradingMode,
-      },
-    }),
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    if (response.status === 401) {
-      clearSession();
-      showAuth("登录已失效，请重新输入口令");
-      return;
-    }
-    alert(data.error || "导出失败");
+  if (!Object.keys(book).length) {
+    alert(scope === "history" ? "历史错题为空，暂无可导出的 PDF。" : "本轮错题为空，暂无可导出的 PDF。");
     return;
   }
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `wrong-book-${scope}-${Date.now()}.pdf`;
-  link.click();
-  URL.revokeObjectURL(url);
+
+  const button = scope === "history" ? $("exportHistoryBtn") : $("exportBtn");
+  const previousText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "导出中...";
+  }
+
+  try {
+    const response = await fetch("/api/export-pdf", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-Token": state.session,
+      },
+      body: JSON.stringify({
+        wrongBook: book,
+        title: scope === "history" ? "外语词测历史错题本" : "外语词测本轮错题本",
+        meta: {
+          profile: state.profile,
+          scope: scope === "history" ? "历史错题" : "本轮错题",
+          grading_mode: state.gradingMode,
+        },
+      }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        clearSession();
+        showAuth("登录已失效，请重新输入口令");
+        return;
+      }
+      alert(data.error || "导出失败");
+      return;
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `wrong-book-${scope}-${Date.now()}.pdf`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(`导出失败：${error.message || "请检查本地后端连接"}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
 }
 
 function downloadText(filename, text) {
