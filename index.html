@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#203a43" />
     <title>外语词测</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260706-0810" />
-    <link rel="stylesheet" href="/styles.css?v=20260706-0810" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260706-0830" />
+    <link rel="stylesheet" href="/styles.css?v=20260706-0830" />
   </head>
   <body>
     <div class="entry-screen" aria-hidden="true">
@@ -51,6 +51,7 @@
           <button class="active" data-view="setupView">词表</button>
           <button data-view="quizView">答题</button>
           <button data-view="wrongView">错题</button>
+          <button data-view="achievementsView">成就</button>
         </nav>
 
         <section class="view active" id="setupView">
@@ -66,6 +67,13 @@
                   <option value="normal">普通</option>
                   <option value="strict">严格</option>
                   <option value="lenient">宽松</option>
+                </select>
+              </label>
+              <label class="field-label">
+                <span>练习</span>
+                <select id="practiceModeSelect">
+                  <option value="meaning">释义</option>
+                  <option value="dictation">听写</option>
                 </select>
               </label>
               <label class="field-label">
@@ -103,6 +111,7 @@
               <span id="progressLabel">0/0</span>
               <span id="scoreLabel">得分 0</span>
               <span id="quizLanguageLabel">未选语言</span>
+              <span id="practiceModeLabel">释义</span>
             </div>
             <div class="word-display" id="wordLabel">-</div>
             <form id="answerForm" class="answer-form">
@@ -110,6 +119,7 @@
               <button class="primary" type="submit">提交</button>
             </form>
             <div class="action-row compact">
+              <button id="speakBtn" class="hidden" type="button">播放</button>
               <button id="skipBtn" type="button">跳过</button>
               <button id="nextNowBtn" type="button" disabled>下一题</button>
               <button id="backBtn" type="button">词表</button>
@@ -144,6 +154,16 @@
             <div class="wrong-list" id="wrongList"></div>
           </div>
         </section>
+
+        <section class="view" id="achievementsView">
+          <div class="panel">
+            <div class="achievement-head">
+              <h2>成就</h2>
+              <p class="meta-line" id="achievementSummary"></p>
+            </div>
+            <div class="achievement-grid" id="achievementList"></div>
+          </div>
+        </section>
       </section>
     </main>
 
@@ -157,6 +177,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260706-0810"></script>
+    <script src="/app.js?v=20260706-0830"></script>
   </body>
 </html>

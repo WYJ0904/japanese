@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-06-0810";
+const APP_VERSION = "2026-07-06-0830";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const DEFAULT_PROFILE = "我";
@@ -6,7 +6,22 @@ const LANGUAGE_LABELS = {
   english: "英语",
   japanese: "日语",
 };
+const PRACTICE_LABELS = {
+  meaning: "释义",
+  dictation: "听写",
+};
 const SKIPPED_ANSWER = "（跳过）";
+const EMPTY_ANSWER = "（空白）";
+const ACHIEVEMENTS = [
+  { id: "firstQuiz", title: "开测", desc: "完成一次词表测试。" },
+  { id: "firstDictation", title: "听写启动", desc: "完成一次听写练习。" },
+  { id: "firstCorrect", title: "第一题正确", desc: "答对任意一道题。" },
+  { id: "skipSaved", title: "跳过也记录", desc: "跳过的词已进入错题本。" },
+  { id: "wrongTen", title: "错题收藏家", desc: "历史错题达到 10 个。" },
+  { id: "perfectRound", title: "满分一轮", desc: "整轮测试全部答对。" },
+  { id: "firstPdf", title: "练习册生成", desc: "导出一次 PDF 错题本。" },
+  { id: "longRound", title: "长跑", desc: "完成 20 题以上的一轮测试。" },
+];
 
 const $ = (id) => document.getElementById(id);
 
@@ -43,6 +58,15 @@ function quizLanguageLabel(language) {
   return LANGUAGE_LABELS[language] || "未选语言";
 }
 
+function normalizePracticeMode(value) {
+  if (value === "dictation") return "dictation";
+  return "meaning";
+}
+
+function practiceModeLabel(mode) {
+  return PRACTICE_LABELS[mode] || "释义";
+}
+
 function wordMatchesLanguage(word, language) {
   const value = String(word || "").trim();
   if (!value) return false;
@@ -59,6 +83,7 @@ const state = {
   session: localStorage.getItem("vocabSession") || "",
   profile: sanitizeProfile(localStorage.getItem("vocabProfile") || DEFAULT_PROFILE),
   gradingMode: localStorage.getItem("gradingMode") || "normal",
+  practiceMode: normalizePracticeMode(localStorage.getItem("practiceMode")),
   quizLanguage: "",
   words: [],
   index: 0,
@@ -69,10 +94,15 @@ const state = {
   rubricCache: loadJson("rubricCache", {}),
   currentWrongBook: {},
   historyWrongBook: {},
+  achievements: {},
 };
 
 function wrongBookKey(scope) {
   return `wrongBook:${scope}:${profileStorageName(state.profile)}`;
+}
+
+function achievementKey() {
+  return `achievements:${profileStorageName(state.profile)}`;
 }
 
 function migrateLegacyWrongBook() {
@@ -96,13 +126,23 @@ function saveWrongBooks() {
   localStorage.setItem(wrongBookKey("history"), JSON.stringify(state.historyWrongBook));
 }
 
+function loadAchievements() {
+  state.achievements = loadJson(achievementKey(), {});
+}
+
+function saveAchievements() {
+  localStorage.setItem(achievementKey(), JSON.stringify(state.achievements));
+}
+
 function saveState() {
   localStorage.setItem("vocabAppVersion", APP_VERSION);
   localStorage.setItem("vocabProfile", state.profile);
   localStorage.setItem("gradingMode", state.gradingMode);
+  localStorage.setItem("practiceMode", state.practiceMode);
   localStorage.setItem("quizLanguage", state.quizLanguage);
   localStorage.setItem("rubricCache", JSON.stringify(state.rubricCache));
   saveWrongBooks();
+  saveAchievements();
 }
 
 function activeWrongBook(scope = state.wrongScope) {
@@ -172,6 +212,13 @@ function updateLanguageUi() {
   if (quizLabel) quizLabel.textContent = quizLanguageLabel(language);
 }
 
+function updatePracticeUi() {
+  const select = $("practiceModeSelect");
+  if (select) select.value = state.practiceMode;
+  const label = $("practiceModeLabel");
+  if (label) label.textContent = practiceModeLabel(state.practiceMode);
+}
+
 function setQuizLanguage(value) {
   const language = normalizeQuizLanguage(value);
   if (!language) return;
@@ -183,6 +230,13 @@ function setQuizLanguage(value) {
   else showAuth(pendingAuthMessage);
 }
 
+function setPracticeMode(value) {
+  state.practiceMode = normalizePracticeMode(value);
+  saveState();
+  updatePracticeUi();
+  updateStats();
+}
+
 function ensureQuizLanguage() {
   if (state.quizLanguage) return state.quizLanguage;
   updateLanguageUi();
@@ -190,6 +244,40 @@ function ensureQuizLanguage() {
   if (languagePanel) languagePanel.scrollIntoView({ block: "center", behavior: "smooth" });
   alert("请先选择测试英语还是日语。");
   return "";
+}
+
+function unlockAchievement(id) {
+  const item = ACHIEVEMENTS.find((achievement) => achievement.id === id);
+  if (!item || state.achievements[id]) return;
+  state.achievements[id] = new Date().toLocaleString();
+  saveAchievements();
+  renderAchievements();
+}
+
+function renderAchievements() {
+  const list = $("achievementList");
+  if (!list) return;
+  list.innerHTML = "";
+  const unlockedCount = ACHIEVEMENTS.filter((item) => state.achievements[item.id]).length;
+  $("achievementSummary").textContent = `${state.profile} · ${unlockedCount}/${ACHIEVEMENTS.length}`;
+
+  ACHIEVEMENTS.forEach((item) => {
+    const node = document.createElement("article");
+    const unlockedAt = state.achievements[item.id];
+    node.className = `achievement-item${unlockedAt ? " unlocked" : ""}`;
+    const title = document.createElement("h3");
+    const name = document.createElement("strong");
+    const mark = document.createElement("span");
+    const desc = document.createElement("p");
+    name.textContent = item.title;
+    mark.textContent = unlockedAt ? "已获得" : "未获得";
+    title.appendChild(name);
+    title.appendChild(mark);
+    desc.textContent = unlockedAt ? `${item.desc} · ${unlockedAt}` : item.desc;
+    node.appendChild(title);
+    node.appendChild(desc);
+    list.appendChild(node);
+  });
 }
 
 async function api(path, body = {}) {
@@ -218,6 +306,7 @@ function setView(id) {
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === id));
   document.querySelectorAll(".tabs button").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === id));
   if (id === "wrongView") renderWrongBook();
+  if (id === "achievementsView") renderAchievements();
 }
 
 function updateStats() {
@@ -230,7 +319,7 @@ function updateStats() {
 
 function setBusy(busy) {
   state.busy = busy;
-  ["startBtn", "submitBtn", "skipBtn", "reviewBtn", "reviewHistoryBtn"].forEach((id) => {
+  ["startBtn", "submitBtn", "skipBtn", "reviewBtn", "reviewHistoryBtn", "speakBtn"].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = busy;
   });
@@ -276,6 +365,34 @@ function scheduleNext(delayMs) {
     nextTimer = null;
     nextWord();
   }, delayMs);
+}
+
+function isDictationMode() {
+  return state.practiceMode === "dictation";
+}
+
+function speechLang() {
+  return state.quizLanguage === "japanese" ? "ja-JP" : "en-US";
+}
+
+function speakCurrentWord() {
+  const word = state.words[state.index];
+  if (!word || !("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) return;
+  const utterance = new SpeechSynthesisUtterance(word);
+  utterance.lang = speechLang();
+  utterance.rate = state.quizLanguage === "japanese" ? 0.82 : 0.9;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+function normalizeDictationAnswer(value) {
+  const normalized = String(value || "").normalize("NFKC").trim();
+  if (state.quizLanguage === "english") return normalized.toLowerCase().replace(/\s+/g, " ");
+  return normalized.replace(/\s+/g, "");
+}
+
+function dictationCorrect(word, answer) {
+  return normalizeDictationAnswer(word) === normalizeDictationAnswer(answer);
 }
 
 function parseWords() {
@@ -325,6 +442,8 @@ function startQuiz(words, mode = "normal") {
   state.index = 0;
   state.score = 0;
   state.mode = mode;
+  unlockAchievement("firstQuiz");
+  if (isDictationMode()) unlockAchievement("firstDictation");
   updateStats();
   setView("quizView");
   showWord();
@@ -332,16 +451,22 @@ function startQuiz(words, mode = "normal") {
 
 function showWord() {
   const word = state.words[state.index] || "-";
-  $("wordLabel").textContent = word;
+  const dictation = isDictationMode();
+  $("wordLabel").textContent = dictation ? "听写" : word;
+  $("wordLabel").classList.toggle("dictation-display", dictation);
   $("progressLabel").textContent = `${state.index + 1}/${state.words.length}`;
   $("scoreLabel").textContent = `得分 ${state.score}`;
   $("quizLanguageLabel").textContent = quizLanguageLabel(state.quizLanguage);
+  $("practiceModeLabel").textContent = practiceModeLabel(state.practiceMode);
   $("answerInput").value = "";
+  $("answerInput").placeholder = dictation ? "输入听到的单词" : "中文意思";
+  $("speakBtn").classList.toggle("hidden", !dictation);
   hideResultPanel();
   clearNextTimer();
   setNextNowEnabled(false);
   $("acceptedChips").innerHTML = "";
   $("answerInput").focus();
+  if (dictation) speakCurrentWord();
 }
 
 function updateWrongEntry(book, word, answer, gloss, accepted) {
@@ -361,6 +486,8 @@ function markWrong(word, answer, gloss, accepted) {
   updateWrongEntry(state.historyWrongBook, word, answer, gloss, accepted);
   saveState();
   updateStats();
+  if (answer === SKIPPED_ANSWER) unlockAchievement("skipSaved");
+  if (Object.keys(state.historyWrongBook).length >= 10) unlockAchievement("wrongTen");
 }
 
 function removeReviewedWord(word) {
@@ -375,7 +502,7 @@ function renderResult(result) {
   $("resultPanel").classList.toggle("ai-review", Boolean(result.ai_review));
   $("resultTitle").className = `result-title ${result.correct ? "ok" : "bad"}`;
   $("resultTitle").textContent = result.correct ? "正确" : "错误";
-  $("resultGloss").textContent = `标准释义：${result.gloss || "（未给出）"}`;
+  $("resultGloss").textContent = `${result.kind === "dictation" ? "正确答案" : "标准释义"}：${result.gloss || "（未给出）"}`;
   $("acceptedChips").innerHTML = "";
   (result.accepted || []).slice(0, 12).forEach((item) => {
     const chip = document.createElement("span");
@@ -402,8 +529,15 @@ function nextWord() {
     state.index += 1;
     showWord();
   } else {
+    finishRound();
     setView(Object.keys(state.currentWrongBook).length ? "wrongView" : "setupView");
   }
+}
+
+function finishRound() {
+  if (!state.words.length) return;
+  if (state.score === state.words.length) unlockAchievement("perfectRound");
+  if (state.words.length >= 20) unlockAchievement("longRound");
 }
 
 function skipWord() {
@@ -427,6 +561,30 @@ async function submitAnswer(event) {
   const word = state.words[state.index];
   const answer = $("answerInput").value.trim();
   if (!word) return;
+
+  if (isDictationMode()) {
+    clearNextTimer();
+    hideResultPanel();
+    setNextNowEnabled(false);
+    const correct = dictationCorrect(word, answer);
+    if (correct) {
+      state.score += 1;
+      removeReviewedWord(word);
+      unlockAchievement("firstCorrect");
+    } else {
+      markWrong(word, answer || EMPTY_ANSWER, word, [word]);
+    }
+    saveState();
+    renderResult({
+      correct,
+      gloss: word,
+      accepted: [word],
+      kind: "dictation",
+    });
+    updateStats();
+    scheduleNext(NORMAL_RESULT_VISIBLE_MS);
+    return;
+  }
 
   setBusy(true);
   clearNextTimer();
@@ -452,6 +610,7 @@ async function submitAnswer(event) {
     if (result.correct) {
       state.score += 1;
       removeReviewedWord(word);
+      unlockAchievement("firstCorrect");
     } else {
       markWrong(word, answer, result.gloss, result.accepted);
     }
@@ -547,6 +706,9 @@ async function exportWrongBook(scope = "current") {
           profile: state.profile,
           scope: scope === "history" ? "历史错题" : "本轮错题",
           grading_mode: state.gradingMode,
+          language: state.quizLanguage,
+          practice_mode: state.practiceMode,
+          achievement_count: ACHIEVEMENTS.filter((item) => state.achievements[item.id]).length,
         },
       }),
     });
@@ -568,6 +730,7 @@ async function exportWrongBook(scope = "current") {
     link.download = `wrong-book-${scope}-${Date.now()}.pdf`;
     link.click();
     URL.revokeObjectURL(url);
+    unlockAchievement("firstPdf");
   } catch (error) {
     alert(`导出失败：${error.message || "请检查本地后端连接"}`);
   } finally {
@@ -628,13 +791,15 @@ async function importWords(event) {
 
 function changeProfile(value) {
   saveWrongBooks();
+  saveAchievements();
   state.profile = sanitizeProfile(value);
   $("profileInput").value = state.profile;
   loadWrongBooks();
+  loadAchievements();
   saveState();
   updateStats();
-  if (!$("wrongView").classList.contains("active")) return;
-  renderWrongBook();
+  if ($("wrongView").classList.contains("active")) renderWrongBook();
+  if ($("achievementsView").classList.contains("active")) renderAchievements();
 }
 
 async function login(event) {
@@ -658,11 +823,15 @@ async function login(event) {
 
 async function boot() {
   loadWrongBooks();
+  loadAchievements();
 
   $("profileInput").value = state.profile;
   $("gradingModeSelect").value = ["strict", "normal", "lenient"].includes(state.gradingMode) ? state.gradingMode : "normal";
   state.gradingMode = $("gradingModeSelect").value;
+  state.practiceMode = normalizePracticeMode(state.practiceMode);
+  $("practiceModeSelect").value = state.practiceMode;
   updateLanguageUi();
+  updatePracticeUi();
 
   $("loginForm").addEventListener("submit", login);
   $("answerForm").addEventListener("submit", submitAnswer);
@@ -678,6 +847,7 @@ async function boot() {
   $("importWordsBtn").addEventListener("click", () => $("wordFileInput").click());
   $("exportWordsBtn").addEventListener("click", exportWords);
   $("wordFileInput").addEventListener("change", importWords);
+  $("speakBtn").addEventListener("click", speakCurrentWord);
   $("skipBtn").addEventListener("click", skipWord);
   $("nextNowBtn").addEventListener("click", nextWord);
   $("backBtn").addEventListener("click", () => setView("setupView"));
@@ -700,6 +870,7 @@ async function boot() {
   $("wordInput").addEventListener("input", updateStats);
   $("profileInput").addEventListener("change", (event) => changeProfile(event.target.value));
   $("languageSelect").addEventListener("change", (event) => setQuizLanguage(event.target.value));
+  $("practiceModeSelect").addEventListener("change", (event) => setPracticeMode(event.target.value));
   document.querySelectorAll("[data-language-choice]").forEach((button) => {
     button.addEventListener("click", () => setQuizLanguage(button.dataset.languageChoice));
   });
@@ -735,6 +906,7 @@ async function boot() {
   saveState();
   updateStats();
   renderWrongBook();
+  renderAchievements();
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.getRegistrations().then((items) => items.forEach((item) => item.unregister())).catch(() => {});
