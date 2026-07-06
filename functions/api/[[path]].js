@@ -13,6 +13,8 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 const NO_BODY_METHODS = new Set(["GET", "HEAD"]);
+const FALLBACK_API_BASE = "https://sean-chris-influence-discipline.trycloudflare.com";
+const RETRYABLE_STATUS = new Set([502, 503, 504, 530]);
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -53,6 +55,24 @@ function targetUrlFor(request, base) {
   return target;
 }
 
+function uniqueBases(items) {
+  const seen = new Set();
+  return items.filter((base) => {
+    const key = base.toString();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function configuredBases(env) {
+  const rawBases = [
+    env.LOCAL_API_BASE || env.VOCAB_LOCAL_API_BASE,
+    env.LOCAL_API_FALLBACK || env.VOCAB_LOCAL_API_FALLBACK || FALLBACK_API_BASE,
+  ].filter(Boolean);
+  return uniqueBases(rawBases.map((base) => normalizeBase(base)));
+}
+
 function requestHeadersFor(request, target) {
   const headers = new Headers();
   request.headers.forEach((value, key) => {
@@ -78,14 +98,14 @@ function responseHeadersFor(response) {
 export async function onRequest(context) {
   const { env, request } = context;
 
-  let base;
+  let bases;
   try {
-    base = normalizeBase(env.LOCAL_API_BASE || env.VOCAB_LOCAL_API_BASE);
+    bases = configuredBases(env);
   } catch (error) {
     return json({ ok: false, error: error.message }, 500);
   }
 
-  if (!base) {
+  if (!bases.length) {
     return json(
       {
         ok: false,
@@ -95,32 +115,42 @@ export async function onRequest(context) {
     );
   }
 
-  const target = targetUrlFor(request, base);
-  const init = {
-    method: request.method,
-    headers: requestHeadersFor(request, target),
-    redirect: "manual",
-  };
+  const body = NO_BODY_METHODS.has(request.method.toUpperCase()) ? undefined : await request.arrayBuffer();
+  let lastError = "";
 
-  if (!NO_BODY_METHODS.has(request.method.toUpperCase())) {
-    init.body = await request.arrayBuffer();
+  for (let index = 0; index < bases.length; index += 1) {
+    const base = bases[index];
+    const target = targetUrlFor(request, base);
+    const init = {
+      method: request.method,
+      headers: requestHeadersFor(request, target),
+      redirect: "manual",
+    };
+
+    if (body) init.body = body;
+
+    try {
+      const response = await fetch(target.toString(), init);
+      if (index < bases.length - 1 && RETRYABLE_STATUS.has(response.status)) {
+        lastError = `Backend ${base} returned ${response.status}`;
+        continue;
+      }
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeadersFor(response),
+      });
+    } catch (error) {
+      lastError = error.message;
+    }
   }
 
-  try {
-    const response = await fetch(target.toString(), init);
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeadersFor(response),
-    });
-  } catch (error) {
-    return json(
-      {
-        ok: false,
-        error: "Could not reach the local backend through LOCAL_API_BASE.",
-        detail: error.message,
-      },
-      502,
-    );
-  }
+  return json(
+    {
+      ok: false,
+      error: "Could not reach the local backend through configured Cloudflare Tunnel URLs.",
+      detail: lastError,
+    },
+    502,
+  );
 }
