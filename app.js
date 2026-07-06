@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-06-0750";
+const APP_VERSION = "2026-07-06-0810";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const DEFAULT_PROFILE = "我";
@@ -13,6 +13,8 @@ const $ = (id) => document.getElementById(id);
 let resultHideTimer = null;
 let nextTimer = null;
 let backendAvailable = false;
+let pendingScreen = "auth";
+let pendingAuthMessage = "";
 const BACKEND_OFFLINE_MESSAGE = "未连接本地后端，请先运行本地服务并配置 Cloudflare Pages 的 LOCAL_API_BASE。";
 
 function loadJson(key, fallback) {
@@ -57,7 +59,7 @@ const state = {
   session: localStorage.getItem("vocabSession") || "",
   profile: sanitizeProfile(localStorage.getItem("vocabProfile") || DEFAULT_PROFILE),
   gradingMode: localStorage.getItem("gradingMode") || "normal",
-  quizLanguage: normalizeQuizLanguage(localStorage.getItem("quizLanguage")),
+  quizLanguage: "",
   words: [],
   index: 0,
   score: 0,
@@ -117,13 +119,38 @@ function clearSession() {
   localStorage.removeItem("vocabSession");
 }
 
+function showLanguageGate() {
+  $("languagePanel").classList.remove("hidden");
+  $("topbar").classList.add("hidden");
+  $("authPanel").classList.add("hidden");
+  $("workspace").classList.add("hidden");
+}
+
+function showMainShell() {
+  $("languagePanel").classList.add("hidden");
+  $("topbar").classList.remove("hidden");
+}
+
 function showAuth(message = "") {
+  pendingScreen = "auth";
+  pendingAuthMessage = message;
+  if (!state.quizLanguage) {
+    showLanguageGate();
+    return;
+  }
+  showMainShell();
   $("authPanel").classList.remove("hidden");
   $("workspace").classList.add("hidden");
   $("loginError").textContent = message;
 }
 
 function showWorkspace() {
+  pendingScreen = "workspace";
+  if (!state.quizLanguage) {
+    showLanguageGate();
+    return;
+  }
+  showMainShell();
   $("authPanel").classList.add("hidden");
   $("workspace").classList.remove("hidden");
   $("statusDot").classList.add("online");
@@ -131,8 +158,8 @@ function showWorkspace() {
 
 function updateLanguageUi() {
   const language = state.quizLanguage;
-  const languagePanel = $("languagePanel");
-  if (languagePanel) languagePanel.classList.toggle("hidden", Boolean(language));
+  if (!language) showLanguageGate();
+  else showMainShell();
 
   const select = $("languageSelect");
   if (select) select.value = language;
@@ -152,6 +179,8 @@ function setQuizLanguage(value) {
   saveState();
   updateLanguageUi();
   updateStats();
+  if (pendingScreen === "workspace") showWorkspace();
+  else showAuth(pendingAuthMessage);
 }
 
 function ensureQuizLanguage() {
