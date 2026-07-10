@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-10-2300";
+const APP_VERSION = "2026-07-10-2345";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const API_TIMEOUT_MS = 100000;
@@ -306,31 +306,39 @@ function restoreProjectRuntime() {
   updateStats();
 }
 
-function runSplashSequence() {
+function runSplashSequence(revealContent) {
   const screen = $("entryScreen");
-  const media = $("splashMedia");
-  const image = $("splashImage");
-  if (!screen) return Promise.resolve();
+  if (!screen) {
+    revealContent?.();
+    return Promise.resolve();
+  }
 
   const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-  const visibleMs = reducedMotion ? 360 : 2180;
-  const fadeMs = reducedMotion ? 200 : 620;
+  const visibleMs = reducedMotion ? 260 : 2000;
+  const openingMs = reducedMotion ? 300 : 1150;
+  const images = Array.from(screen.querySelectorAll(".splash-art"));
 
   const markImageFailed = () => {
-    media?.classList.add("image-failed");
-    $("splashFallback")?.setAttribute("aria-hidden", "false");
+    screen.classList.add("image-failed");
+    screen.querySelectorAll(".splash-fallback").forEach((fallback) => {
+      fallback.setAttribute("aria-hidden", "false");
+    });
   };
-  image?.addEventListener("error", markImageFailed, { once: true });
-  if (image?.complete && !image.naturalWidth) markImageFailed();
+  images.forEach((image) => image.addEventListener("error", markImageFailed, { once: true }));
+  if (images.some((image) => image.complete && !image.naturalWidth)) markImageFailed();
 
   return new Promise((resolve) => {
     window.setTimeout(() => {
-      screen.classList.add("is-leaving");
-      window.setTimeout(() => {
-        screen.classList.add("is-hidden");
-        screen.setAttribute("aria-hidden", "true");
-        resolve();
-      }, fadeMs);
+      revealContent?.();
+      window.requestAnimationFrame(() => {
+        screen.classList.add("is-opening");
+        window.setTimeout(() => {
+          screen.classList.add("is-hidden");
+          screen.setAttribute("aria-hidden", "true");
+          screen.remove();
+          resolve();
+        }, openingMs);
+      });
     }, visibleMs);
   });
 }
@@ -1363,7 +1371,6 @@ async function refreshBackendState() {
 }
 
 async function boot() {
-  const splashPromise = runSplashSequence();
   loadWrongBooks();
   loadAchievements();
   state.quizLanguage = "";
@@ -1453,11 +1460,12 @@ async function boot() {
   }
 
   refreshBackendState();
-  await splashPromise;
-  $("appShell").classList.remove("app-shell-pending");
-  $("appShell").classList.add("app-shell-ready");
-  $("appShell").setAttribute("aria-hidden", "false");
   showProjectPicker();
+  await runSplashSequence(() => {
+    $("appShell").classList.remove("app-shell-pending");
+    $("appShell").classList.add("app-shell-ready");
+    $("appShell").setAttribute("aria-hidden", "false");
+  });
 }
 
 boot();

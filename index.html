@@ -5,15 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260710-2300" />
-    <link rel="stylesheet" href="/styles.css?v=20260710-2300" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260710-2345" />
+    <link rel="stylesheet" href="/styles.css?v=20260710-2345" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
-      <div class="splash-media" id="splashMedia">
-        <img id="splashImage" src="/assets/splash-screen.png" alt="" />
-        <span class="splash-fallback" id="splashFallback" aria-hidden="true">77 79 6A</span>
+      <div class="splash-door splash-door-left" aria-hidden="true">
+        <div class="splash-door-scene" id="splashMedia">
+          <img class="splash-art" id="splashImage" src="/assets/splash-screen.png" alt="" />
+          <span class="splash-fallback" id="splashFallback" aria-hidden="true">77 79 6A</span>
+        </div>
       </div>
+      <div class="splash-door splash-door-right" aria-hidden="true">
+        <div class="splash-door-scene">
+          <img class="splash-art" src="/assets/splash-screen.png" alt="" />
+          <span class="splash-fallback" aria-hidden="true">77 79 6A</span>
+        </div>
+      </div>
+      <span class="splash-seam" aria-hidden="true"></span>
     </div>
 
     <main class="app-shell app-shell-pending" id="appShell" aria-hidden="true">
@@ -209,6 +218,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260710-2300"></script>
+    <script src="/app.js?v=20260710-2345"></script>
   </body>
 </html>
