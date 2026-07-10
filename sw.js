@@ -1,16 +1,25 @@
-const CACHE = "vocab-shell-20260710-2230";
-const APP_SHELL = [
+const CACHE = "wyj-shell-20260710-2300";
+const CORE_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260710-2230",
-  "/app.js?v=20260710-2230",
-  "/manifest.webmanifest?v=20260710-2230",
+  "/styles.css?v=20260710-2300",
+  "/app.js?v=20260710-2300",
+  "/manifest.webmanifest?v=20260710-2300",
   "/icon-192.png",
   "/icon-512.png",
 ];
+const OPTIONAL_BRAND_ASSETS = ["/assets/logo.png", "/assets/splash-screen.png"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches
+      .open(CACHE)
+      .then(async (cache) => {
+        await cache.addAll(CORE_SHELL);
+        await Promise.allSettled(OPTIONAL_BRAND_ASSETS.map((asset) => cache.add(asset)));
+      })
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener("activate", (event) => {

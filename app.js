@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-10-2230";
+const APP_VERSION = "2026-07-10-2300";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const API_TIMEOUT_MS = 100000;
@@ -40,6 +40,12 @@ let backendAvailable = false;
 let aiAvailable = false;
 let pendingScreen = "auth";
 let pendingAuthMessage = "";
+let currentProject = "";
+let projectRuntimeNeedsRestore = false;
+const projectRuntime = {
+  english: null,
+  japanese: null,
+};
 const BACKEND_OFFLINE_MESSAGE = "未连接本地后端，请先运行本地服务并配置 Cloudflare Pages 的 LOCAL_API_BASE。";
 
 const restoredSession = sessionStorage.getItem("vocabSession") || localStorage.getItem("vocabSession") || "";
@@ -154,6 +160,15 @@ function filterWordsByLanguage(words, language) {
   return words.filter((word) => wordMatchesLanguage(word, language));
 }
 
+function filterWrongBookByLanguage(book, language = state.quizLanguage) {
+  if (!language) return {};
+  return Object.fromEntries(Object.entries(book || {}).filter(([word]) => wordMatchesLanguage(word, language)));
+}
+
+function removeLanguageFromWrongBook(book, language = state.quizLanguage) {
+  return Object.fromEntries(Object.entries(book || {}).filter(([word]) => !wordMatchesLanguage(word, language)));
+}
+
 const state = {
   session: restoredSession,
   profile: sanitizeProfile(localStorage.getItem("vocabProfile") || DEFAULT_PROFILE),
@@ -222,11 +237,12 @@ function saveState() {
 }
 
 function activeWrongBook(scope = state.wrongScope) {
-  return scope === "history" ? state.historyWrongBook : state.currentWrongBook;
+  const source = scope === "history" ? state.historyWrongBook : state.currentWrongBook;
+  return filterWrongBookByLanguage(source);
 }
 
 function hasLocalReviewData() {
-  return Object.keys(state.currentWrongBook).length > 0 || Object.keys(state.historyWrongBook).length > 0;
+  return Object.keys(activeWrongBook("current")).length > 0 || Object.keys(activeWrongBook("history")).length > 0;
 }
 
 function setActiveWrongBook(scope, book) {
@@ -240,25 +256,146 @@ function clearSession() {
   localStorage.removeItem("vocabSession");
 }
 
+function wordDraftKey(language = state.quizLanguage, profile = state.profile) {
+  return `vocabWords:${language}:${profileStorageName(profile)}`;
+}
+
+function saveCurrentWordDraft() {
+  const input = $("wordInput");
+  if (!input || !currentProject) return;
+  localStorage.setItem(wordDraftKey(currentProject), input.value);
+}
+
+function loadCurrentWordDraft() {
+  const input = $("wordInput");
+  if (!input || !currentProject) return;
+  input.value = localStorage.getItem(wordDraftKey(currentProject)) || "";
+}
+
+function saveProjectRuntime() {
+  if (!currentProject) return;
+  projectRuntime[currentProject] = {
+    words: [...state.words],
+    index: state.index,
+    score: state.score,
+    mode: state.mode,
+    view: document.querySelector(".view.active")?.id || "setupView",
+  };
+}
+
+function restoreProjectRuntime() {
+  if (!currentProject || !projectRuntimeNeedsRestore) return;
+  projectRuntimeNeedsRestore = false;
+  const runtime = projectRuntime[currentProject];
+  if (!runtime) {
+    state.words = [];
+    state.index = 0;
+    state.score = 0;
+    state.mode = "normal";
+    setView("setupView");
+    updateStats();
+    return;
+  }
+  state.words = [...runtime.words];
+  state.index = Math.min(runtime.index, Math.max(0, state.words.length - 1));
+  state.score = runtime.score;
+  state.mode = runtime.mode;
+  const view = runtime.view === "quizView" && !state.words.length ? "setupView" : runtime.view;
+  setView(view);
+  if (view === "quizView" && state.words.length) showWord();
+  updateStats();
+}
+
+function runSplashSequence() {
+  const screen = $("entryScreen");
+  const media = $("splashMedia");
+  const image = $("splashImage");
+  if (!screen) return Promise.resolve();
+
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const visibleMs = reducedMotion ? 360 : 2180;
+  const fadeMs = reducedMotion ? 200 : 620;
+
+  const markImageFailed = () => {
+    media?.classList.add("image-failed");
+    $("splashFallback")?.setAttribute("aria-hidden", "false");
+  };
+  image?.addEventListener("error", markImageFailed, { once: true });
+  if (image?.complete && !image.naturalWidth) markImageFailed();
+
+  return new Promise((resolve) => {
+    window.setTimeout(() => {
+      screen.classList.add("is-leaving");
+      window.setTimeout(() => {
+        screen.classList.add("is-hidden");
+        screen.setAttribute("aria-hidden", "true");
+        resolve();
+      }, fadeMs);
+    }, visibleMs);
+  });
+}
+
 function showLanguageGate() {
-  $("languagePanel").classList.remove("hidden");
+  showProjectPicker();
+}
+
+function showProjectPicker() {
+  if (currentProject) {
+    saveCurrentWordDraft();
+    saveProjectRuntime();
+  }
+  if (judgeController) judgeController.abort();
+  clearNextTimer();
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  currentProject = "";
+  state.quizLanguage = "";
+  $("projectApp").classList.add("hidden");
+  $("projectApp").setAttribute("aria-hidden", "true");
   $("topbar").classList.add("hidden");
   $("authPanel").classList.add("hidden");
   $("workspace").classList.add("hidden");
+  $("projectPicker").classList.remove("hidden");
+  $("projectPicker").setAttribute("aria-hidden", "false");
+  document.body.classList.add("project-picker-active");
 }
 
 function showMainShell() {
+  if (!currentProject) return;
   $("languagePanel").classList.add("hidden");
+  $("projectPicker").classList.add("hidden");
+  $("projectPicker").setAttribute("aria-hidden", "true");
+  $("projectApp").classList.remove("hidden");
+  $("projectApp").setAttribute("aria-hidden", "false");
   $("topbar").classList.remove("hidden");
+  document.body.classList.remove("project-picker-active");
+}
+
+function applyPendingScreen() {
+  if (!currentProject) return;
+  if (pendingScreen === "workspace") showWorkspace();
+  else showAuth(pendingAuthMessage);
+}
+
+function enterProject(value) {
+  const language = normalizeQuizLanguage(value);
+  if (!language) return;
+  if (currentProject && currentProject !== language) {
+    saveCurrentWordDraft();
+    saveProjectRuntime();
+  }
+  currentProject = language;
+  state.quizLanguage = language;
+  projectRuntimeNeedsRestore = true;
+  loadCurrentWordDraft();
+  saveState();
+  updateLanguageUi();
+  applyPendingScreen();
 }
 
 function showAuth(message = "") {
   pendingScreen = "auth";
   pendingAuthMessage = message;
-  if (!state.quizLanguage) {
-    showLanguageGate();
-    return;
-  }
+  if (!currentProject) return;
   showMainShell();
   $("authPanel").classList.remove("hidden");
   $("workspace").classList.add("hidden");
@@ -268,23 +405,18 @@ function showAuth(message = "") {
 
 function showWorkspace() {
   pendingScreen = "workspace";
-  if (!state.quizLanguage) {
-    showLanguageGate();
-    return;
-  }
+  if (!currentProject) return;
   showMainShell();
   $("authPanel").classList.add("hidden");
   $("workspace").classList.remove("hidden");
   $("statusDot").classList.toggle("online", backendAvailable && aiAvailable);
   if (!backendAvailable) $("modelLabel").textContent = "本地复习";
   else if (!aiAvailable) $("modelLabel").textContent = "AI 未启动";
+  restoreProjectRuntime();
 }
 
 function updateLanguageUi() {
   const language = state.quizLanguage;
-  if (!language) showLanguageGate();
-  else showMainShell();
-
   const select = $("languageSelect");
   if (select) select.value = language;
 
@@ -294,6 +426,10 @@ function updateLanguageUi() {
 
   const quizLabel = $("quizLanguageLabel");
   if (quizLabel) quizLabel.textContent = quizLanguageLabel(language);
+  const projectLabel = $("projectNameLabel");
+  if (projectLabel) projectLabel.textContent = language ? `${quizLanguageLabel(language)}测试` : "";
+  const input = $("wordInput");
+  if (input) input.placeholder = language === "japanese" ? "输入日语词表，每行一个词" : "输入英语词表，每行一个词";
 }
 
 function updatePracticeUi() {
@@ -306,12 +442,7 @@ function updatePracticeUi() {
 function setQuizLanguage(value) {
   const language = normalizeQuizLanguage(value);
   if (!language) return;
-  state.quizLanguage = language;
-  saveState();
-  updateLanguageUi();
-  updateStats();
-  if (pendingScreen === "workspace") showWorkspace();
-  else showAuth(pendingAuthMessage);
+  if (!currentProject) enterProject(language);
 }
 
 function setPracticeMode(value) {
@@ -323,10 +454,8 @@ function setPracticeMode(value) {
 
 function ensureQuizLanguage() {
   if (state.quizLanguage) return state.quizLanguage;
-  updateLanguageUi();
-  const languagePanel = $("languagePanel");
-  if (languagePanel) languagePanel.scrollIntoView({ block: "center", behavior: "smooth" });
-  alert("请先选择测试英语还是日语。");
+  showProjectPicker();
+  alert("请先从项目选择页进入英语测试或日语测试。");
   return "";
 }
 
@@ -425,7 +554,7 @@ function updateStats() {
   const parsedWords = parseWords();
   const eligibleWords = state.quizLanguage ? filterWordsByLanguage(parsedWords, state.quizLanguage) : parsedWords;
   $("statWords").textContent = eligibleWords.length || state.words.length;
-  $("statWrong").textContent = Object.keys(state.currentWrongBook).length;
+  $("statWrong").textContent = Object.keys(activeWrongBook("current")).length;
   $("statScore").textContent = state.score;
 }
 
@@ -659,7 +788,7 @@ function startQuiz(words, mode = "normal") {
   setNextNowEnabled(false);
 
   if (mode === "normal") {
-    state.currentWrongBook = {};
+    state.currentWrongBook = removeLanguageFromWrongBook(state.currentWrongBook, language);
     state.wrongScope = "current";
     saveWrongBooks();
   }
@@ -756,7 +885,7 @@ function nextWord() {
     showWord();
   } else {
     finishRound();
-    setView(Object.keys(state.currentWrongBook).length ? "wrongView" : "setupView");
+    setView(Object.keys(activeWrongBook("current")).length ? "wrongView" : "setupView");
   }
 }
 
@@ -987,7 +1116,7 @@ async function exportWrongBook(scope = "current") {
         },
         body: JSON.stringify({
           wrongBook: book,
-          title: scope === "history" ? "外语词测历史错题本" : "外语词测本轮错题本",
+          title: scope === "history" ? "WYJ的网站历史错题本" : "WYJ的网站本轮错题本",
           meta: {
             profile: state.profile,
             scope: scope === "history" ? "历史错题" : "本轮错题",
@@ -1039,8 +1168,8 @@ function exportWrongData() {
     exportedAt: new Date().toISOString(),
     profile: state.profile,
     language: state.quizLanguage,
-    currentWrongBook: sanitizeWrongBook(state.currentWrongBook),
-    historyWrongBook: sanitizeWrongBook(state.historyWrongBook),
+    currentWrongBook: sanitizeWrongBook(activeWrongBook("current")),
+    historyWrongBook: sanitizeWrongBook(activeWrongBook("history")),
   };
   const safeProfile = state.profile.replace(/[\\/:*?"<>|]+/g, "-") || "default";
   downloadText(`wrong-book-${safeProfile}-${Date.now()}.json`, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
@@ -1080,6 +1209,9 @@ async function importWrongData(event) {
     if (file.size > 1024 * 1024) throw new Error("错题数据文件不能超过 1 MB");
     const payload = JSON.parse(await file.text());
     const imported = importedWrongBooks(payload);
+    if (imported.language && imported.language !== state.quizLanguage) {
+      throw new Error(`该文件属于${quizLanguageLabel(imported.language)}项目，请返回项目选择页后再导入`);
+    }
     state.currentWrongBook = mergeWrongBooks(state.currentWrongBook, imported.current);
     state.historyWrongBook = mergeWrongBooks(state.historyWrongBook, imported.history);
     if (!state.quizLanguage && imported.language) state.quizLanguage = imported.language;
@@ -1137,6 +1269,7 @@ async function importWords(event) {
   const words = parseImportedWords(text);
   if (words.length) {
     $("wordInput").value = [...new Set(words)].join("\n");
+    saveCurrentWordDraft();
     updateStats();
   } else {
     alert("没有识别到词表");
@@ -1145,12 +1278,14 @@ async function importWords(event) {
 }
 
 function changeProfile(value) {
+  saveCurrentWordDraft();
   saveWrongBooks();
   saveAchievements();
   state.profile = sanitizeProfile(value);
   $("profileInput").value = state.profile;
   loadWrongBooks();
   loadAchievements();
+  loadCurrentWordDraft();
   saveState();
   updateStats();
   if ($("wrongView").classList.contains("active")) renderWrongBook();
@@ -1176,9 +1311,62 @@ async function login(event) {
   }
 }
 
+async function refreshBackendState() {
+  try {
+    const response = await fetchWithTimeout("/api/status", { cache: "no-store" }, STATUS_TIMEOUT_MS);
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "backend unavailable");
+    backendAvailable = true;
+    aiAvailable = data.ai_ready !== false;
+    $("modelLabel").textContent = data.model || "qwen3:8b";
+    $("statusDot").classList.toggle("online", aiAvailable);
+
+    if (state.session) {
+      const healthResponse = await fetchWithTimeout(
+        "/api/health",
+        {
+          method: "POST",
+          cache: "no-store",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Session-Token": state.session,
+          },
+          body: "{}",
+        },
+        STATUS_TIMEOUT_MS,
+      );
+      const health = await healthResponse.json().catch(() => ({}));
+      if (!healthResponse.ok) {
+        if (healthResponse.status === 401) clearSession();
+        pendingScreen = "auth";
+        pendingAuthMessage = "登录已失效，请重新输入口令";
+      } else {
+        aiAvailable = health.ai_ready !== false;
+        $("modelLabel").textContent = health.model || data.model || "qwen3:8b";
+        $("statusDot").classList.toggle("online", aiAvailable);
+        pendingScreen = "workspace";
+        pendingAuthMessage = "";
+      }
+    } else {
+      pendingScreen = "auth";
+      pendingAuthMessage = "";
+    }
+  } catch (_) {
+    backendAvailable = false;
+    aiAvailable = false;
+    pendingScreen = "workspace";
+    pendingAuthMessage = "";
+    $("modelLabel").textContent = "本地复习";
+    $("statusDot").classList.remove("online");
+  }
+  applyPendingScreen();
+}
+
 async function boot() {
+  const splashPromise = runSplashSequence();
   loadWrongBooks();
   loadAchievements();
+  state.quizLanguage = "";
 
   $("profileInput").value = state.profile;
   $("gradingModeSelect").value = ["strict", "normal", "lenient"].includes(state.gradingMode) ? state.gradingMode : "normal";
@@ -1198,10 +1386,12 @@ async function boot() {
   $("startBtn").addEventListener("click", () => startQuiz(parseWords()));
   $("shuffleBtn").addEventListener("click", () => {
     $("wordInput").value = shuffle(parseWords()).join("\n");
+    saveCurrentWordDraft();
     updateStats();
   });
   $("clearBtn").addEventListener("click", () => {
     $("wordInput").value = "";
+    saveCurrentWordDraft();
     updateStats();
   });
   $("importWordsBtn").addEventListener("click", () => $("wordFileInput").click());
@@ -1222,65 +1412,37 @@ async function boot() {
   $("importWrongDataBtn").addEventListener("click", () => $("wrongDataFileInput").click());
   $("wrongDataFileInput").addEventListener("change", importWrongData);
   $("clearWrongBtn").addEventListener("click", () => {
-    state.currentWrongBook = {};
+    state.currentWrongBook = removeLanguageFromWrongBook(state.currentWrongBook);
     saveState();
     renderWrongBook();
   });
   $("clearHistoryBtn").addEventListener("click", () => {
-    state.historyWrongBook = {};
+    state.historyWrongBook = removeLanguageFromWrongBook(state.historyWrongBook);
     saveState();
     renderWrongBook();
   });
   $("currentWrongTab").addEventListener("click", () => setWrongScope("current"));
   $("historyWrongTab").addEventListener("click", () => setWrongScope("history"));
-  $("wordInput").addEventListener("input", updateStats);
+  $("wordInput").addEventListener("input", () => {
+    saveCurrentWordDraft();
+    updateStats();
+  });
   $("profileInput").addEventListener("change", (event) => changeProfile(event.target.value));
   $("languageSelect").addEventListener("change", (event) => setQuizLanguage(event.target.value));
   $("practiceModeSelect").addEventListener("change", (event) => setPracticeMode(event.target.value));
   document.querySelectorAll("[data-language-choice]").forEach((button) => {
     button.addEventListener("click", () => setQuizLanguage(button.dataset.languageChoice));
   });
+  document.querySelectorAll("[data-project]").forEach((button) => {
+    button.addEventListener("click", () => enterProject(button.dataset.project));
+  });
+  $("backProjectBtn").addEventListener("click", showProjectPicker);
   $("gradingModeSelect").addEventListener("change", (event) => {
     state.gradingMode = event.target.value;
     saveState();
   });
   document.querySelectorAll(".tabs button").forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.view)));
 
-  try {
-    const response = await fetchWithTimeout("/api/status", { cache: "no-store" }, STATUS_TIMEOUT_MS);
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || "backend unavailable");
-    $("modelLabel").textContent = data.model || "qwen3:8b";
-    backendAvailable = true;
-    aiAvailable = data.ai_ready !== false;
-    $("statusDot").classList.toggle("online", aiAvailable);
-  } catch (_) {
-    $("statusDot").classList.remove("online");
-    backendAvailable = false;
-    aiAvailable = false;
-  }
-
-  if (state.session) {
-    try {
-      if (!backendAvailable) throw new Error("backend unavailable");
-      const data = await api("/api/health");
-      $("modelLabel").textContent = data.model || "qwen3:8b";
-      aiAvailable = data.ai_ready !== false;
-      showWorkspace();
-    } catch (_) {
-      if (backendAvailable) showAuth("登录已失效，请重新输入口令");
-      else {
-        pendingScreen = "workspace";
-        showWorkspace();
-      }
-    }
-  } else {
-    if (backendAvailable) showAuth("");
-    else {
-      pendingScreen = "workspace";
-      showWorkspace();
-    }
-  }
   saveState();
   updateStats();
   renderWrongBook();
@@ -1289,6 +1451,13 @@ async function boot() {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register(`/sw.js?v=${APP_VERSION}`).catch(() => {});
   }
+
+  refreshBackendState();
+  await splashPromise;
+  $("appShell").classList.remove("app-shell-pending");
+  $("appShell").classList.add("app-shell-ready");
+  $("appShell").setAttribute("aria-hidden", "false");
+  showProjectPicker();
 }
 
 boot();

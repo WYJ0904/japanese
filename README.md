@@ -1,6 +1,6 @@
-# 外语词测 Cloudflare Pages 部署说明
+# WYJ的网站 Cloudflare Pages 部署说明
 
-这是从原本地版“外语词测”整理出的 Cloudflare Pages 仓库。仓库根目录提供静态前端，`functions/api/[[path]].js` 提供 `/api/*` 代理，用来把线上 Pages 请求转发回你电脑上运行的 Python/Ollama 本地后端。
+这是从原本地词汇测试项目整理出的“WYJ的网站” Cloudflare Pages 仓库。仓库根目录提供静态前端，`functions/api/[[path]].js` 提供 `/api/*` 代理，用来把线上 Pages 请求转发回你电脑上运行的 Python/Ollama 本地后端。
 
 ## 项目类型
 
@@ -9,9 +9,18 @@
 - 样式文件：`styles.css`
 - 脚本文件：`app.js`
 - PWA 文件：`manifest.webmanifest`、`sw.js`、`icon-192.png`、`icon-512.png`；应用外壳支持离线打开
+- 品牌图片：`assets/logo.png`、`assets/splash-screen.png`
 - 后端代理：`functions/api/[[path]].js`
 - 依赖安装：无
 - `node_modules`：不要提交，已在 `.gitignore` 中忽略
+
+## 页面流程与数据兼容
+
+- 打开或刷新页面后先播放全屏启动页，再进入“WYJ的网站”项目选择页。
+- “英语测试”和“日语测试”会直接固定底层 `quizLanguage`，项目内部不再重复显示语言下拉框。
+- 返回项目选择页不会刷新页面，也不会清除登录会话、错题、成就或设置。
+- 旧错题键名和数据结构保持不变；界面按当前项目过滤，因此英语和日语错题不会互相显示。
+- 新增 `vocabWords:<language>:<profile>` 本地存储键，用于分别保存每位使用者的英语/日语词表草稿。
 
 ## Cloudflare Pages 设置
 

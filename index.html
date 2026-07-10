@@ -3,173 +3,198 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#203a43" />
-    <title>外语词测</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260710-2230" />
-    <link rel="stylesheet" href="/styles.css?v=20260710-2230" />
+    <meta name="theme-color" content="#050a12" />
+    <title>WYJ的网站</title>
+    <link rel="manifest" href="/manifest.webmanifest?v=20260710-2300" />
+    <link rel="stylesheet" href="/styles.css?v=20260710-2300" />
   </head>
   <body>
-    <div class="entry-screen" aria-hidden="true">
-      <div class="entry-content">
-        <img src="/icon-192.png" alt="" />
-        <span>外语词测</span>
+    <div class="entry-screen" id="entryScreen" aria-hidden="false">
+      <div class="splash-media" id="splashMedia">
+        <img id="splashImage" src="/assets/splash-screen.png" alt="" />
+        <span class="splash-fallback" id="splashFallback" aria-hidden="true">77 79 6A</span>
       </div>
     </div>
-    <main class="app-shell">
-      <header class="topbar hidden" id="topbar">
-        <div class="brand">
-          <img class="brand-icon" src="/icon-192.png" alt="" />
-          <div>
-            <h1>外语词测</h1>
-            <p id="modelLabel" aria-live="polite">qwen3:8b</p>
-          </div>
-        </div>
-        <div class="status" id="statusDot" title="服务状态">
-          <span></span>
-        </div>
-      </header>
 
-      <section class="language-panel" id="languagePanel" aria-label="选择测试语言">
-        <div class="language-actions">
-          <button type="button" data-language-choice="english">英语</button>
-          <button type="button" data-language-choice="japanese">日语</button>
+    <main class="app-shell app-shell-pending" id="appShell" aria-hidden="true">
+      <section class="project-picker hidden" id="projectPicker" aria-labelledby="projectPickerTitle">
+        <header class="project-brand">
+          <img src="/assets/logo.png" alt="WYJ的网站 Logo" />
+          <h1 id="projectPickerTitle">WYJ的网站</h1>
+        </header>
+        <div class="project-grid" aria-label="选择项目">
+          <button class="project-card" type="button" data-project="english">
+            <span class="project-mark" aria-hidden="true">EN</span>
+            <strong>英语测试</strong>
+          </button>
+          <button class="project-card" type="button" data-project="japanese">
+            <span class="project-mark" aria-hidden="true">日</span>
+            <strong>日语测试</strong>
+          </button>
         </div>
       </section>
 
-      <section class="panel auth-panel hidden" id="authPanel">
-        <div class="lock-mark">语</div>
-        <h2>访问口令</h2>
-        <form id="loginForm" class="login-form">
-          <input id="tokenInput" type="password" autocomplete="current-password" placeholder="输入口令" />
-          <button type="submit">进入</button>
-        </form>
-        <button class="hidden" id="offlineReviewBtn" type="button">进入本地复习</button>
-        <p class="error" id="loginError" aria-live="polite"></p>
-      </section>
-
-      <section class="workspace hidden" id="workspace">
-        <nav class="tabs" aria-label="视图">
-          <button class="active" data-view="setupView">词表</button>
-          <button data-view="quizView">答题</button>
-          <button data-view="wrongView">错题</button>
-          <button data-view="achievementsView">成就</button>
-        </nav>
-
-        <section class="view active" id="setupView">
-          <div class="panel">
-            <div class="settings-grid">
-              <label class="field-label">
-                <span>使用者</span>
-                <input id="profileInput" autocomplete="nickname" placeholder="我" />
-              </label>
-              <label class="field-label">
-                <span>判卷</span>
-                <select id="gradingModeSelect">
-                  <option value="normal">普通</option>
-                  <option value="strict">严格</option>
-                  <option value="lenient">宽松</option>
-                </select>
-              </label>
-              <label class="field-label">
-                <span>练习</span>
-                <select id="practiceModeSelect">
-                  <option value="meaning">释义</option>
-                  <option value="dictation">听写</option>
-                </select>
-              </label>
-              <label class="field-label">
-                <span>测试语言</span>
-                <select id="languageSelect">
-                  <option value="" disabled>请选择</option>
-                  <option value="english">英语</option>
-                  <option value="japanese">日语</option>
-                </select>
-              </label>
+      <section class="project-app hidden" id="projectApp" aria-hidden="true">
+        <header class="topbar hidden" id="topbar">
+          <div class="brand">
+            <img class="brand-icon" src="/assets/logo.png" alt="" />
+            <div>
+              <h1>WYJ的网站</h1>
+              <p id="modelLabel" aria-live="polite">检测中</p>
             </div>
-
-            <textarea id="wordInput" placeholder="あう&#10;かえる&#10;apple&#10;important"></textarea>
-            <div class="action-row">
-              <button class="primary" id="startBtn">开始</button>
-              <button id="shuffleBtn" title="打乱">↕</button>
-              <button id="clearBtn" title="清空">×</button>
-            </div>
-            <div class="action-row secondary-row">
-              <button id="importWordsBtn">导入词表</button>
-              <button id="exportWordsBtn">导出词表</button>
-            </div>
-            <input id="wordFileInput" class="hidden" type="file" accept=".txt,.csv,.json,text/plain,application/json" />
           </div>
-          <div class="stats-grid">
-            <div><strong id="statWords">0</strong><span>词</span></div>
-            <div><strong id="statWrong">0</strong><span>本轮错题</span></div>
-            <div><strong id="statScore">0</strong><span>得分</span></div>
+          <div class="topbar-actions">
+            <div class="status" id="statusDot" title="服务状态" aria-label="服务状态">
+              <span></span>
+            </div>
+            <button class="back-project-button" id="backProjectBtn" type="button">返回项目</button>
+          </div>
+        </header>
+
+        <div class="project-context" id="projectNameLabel" aria-live="polite"></div>
+
+        <section class="language-panel hidden" id="languagePanel" aria-hidden="true">
+          <div class="language-actions">
+            <button type="button" data-language-choice="english">英语</button>
+            <button type="button" data-language-choice="japanese">日语</button>
           </div>
         </section>
 
-        <section class="view" id="quizView">
-          <div class="quiz-card">
-            <div class="quiz-meta">
-              <span id="progressLabel">0/0</span>
-              <span id="scoreLabel">得分 0</span>
-              <span id="quizLanguageLabel">未选语言</span>
-              <span id="practiceModeLabel">释义</span>
-            </div>
-            <div class="word-display" id="wordLabel">-</div>
-            <form id="answerForm" class="answer-form">
-              <input id="answerInput" autocomplete="off" placeholder="中文意思" />
-              <button class="primary" type="submit">提交</button>
-            </form>
-            <div class="action-row compact">
-              <button id="speakBtn" class="hidden" type="button">播放</button>
-              <button id="skipBtn" type="button">跳过</button>
-              <button id="nextNowBtn" type="button" disabled>下一题</button>
-              <button id="cancelJudgeBtn" class="hidden" type="button">取消判卷</button>
-              <button id="backBtn" type="button">词表</button>
-            </div>
-          </div>
-          <div class="result-panel hidden" id="resultPanel" aria-live="polite">
-            <div class="result-title" id="resultTitle"></div>
-            <div class="result-gloss" id="resultGloss"></div>
-            <div class="chips" id="acceptedChips"></div>
-          </div>
+        <section class="panel auth-panel hidden" id="authPanel">
+          <div class="lock-mark" aria-hidden="true">77</div>
+          <h2>访问口令</h2>
+          <form id="loginForm" class="login-form">
+            <input id="tokenInput" type="password" autocomplete="current-password" placeholder="输入口令" />
+            <button class="primary" type="submit">进入</button>
+          </form>
+          <button class="hidden" id="offlineReviewBtn" type="button">进入本地复习</button>
+          <p class="error" id="loginError" aria-live="polite"></p>
         </section>
 
-        <section class="view" id="wrongView">
-          <div class="panel">
-            <div class="scope-tabs">
-              <button class="active" id="currentWrongTab" type="button">本轮</button>
-              <button id="historyWrongTab" type="button">历史</button>
-            </div>
-            <p class="meta-line" id="wrongScopeLabel"></p>
-            <div class="action-row">
-              <button class="primary" id="reviewBtn">复习本轮</button>
-              <button id="reviewHistoryBtn">复习历史</button>
-            </div>
-            <div class="action-row secondary-row">
-              <button id="exportBtn">导出本轮 PDF</button>
-              <button id="exportHistoryBtn">导出历史 PDF</button>
-            </div>
-            <div class="action-row secondary-row">
-              <button id="exportWrongDataBtn">导出错题数据</button>
-              <button id="importWrongDataBtn">导入错题数据</button>
-            </div>
-            <input id="wrongDataFileInput" class="hidden" type="file" accept=".json,application/json" />
-            <div class="action-row secondary-row">
-              <button id="clearWrongBtn">清空本轮</button>
-              <button id="clearHistoryBtn">清空历史</button>
-            </div>
-            <div class="wrong-list" id="wrongList"></div>
-          </div>
-        </section>
+        <section class="workspace hidden" id="workspace">
+          <nav class="tabs" aria-label="视图">
+            <button class="active" data-view="setupView">词表</button>
+            <button data-view="quizView">答题</button>
+            <button data-view="wrongView">错题</button>
+            <button data-view="achievementsView">成就</button>
+          </nav>
 
-        <section class="view" id="achievementsView">
-          <div class="panel">
-            <div class="achievement-head">
-              <h2>成就</h2>
-              <p class="meta-line" id="achievementSummary"></p>
+          <section class="view active" id="setupView">
+            <div class="panel">
+              <div class="settings-grid">
+                <label class="field-label">
+                  <span>使用者</span>
+                  <input id="profileInput" autocomplete="nickname" placeholder="我" />
+                </label>
+                <label class="field-label">
+                  <span>判卷</span>
+                  <select id="gradingModeSelect">
+                    <option value="normal">普通</option>
+                    <option value="strict">严格</option>
+                    <option value="lenient">宽松</option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>练习</span>
+                  <select id="practiceModeSelect">
+                    <option value="meaning">释义</option>
+                    <option value="dictation">听写</option>
+                  </select>
+                </label>
+                <label class="field-label language-field-hidden" aria-hidden="true">
+                  <span>测试语言</span>
+                  <select id="languageSelect" tabindex="-1">
+                    <option value="" disabled>请选择</option>
+                    <option value="english">英语</option>
+                    <option value="japanese">日语</option>
+                  </select>
+                </label>
+              </div>
+
+              <textarea id="wordInput" placeholder="输入词表，每行一个词"></textarea>
+              <div class="action-row">
+                <button class="primary" id="startBtn">开始</button>
+                <button id="shuffleBtn" title="打乱">↕</button>
+                <button id="clearBtn" title="清空">×</button>
+              </div>
+              <div class="action-row secondary-row">
+                <button id="importWordsBtn">导入词表</button>
+                <button id="exportWordsBtn">导出词表</button>
+              </div>
+              <input id="wordFileInput" class="hidden" type="file" accept=".txt,.csv,.json,text/plain,application/json" />
             </div>
-            <div class="achievement-grid" id="achievementList"></div>
-          </div>
+            <div class="stats-grid">
+              <div><strong id="statWords">0</strong><span>词</span></div>
+              <div><strong id="statWrong">0</strong><span>本轮错题</span></div>
+              <div><strong id="statScore">0</strong><span>得分</span></div>
+            </div>
+          </section>
+
+          <section class="view" id="quizView">
+            <div class="quiz-card">
+              <div class="quiz-meta">
+                <span id="progressLabel">0/0</span>
+                <span id="scoreLabel">得分 0</span>
+                <span id="quizLanguageLabel">未选语言</span>
+                <span id="practiceModeLabel">释义</span>
+              </div>
+              <div class="word-display" id="wordLabel">-</div>
+              <form id="answerForm" class="answer-form">
+                <input id="answerInput" autocomplete="off" placeholder="中文意思" />
+                <button class="primary" id="submitBtn" type="submit">提交</button>
+              </form>
+              <div class="action-row compact">
+                <button id="speakBtn" class="hidden" type="button">播放</button>
+                <button id="skipBtn" type="button">跳过</button>
+                <button id="nextNowBtn" type="button" disabled>下一题</button>
+                <button id="cancelJudgeBtn" class="hidden" type="button">取消判卷</button>
+                <button id="backBtn" type="button">词表</button>
+              </div>
+            </div>
+            <div class="result-panel hidden" id="resultPanel" aria-live="polite">
+              <div class="result-title" id="resultTitle"></div>
+              <div class="result-gloss" id="resultGloss"></div>
+              <div class="chips" id="acceptedChips"></div>
+            </div>
+          </section>
+
+          <section class="view" id="wrongView">
+            <div class="panel">
+              <div class="scope-tabs">
+                <button class="active" id="currentWrongTab" type="button">本轮</button>
+                <button id="historyWrongTab" type="button">历史</button>
+              </div>
+              <p class="meta-line" id="wrongScopeLabel"></p>
+              <div class="action-row">
+                <button class="primary" id="reviewBtn">复习本轮</button>
+                <button id="reviewHistoryBtn">复习历史</button>
+              </div>
+              <div class="action-row secondary-row">
+                <button id="exportBtn">导出本轮 PDF</button>
+                <button id="exportHistoryBtn">导出历史 PDF</button>
+              </div>
+              <div class="action-row secondary-row">
+                <button id="exportWrongDataBtn">导出错题数据</button>
+                <button id="importWrongDataBtn">导入错题数据</button>
+              </div>
+              <input id="wrongDataFileInput" class="hidden" type="file" accept=".json,application/json" />
+              <div class="action-row secondary-row">
+                <button id="clearWrongBtn">清空本轮</button>
+                <button id="clearHistoryBtn">清空历史</button>
+              </div>
+              <div class="wrong-list" id="wrongList"></div>
+            </div>
+          </section>
+
+          <section class="view" id="achievementsView">
+            <div class="panel">
+              <div class="achievement-head">
+                <h2>成就</h2>
+                <p class="meta-line" id="achievementSummary"></p>
+              </div>
+              <div class="achievement-grid" id="achievementList"></div>
+            </div>
+          </section>
         </section>
       </section>
     </main>
@@ -184,6 +209,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260710-2230"></script>
+    <script src="/app.js?v=20260710-2300"></script>
   </body>
 </html>

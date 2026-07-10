@@ -1,10 +1,10 @@
 {
-  "name": "外语词测",
-  "short_name": "词测",
+  "name": "WYJ的网站",
+  "short_name": "WYJ",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#edf2f4",
-  "theme_color": "#203a43",
+  "background_color": "#050a12",
+  "theme_color": "#050a12",
   "icons": [
     {
       "src": "/icon-192.png",
