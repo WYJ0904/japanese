@@ -87,7 +87,7 @@ Workers & Pages -> japanese -> Settings -> Environment variables
 - 数据库：未发现数据库依赖。
 - 本地文件读写：旧 Python 后端会读写 `data/settings.json`、错误日志和导出的 PDF；这些运行时文件不提交到 GitHub。
 - 前端本地数据：浏览器使用 `localStorage` 保存错题、成就和设置；登录会话只保存在当前浏览器会话的 `sessionStorage`。
-- 本地后端环境变量：支持 `VOCAB_APP_TOKEN`、`OLLAMA_HOST`、`OLLAMA_MODEL`、`OLLAMA_TIMEOUT_SEC`、`VOCAB_MAX_JSON_BYTES`、`VOCAB_HOST`、`VOCAB_PORT`、`VOCAB_SESSION_TTL_SEC`、`VOCAB_SESSION_MAX_ITEMS`、`VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`。
+- 本地后端环境变量：支持 `VOCAB_APP_TOKEN`、`OLLAMA_HOST`、`OLLAMA_MODEL`、`OLLAMA_TIMEOUT_SEC`、`VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`、`VOCAB_HOST`、`VOCAB_PORT`、`VOCAB_SESSION_TTL_SEC`、`VOCAB_SESSION_MAX_ITEMS`、`VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`。
 - Pages 环境变量：线上只需要 `LOCAL_API_BASE` 指向本地 Tunnel 地址。
 
 ## 部署步骤

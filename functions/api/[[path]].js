@@ -15,6 +15,7 @@ const HOP_BY_HOP_HEADERS = new Set([
 const NO_BODY_METHODS = new Set(["GET", "HEAD"]);
 const RETRYABLE_STATUS = new Set([502, 503, 504, 530]);
 const MAX_PROXY_BODY_BYTES = 600 * 1024;
+const IDEMPOTENT_RETRY_DELAYS_MS = [0, 120, 360];
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -95,6 +96,10 @@ function responseHeadersFor(response) {
   return headers;
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 export async function onRequest(context) {
   const { env, request } = context;
 
@@ -125,9 +130,12 @@ export async function onRequest(context) {
     return json({ ok: false, error: "Request body is too large." }, 413);
   }
   let lastError = "";
+  const retryDelays = NO_BODY_METHODS.has(request.method.toUpperCase()) ? IDEMPOTENT_RETRY_DELAYS_MS : [0];
+  const attempts = bases.flatMap((base) => retryDelays.map((delay) => ({ base, delay })));
 
-  for (let index = 0; index < bases.length; index += 1) {
-    const base = bases[index];
+  for (let index = 0; index < attempts.length; index += 1) {
+    const { base, delay } = attempts[index];
+    if (delay) await sleep(delay);
     const target = targetUrlFor(request, base);
     const init = {
       method: request.method,
@@ -139,8 +147,9 @@ export async function onRequest(context) {
 
     try {
       const response = await fetch(target.toString(), init);
-      if (index < bases.length - 1 && RETRYABLE_STATUS.has(response.status)) {
+      if (index < attempts.length - 1 && RETRYABLE_STATUS.has(response.status)) {
         lastError = `Backend ${base} returned ${response.status}`;
+        if (response.body) await response.body.cancel().catch(() => {});
         continue;
       }
       return new Response(response.body, {
