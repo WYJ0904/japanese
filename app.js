@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-10-1200";
+const APP_VERSION = "2026-07-10-2230";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const API_TIMEOUT_MS = 100000;
@@ -480,7 +480,7 @@ function scheduleNext(delayMs) {
 }
 
 function isDictationMode() {
-  return state.practiceMode === "dictation";
+  return state.mode === "normal" && state.practiceMode === "dictation";
 }
 
 function speechLang() {
@@ -683,7 +683,7 @@ function showWord() {
   $("progressLabel").textContent = `${state.index + 1}/${state.words.length}`;
   $("scoreLabel").textContent = `得分 ${state.score}`;
   $("quizLanguageLabel").textContent = quizLanguageLabel(state.quizLanguage);
-  $("practiceModeLabel").textContent = practiceModeLabel(state.practiceMode);
+  $("practiceModeLabel").textContent = state.mode.startsWith("review-") ? "错题复习" : practiceModeLabel(state.practiceMode);
   $("answerInput").value = "";
   $("answerInput").placeholder = dictation ? "输入听到的单词" : "中文意思";
   $("speakBtn").classList.toggle("hidden", !dictation);

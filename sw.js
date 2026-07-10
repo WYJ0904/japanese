@@ -1,10 +1,10 @@
-const CACHE = "vocab-shell-20260710-1200";
+const CACHE = "vocab-shell-20260710-2230";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260710-1200",
-  "/app.js?v=20260710-1200",
-  "/manifest.webmanifest?v=20260710-1200",
+  "/styles.css?v=20260710-2230",
+  "/app.js?v=20260710-2230",
+  "/manifest.webmanifest?v=20260710-2230",
   "/icon-192.png",
   "/icon-512.png",
 ];
