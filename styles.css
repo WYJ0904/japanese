@@ -292,6 +292,11 @@ h1 {
   margin-bottom: 18px;
 }
 
+#offlineReviewBtn {
+  width: 100%;
+  margin-top: 12px;
+}
+
 .login-form {
   display: flex;
   gap: 10px;
@@ -391,6 +396,11 @@ textarea {
 
 .action-row.compact {
   margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.action-row.compact button {
+  flex: 1 1 100px;
 }
 
 .secondary-row button {

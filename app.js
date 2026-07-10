@@ -1,6 +1,14 @@
-const APP_VERSION = "2026-07-06-0830";
+const APP_VERSION = "2026-07-10-1200";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
+const API_TIMEOUT_MS = 100000;
+const STATUS_TIMEOUT_MS = 8000;
+const PDF_TIMEOUT_MS = 120000;
+const MAX_WRONG_BOOK_ITEMS = 250;
+const MAX_ACCEPTED_ANSWERS = 14;
+const MAX_RUBRIC_CACHE_ITEMS = 500;
+const WRONG_BOOK_EXPORT_TYPE = "vocab-wrong-book";
+const WRONG_BOOK_EXPORT_VERSION = 1;
 const DEFAULT_PROFILE = "我";
 const LANGUAGE_LABELS = {
   english: "英语",
@@ -27,10 +35,16 @@ const $ = (id) => document.getElementById(id);
 
 let resultHideTimer = null;
 let nextTimer = null;
+let judgeController = null;
 let backendAvailable = false;
+let aiAvailable = false;
 let pendingScreen = "auth";
 let pendingAuthMessage = "";
 const BACKEND_OFFLINE_MESSAGE = "未连接本地后端，请先运行本地服务并配置 Cloudflare Pages 的 LOCAL_API_BASE。";
+
+const restoredSession = sessionStorage.getItem("vocabSession") || localStorage.getItem("vocabSession") || "";
+if (restoredSession) sessionStorage.setItem("vocabSession", restoredSession);
+localStorage.removeItem("vocabSession");
 
 function loadJson(key, fallback) {
   try {
@@ -38,6 +52,67 @@ function loadJson(key, fallback) {
   } catch (_) {
     return fallback;
   }
+}
+
+function limitText(value, maxLength = 500) {
+  return String(value || "").trim().slice(0, maxLength);
+}
+
+function sanitizeAccepted(values) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  const result = [];
+  values.slice(0, MAX_ACCEPTED_ANSWERS).forEach((item) => {
+    const value = limitText(item);
+    const key = normalizeMeaning(value);
+    if (value && key && !seen.has(key)) {
+      seen.add(key);
+      result.push(value);
+    }
+  });
+  return result;
+}
+
+function sanitizeWrongBook(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const cleaned = {};
+  Object.entries(value)
+    .slice(0, MAX_WRONG_BOOK_ITEMS)
+    .forEach(([word, info]) => {
+      if (!info || typeof info !== "object" || Array.isArray(info)) return;
+      const key = limitText(word, 240);
+      if (!key) return;
+      const count = Number.parseInt(info.wrong_count, 10);
+      cleaned[key] = {
+        wrong_count: Number.isFinite(count) ? Math.max(0, Math.min(9999, count)) : 0,
+        last_answer: limitText(info.last_answer),
+        correct_answer: limitText(info.correct_answer),
+        accepted: sanitizeAccepted(info.accepted),
+        skipped: Boolean(info.skipped),
+        last_time: limitText(info.last_time, 80),
+      };
+    });
+  return cleaned;
+}
+
+function mergeWrongBooks(current, incoming) {
+  const merged = { ...sanitizeWrongBook(current) };
+  Object.entries(sanitizeWrongBook(incoming)).forEach(([word, info]) => {
+    const previous = merged[word] || {};
+    merged[word] = {
+      ...previous,
+      ...info,
+      wrong_count: Math.max(previous.wrong_count || 0, info.wrong_count || 0),
+      correct_answer: info.correct_answer || previous.correct_answer || "",
+      accepted: info.accepted.length ? info.accepted : previous.accepted || [],
+    };
+  });
+  return sanitizeWrongBook(merged);
+}
+
+function trimRubricCache(cache) {
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) return {};
+  return Object.fromEntries(Object.entries(cache).slice(-MAX_RUBRIC_CACHE_ITEMS));
 }
 
 function sanitizeProfile(value) {
@@ -80,7 +155,7 @@ function filterWordsByLanguage(words, language) {
 }
 
 const state = {
-  session: localStorage.getItem("vocabSession") || "",
+  session: restoredSession,
   profile: sanitizeProfile(localStorage.getItem("vocabProfile") || DEFAULT_PROFILE),
   gradingMode: localStorage.getItem("gradingMode") || "normal",
   practiceMode: normalizePracticeMode(localStorage.getItem("practiceMode")),
@@ -116,8 +191,8 @@ function migrateLegacyWrongBook() {
 }
 
 function loadWrongBooks() {
-  state.currentWrongBook = loadJson(wrongBookKey("current"), {});
-  state.historyWrongBook = loadJson(wrongBookKey("history"), {});
+  state.currentWrongBook = sanitizeWrongBook(loadJson(wrongBookKey("current"), {}));
+  state.historyWrongBook = sanitizeWrongBook(loadJson(wrongBookKey("history"), {}));
   migrateLegacyWrongBook();
 }
 
@@ -140,6 +215,7 @@ function saveState() {
   localStorage.setItem("gradingMode", state.gradingMode);
   localStorage.setItem("practiceMode", state.practiceMode);
   localStorage.setItem("quizLanguage", state.quizLanguage);
+  state.rubricCache = trimRubricCache(state.rubricCache);
   localStorage.setItem("rubricCache", JSON.stringify(state.rubricCache));
   saveWrongBooks();
   saveAchievements();
@@ -149,6 +225,10 @@ function activeWrongBook(scope = state.wrongScope) {
   return scope === "history" ? state.historyWrongBook : state.currentWrongBook;
 }
 
+function hasLocalReviewData() {
+  return Object.keys(state.currentWrongBook).length > 0 || Object.keys(state.historyWrongBook).length > 0;
+}
+
 function setActiveWrongBook(scope, book) {
   if (scope === "history") state.historyWrongBook = book;
   else state.currentWrongBook = book;
@@ -156,6 +236,7 @@ function setActiveWrongBook(scope, book) {
 
 function clearSession() {
   state.session = "";
+  sessionStorage.removeItem("vocabSession");
   localStorage.removeItem("vocabSession");
 }
 
@@ -182,6 +263,7 @@ function showAuth(message = "") {
   $("authPanel").classList.remove("hidden");
   $("workspace").classList.add("hidden");
   $("loginError").textContent = message;
+  $("offlineReviewBtn").classList.toggle("hidden", !hasLocalReviewData());
 }
 
 function showWorkspace() {
@@ -193,7 +275,9 @@ function showWorkspace() {
   showMainShell();
   $("authPanel").classList.add("hidden");
   $("workspace").classList.remove("hidden");
-  $("statusDot").classList.add("online");
+  $("statusDot").classList.toggle("online", backendAvailable && aiAvailable);
+  if (!backendAvailable) $("modelLabel").textContent = "本地复习";
+  else if (!aiAvailable) $("modelLabel").textContent = "AI 未启动";
 }
 
 function updateLanguageUi() {
@@ -280,16 +364,44 @@ function renderAchievements() {
   });
 }
 
-async function api(path, body = {}) {
-  const response = await fetch(path, {
-    method: "POST",
-    cache: "no-store",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Session-Token": state.session,
+async function fetchWithTimeout(url, options = {}, timeoutMs = API_TIMEOUT_MS) {
+  const { controller: suppliedController, ...requestOptions } = options;
+  const controller = suppliedController || new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, { ...requestOptions, signal: controller.signal });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const wrapped = new Error(timedOut ? "请求超时，请稍后重试" : "请求已取消");
+      wrapped.name = "AbortError";
+      throw wrapped;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function api(path, body = {}, options = {}) {
+  const response = await fetchWithTimeout(
+    path,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Session-Token": state.session,
+      },
+      body: JSON.stringify(body),
+      controller: options.controller,
     },
-    body: JSON.stringify(body),
-  });
+    options.timeoutMs || API_TIMEOUT_MS,
+  );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401) {
@@ -395,6 +507,109 @@ function dictationCorrect(word, answer) {
   return normalizeDictationAnswer(word) === normalizeDictationAnswer(answer);
 }
 
+function normalizeMeaning(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[，。！？、；：,.!?;:（）()\[\]{}<>《》"“”‘’·•/\\|]/g, "");
+}
+
+function splitMeanings(value) {
+  return String(value || "")
+    .split(/[\/、，,；;：:|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function semanticMeaningForms(value) {
+  const forms = new Set([normalizeMeaning(value)]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    [...forms].forEach((form) => {
+      const additions = [];
+      if (form.length > 1 && "的地得".includes(form.at(-1))) additions.push(form.slice(0, -1));
+      if (form.length >= 3 && form.startsWith("有")) additions.push(form.slice(1));
+      if (form.length >= 3 && form.endsWith("性")) additions.push(form.slice(0, -1));
+      additions.forEach((item) => {
+        if (item && !forms.has(item)) {
+          forms.add(item);
+          changed = true;
+        }
+      });
+    });
+  }
+  forms.delete("");
+  return forms;
+}
+
+function meaningBigrams(value) {
+  const normalized = normalizeMeaning(value);
+  if (normalized.length < 2) return normalized ? new Set([normalized]) : new Set();
+  return new Set(Array.from({ length: normalized.length - 1 }, (_, index) => normalized.slice(index, index + 2)));
+}
+
+function meaningSimilarity(left, right) {
+  const a = meaningBigrams(left);
+  const b = meaningBigrams(right);
+  if (!a.size || !b.size) return 0;
+  const intersection = [...a].filter((item) => b.has(item)).length;
+  return intersection / new Set([...a, ...b]).size;
+}
+
+function reviewEntryForWord(word) {
+  if (state.mode === "review-current") return state.currentWrongBook[word];
+  if (state.mode === "review-history") return state.historyWrongBook[word];
+  return null;
+}
+
+function rubricCacheKey(word) {
+  return `${APP_VERSION}:${state.quizLanguage}:${String(word || "").trim()}`;
+}
+
+function cachedRubric(word) {
+  return state.rubricCache[rubricCacheKey(word)] || state.rubricCache[word] || null;
+}
+
+function hasUsableMeaning(info) {
+  const answer = limitText(info && info.correct_answer);
+  return Boolean(answer && !answer.startsWith("跳过：") && answer !== "（未给出释义）");
+}
+
+function localReviewResult(word, answer, info) {
+  const gloss = limitText(info && info.correct_answer) || "（未给出释义）";
+  const accepted = sanitizeAccepted(info && info.accepted);
+  const pool = [...new Set([gloss, ...accepted].flatMap(splitMeanings))];
+  const student = normalizeMeaning(answer);
+  let correct = false;
+
+  if (student) {
+    const studentForms = semanticMeaningForms(student);
+    correct = pool.some((item) => {
+      const expected = normalizeMeaning(item);
+      if (!expected) return false;
+      const expectedForms = semanticMeaningForms(expected);
+      if ([...studentForms].some((form) => expectedForms.has(form))) return true;
+      if (state.gradingMode === "strict") return false;
+      if (student.length >= 3 && expected.length >= 3 && (student.includes(expected) || expected.includes(student))) return true;
+      return Math.min(student.length, expected.length) >= 3 && meaningSimilarity(student, expected) >= 0.67;
+    });
+  }
+
+  return {
+    correct,
+    gloss,
+    accepted,
+    rubric: { language: quizLanguageLabel(state.quizLanguage), gloss, accepted, notes: "本地错题复习" },
+    kind: "local-review",
+    ai_review: false,
+    grading_mode: state.gradingMode,
+    word,
+    answer,
+  };
+}
+
 function parseWords() {
   return $("wordInput")
     .value.split(/[\s,，、;；]+/)
@@ -414,6 +629,17 @@ function shuffle(items) {
 function startQuiz(words, mode = "normal") {
   const language = ensureQuizLanguage();
   if (!language) return;
+
+  if (mode === "normal" && state.practiceMode === "meaning" && (!backendAvailable || !aiAvailable || !state.session)) {
+    if (backendAvailable && !aiAvailable) {
+      alert("本地后端在线，但 Ollama 尚未启动。请重新运行桌面启动程序；错题复习仍可本地进行。");
+    } else if (backendAvailable) {
+      showAuth("首次在线判卷需要登录本地 AI；错题复习仍可离线进行。");
+    } else {
+      alert("当前离线：可以进行听写或错题复习；首次释义判卷需要本地 AI 在线。");
+    }
+    return;
+  }
 
   const uniqueWords = [...new Set(words.map((word) => String(word).trim()).filter(Boolean))];
   if (!uniqueWords.length) return;
@@ -549,7 +775,8 @@ function skipWord() {
 
   const word = state.words[state.index];
   if (!word) return;
-  markWrong(word, SKIPPED_ANSWER, "跳过：未作答", []);
+  const rubric = cachedRubric(word);
+  markWrong(word, SKIPPED_ANSWER, rubric && rubric.gloss ? rubric.gloss : "跳过：未作答", rubric && rubric.accepted ? rubric.accepted : []);
   renderSkipResult();
   updateStats();
   scheduleNext(900);
@@ -586,6 +813,59 @@ async function submitAnswer(event) {
     return;
   }
 
+  if (state.mode === "review-current" || state.mode === "review-history") {
+    setBusy(true);
+    clearNextTimer();
+    hideResultPanel();
+    setNextNowEnabled(false);
+
+    try {
+      let info = reviewEntryForWord(word);
+      if (!info) throw new Error("错题记录不存在，请重新进入错题复习");
+
+      if (!hasUsableMeaning(info) && backendAvailable && aiAvailable && state.session) {
+        $("resultPanel").classList.remove("hidden");
+        $("resultTitle").className = "result-title";
+        $("resultTitle").textContent = "首次准备释义";
+        $("resultGloss").textContent = "正在调用本地 AI，保存后续离线复习所需的标准答案";
+        const data = await api("/api/rubric", { word });
+        const rubric = data.rubric || {};
+        info.correct_answer = limitText(rubric.gloss) || info.correct_answer;
+        info.accepted = sanitizeAccepted(rubric.accepted);
+        state.rubricCache[rubricCacheKey(word)] = rubric;
+        saveState();
+      }
+
+      info = reviewEntryForWord(word);
+      if (!hasUsableMeaning(info)) {
+        throw new Error("这条旧错题没有保存标准释义；请连接本地 AI 后再复习一次。");
+      }
+
+      const result = localReviewResult(word, answer, info);
+      if (result.correct) {
+        state.score += 1;
+        removeReviewedWord(word);
+        unlockAchievement("firstCorrect");
+      } else {
+        markWrong(word, answer || EMPTY_ANSWER, result.gloss, result.accepted);
+      }
+      saveState();
+      renderResult(result);
+      updateStats();
+      scheduleNext(NORMAL_RESULT_VISIBLE_MS);
+    } catch (error) {
+      $("resultPanel").classList.remove("grading", "ai-review", "hidden");
+      $("resultTitle").className = "result-title bad";
+      $("resultTitle").textContent = "本地复习暂不可用";
+      $("resultGloss").textContent = error.message;
+      scheduleResultHide();
+    } finally {
+      setBusy(false);
+      if (nextTimer) setNextNowEnabled(true);
+    }
+    return;
+  }
+
   setBusy(true);
   clearNextTimer();
   hideResultPanel();
@@ -596,16 +876,18 @@ async function submitAnswer(event) {
   $("resultTitle").textContent = "判卷中";
   $("resultGloss").textContent = "";
   $("acceptedChips").innerHTML = "";
+  judgeController = new AbortController();
+  $("cancelJudgeBtn").classList.remove("hidden");
 
   try {
     const result = await api("/api/judge", {
       word,
       answer,
-      rubric: state.rubricCache[word],
+      rubric: cachedRubric(word),
       mode: state.gradingMode,
       language: state.quizLanguage,
-    });
-    if (result.rubric) state.rubricCache[word] = result.rubric;
+    }, { controller: judgeController, timeoutMs: API_TIMEOUT_MS });
+    if (result.rubric) state.rubricCache[rubricCacheKey(word)] = result.rubric;
 
     if (result.correct) {
       state.score += 1;
@@ -626,6 +908,8 @@ async function submitAnswer(event) {
     $("resultGloss").textContent = error.message;
     scheduleResultHide();
   } finally {
+    judgeController = null;
+    $("cancelJudgeBtn").classList.add("hidden");
     setBusy(false);
     if (nextTimer) setNextNowEnabled(true);
   }
@@ -692,26 +976,30 @@ async function exportWrongBook(scope = "current") {
   }
 
   try {
-    const response = await fetch("/api/export-pdf", {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Session-Token": state.session,
-      },
-      body: JSON.stringify({
-        wrongBook: book,
-        title: scope === "history" ? "外语词测历史错题本" : "外语词测本轮错题本",
-        meta: {
-          profile: state.profile,
-          scope: scope === "history" ? "历史错题" : "本轮错题",
-          grading_mode: state.gradingMode,
-          language: state.quizLanguage,
-          practice_mode: state.practiceMode,
-          achievement_count: ACHIEVEMENTS.filter((item) => state.achievements[item.id]).length,
+    const response = await fetchWithTimeout(
+      "/api/export-pdf",
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Session-Token": state.session,
         },
-      }),
-    });
+        body: JSON.stringify({
+          wrongBook: book,
+          title: scope === "history" ? "外语词测历史错题本" : "外语词测本轮错题本",
+          meta: {
+            profile: state.profile,
+            scope: scope === "history" ? "历史错题" : "本轮错题",
+            grading_mode: state.gradingMode,
+            language: state.quizLanguage,
+            practice_mode: state.practiceMode,
+            achievement_count: ACHIEVEMENTS.filter((item) => state.achievements[item.id]).length,
+          },
+        }),
+      },
+      PDF_TIMEOUT_MS,
+    );
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
@@ -724,12 +1012,15 @@ async function exportWrongBook(scope = "current") {
     }
 
     const blob = await response.blob();
+    const contentType = response.headers.get("Content-Type") || "";
+    const signature = await blob.slice(0, 4).text();
+    if (!contentType.includes("application/pdf") || signature !== "%PDF") throw new Error("服务器没有返回有效 PDF");
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
     link.download = `wrong-book-${scope}-${Date.now()}.pdf`;
     link.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     unlockAchievement("firstPdf");
   } catch (error) {
     alert(`导出失败：${error.message || "请检查本地后端连接"}`);
@@ -741,14 +1032,78 @@ async function exportWrongBook(scope = "current") {
   }
 }
 
-function downloadText(filename, text) {
-  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+function exportWrongData() {
+  const payload = {
+    type: WRONG_BOOK_EXPORT_TYPE,
+    version: WRONG_BOOK_EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    profile: state.profile,
+    language: state.quizLanguage,
+    currentWrongBook: sanitizeWrongBook(state.currentWrongBook),
+    historyWrongBook: sanitizeWrongBook(state.historyWrongBook),
+  };
+  const safeProfile = state.profile.replace(/[\\/:*?"<>|]+/g, "-") || "default";
+  downloadText(`wrong-book-${safeProfile}-${Date.now()}.json`, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+}
+
+function importedWrongBooks(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("错题数据格式不正确");
+  }
+
+  if (payload.type === WRONG_BOOK_EXPORT_TYPE) {
+    if (Number(payload.version) > WRONG_BOOK_EXPORT_VERSION) throw new Error("错题数据版本过新，请先更新网站");
+    return {
+      current: sanitizeWrongBook(payload.currentWrongBook),
+      history: sanitizeWrongBook(payload.historyWrongBook),
+      language: normalizeQuizLanguage(payload.language),
+    };
+  }
+
+  if (payload.wrongBook && typeof payload.wrongBook === "object") {
+    const book = sanitizeWrongBook(payload.wrongBook);
+    return {
+      current: payload.scope === "current" ? book : {},
+      history: book,
+      language: normalizeQuizLanguage(payload.language),
+    };
+  }
+
+  return { current: {}, history: sanitizeWrongBook(payload), language: "" };
+}
+
+async function importWrongData(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  try {
+    if (file.size > 1024 * 1024) throw new Error("错题数据文件不能超过 1 MB");
+    const payload = JSON.parse(await file.text());
+    const imported = importedWrongBooks(payload);
+    state.currentWrongBook = mergeWrongBooks(state.currentWrongBook, imported.current);
+    state.historyWrongBook = mergeWrongBooks(state.historyWrongBook, imported.history);
+    if (!state.quizLanguage && imported.language) state.quizLanguage = imported.language;
+    saveState();
+    updateLanguageUi();
+    updateStats();
+    renderWrongBook();
+    $("offlineReviewBtn").classList.toggle("hidden", !hasLocalReviewData());
+    alert(`错题数据导入完成：历史错题 ${Object.keys(state.historyWrongBook).length} 个。可以直接进入本地复习。`);
+  } catch (error) {
+    alert(`错题数据导入失败：${error.message}`);
+  } finally {
+    event.target.value = "";
+  }
+}
+
+function downloadText(filename, text, type = "text/plain;charset=utf-8") {
+  const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
   link.click();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function exportWords() {
@@ -812,7 +1167,7 @@ async function login(event) {
   try {
     const data = await api("/api/login", { token: $("tokenInput").value.trim() });
     state.session = data.session;
-    localStorage.setItem("vocabSession", state.session);
+    sessionStorage.setItem("vocabSession", state.session);
     $("modelLabel").textContent = data.model || "qwen3:8b";
     showWorkspace();
     updateStats();
@@ -834,6 +1189,11 @@ async function boot() {
   updatePracticeUi();
 
   $("loginForm").addEventListener("submit", login);
+  $("offlineReviewBtn").addEventListener("click", () => {
+    pendingScreen = "workspace";
+    showWorkspace();
+    setView("wrongView");
+  });
   $("answerForm").addEventListener("submit", submitAnswer);
   $("startBtn").addEventListener("click", () => startQuiz(parseWords()));
   $("shuffleBtn").addEventListener("click", () => {
@@ -850,11 +1210,17 @@ async function boot() {
   $("speakBtn").addEventListener("click", speakCurrentWord);
   $("skipBtn").addEventListener("click", skipWord);
   $("nextNowBtn").addEventListener("click", nextWord);
+  $("cancelJudgeBtn").addEventListener("click", () => {
+    if (judgeController) judgeController.abort();
+  });
   $("backBtn").addEventListener("click", () => setView("setupView"));
   $("reviewBtn").addEventListener("click", () => startWrongReview("current"));
   $("reviewHistoryBtn").addEventListener("click", () => startWrongReview("history"));
   $("exportBtn").addEventListener("click", () => exportWrongBook("current"));
   $("exportHistoryBtn").addEventListener("click", () => exportWrongBook("history"));
+  $("exportWrongDataBtn").addEventListener("click", exportWrongData);
+  $("importWrongDataBtn").addEventListener("click", () => $("wrongDataFileInput").click());
+  $("wrongDataFileInput").addEventListener("change", importWrongData);
   $("clearWrongBtn").addEventListener("click", () => {
     state.currentWrongBook = {};
     saveState();
@@ -881,27 +1247,39 @@ async function boot() {
   document.querySelectorAll(".tabs button").forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.view)));
 
   try {
-    const response = await fetch("/api/status", { cache: "no-store" });
+    const response = await fetchWithTimeout("/api/status", { cache: "no-store" }, STATUS_TIMEOUT_MS);
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "backend unavailable");
     $("modelLabel").textContent = data.model || "qwen3:8b";
-    $("statusDot").classList.add("online");
     backendAvailable = true;
+    aiAvailable = data.ai_ready !== false;
+    $("statusDot").classList.toggle("online", aiAvailable);
   } catch (_) {
     $("statusDot").classList.remove("online");
     backendAvailable = false;
+    aiAvailable = false;
   }
 
   if (state.session) {
     try {
+      if (!backendAvailable) throw new Error("backend unavailable");
       const data = await api("/api/health");
       $("modelLabel").textContent = data.model || "qwen3:8b";
+      aiAvailable = data.ai_ready !== false;
       showWorkspace();
     } catch (_) {
-      showAuth(backendAvailable ? "登录已失效，请重新输入口令" : BACKEND_OFFLINE_MESSAGE);
+      if (backendAvailable) showAuth("登录已失效，请重新输入口令");
+      else {
+        pendingScreen = "workspace";
+        showWorkspace();
+      }
     }
   } else {
-    showAuth(backendAvailable ? "" : BACKEND_OFFLINE_MESSAGE);
+    if (backendAvailable) showAuth("");
+    else {
+      pendingScreen = "workspace";
+      showWorkspace();
+    }
   }
   saveState();
   updateStats();
@@ -909,10 +1287,7 @@ async function boot() {
   renderAchievements();
 
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.getRegistrations().then((items) => items.forEach((item) => item.unregister())).catch(() => {});
-  }
-  if ("caches" in window) {
-    caches.keys().then((keys) => keys.forEach((key) => caches.delete(key))).catch(() => {});
+    navigator.serviceWorker.register(`/sw.js?v=${APP_VERSION}`).catch(() => {});
   }
 }
 

@@ -13,8 +13,8 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 const NO_BODY_METHODS = new Set(["GET", "HEAD"]);
-const FALLBACK_API_BASE = "https://sean-chris-influence-discipline.trycloudflare.com";
 const RETRYABLE_STATUS = new Set([502, 503, 504, 530]);
+const MAX_PROXY_BODY_BYTES = 600 * 1024;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -68,7 +68,7 @@ function uniqueBases(items) {
 function configuredBases(env) {
   const rawBases = [
     env.LOCAL_API_BASE || env.VOCAB_LOCAL_API_BASE,
-    env.LOCAL_API_FALLBACK || env.VOCAB_LOCAL_API_FALLBACK || FALLBACK_API_BASE,
+    env.LOCAL_API_FALLBACK || env.VOCAB_LOCAL_API_FALLBACK,
   ].filter(Boolean);
   return uniqueBases(rawBases.map((base) => normalizeBase(base)));
 }
@@ -115,7 +115,15 @@ export async function onRequest(context) {
     );
   }
 
+  const declaredLength = Number(request.headers.get("Content-Length") || 0);
+  if (declaredLength > MAX_PROXY_BODY_BYTES) {
+    return json({ ok: false, error: "Request body is too large." }, 413);
+  }
+
   const body = NO_BODY_METHODS.has(request.method.toUpperCase()) ? undefined : await request.arrayBuffer();
+  if (body && body.byteLength > MAX_PROXY_BODY_BYTES) {
+    return json({ ok: false, error: "Request body is too large." }, 413);
+  }
   let lastError = "";
 
   for (let index = 0; index < bases.length; index += 1) {

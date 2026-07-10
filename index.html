@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#203a43" />
     <title>外语词测</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260706-0830" />
-    <link rel="stylesheet" href="/styles.css?v=20260706-0830" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260710-1200" />
+    <link rel="stylesheet" href="/styles.css?v=20260710-1200" />
   </head>
   <body>
     <div class="entry-screen" aria-hidden="true">
@@ -21,7 +21,7 @@
           <img class="brand-icon" src="/icon-192.png" alt="" />
           <div>
             <h1>外语词测</h1>
-            <p id="modelLabel">qwen3:8b</p>
+            <p id="modelLabel" aria-live="polite">qwen3:8b</p>
           </div>
         </div>
         <div class="status" id="statusDot" title="服务状态">
@@ -43,7 +43,8 @@
           <input id="tokenInput" type="password" autocomplete="current-password" placeholder="输入口令" />
           <button type="submit">进入</button>
         </form>
-        <p class="error" id="loginError"></p>
+        <button class="hidden" id="offlineReviewBtn" type="button">进入本地复习</button>
+        <p class="error" id="loginError" aria-live="polite"></p>
       </section>
 
       <section class="workspace hidden" id="workspace">
@@ -122,10 +123,11 @@
               <button id="speakBtn" class="hidden" type="button">播放</button>
               <button id="skipBtn" type="button">跳过</button>
               <button id="nextNowBtn" type="button" disabled>下一题</button>
+              <button id="cancelJudgeBtn" class="hidden" type="button">取消判卷</button>
               <button id="backBtn" type="button">词表</button>
             </div>
           </div>
-          <div class="result-panel hidden" id="resultPanel">
+          <div class="result-panel hidden" id="resultPanel" aria-live="polite">
             <div class="result-title" id="resultTitle"></div>
             <div class="result-gloss" id="resultGloss"></div>
             <div class="chips" id="acceptedChips"></div>
@@ -147,6 +149,11 @@
               <button id="exportBtn">导出本轮 PDF</button>
               <button id="exportHistoryBtn">导出历史 PDF</button>
             </div>
+            <div class="action-row secondary-row">
+              <button id="exportWrongDataBtn">导出错题数据</button>
+              <button id="importWrongDataBtn">导入错题数据</button>
+            </div>
+            <input id="wrongDataFileInput" class="hidden" type="file" accept=".json,application/json" />
             <div class="action-row secondary-row">
               <button id="clearWrongBtn">清空本轮</button>
               <button id="clearHistoryBtn">清空历史</button>
@@ -177,6 +184,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260706-0830"></script>
+    <script src="/app.js?v=20260710-1200"></script>
   </body>
 </html>
