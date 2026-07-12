@@ -1,4 +1,5 @@
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -32,6 +33,52 @@ def parse_time(value):
         return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def membership_time_value(value, end_of_day=False, now=None):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    local_now = (now or datetime.now().astimezone()).astimezone()
+    normalized = re.sub(r"[\u5e74\u6708\u65e5./\u3002\-]+", " ", text)
+    date_parts = normalized.split()
+    if len(date_parts) == 3 and all(part.isdigit() for part in date_parts):
+        try:
+            year, month, day = (int(part) for part in date_parts)
+            if end_of_day:
+                local_value = datetime(year, month, day, 23, 59, 59, tzinfo=local_now.tzinfo)
+            else:
+                local_value = datetime(
+                    year,
+                    month,
+                    day,
+                    local_now.hour,
+                    local_now.minute,
+                    local_now.second,
+                    tzinfo=local_now.tzinfo,
+                )
+            return local_value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            return ""
+    parsed = parse_time(text)
+    if not parsed:
+        return ""
+    return parsed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def default_membership_expiry(now=None):
+    local_now = (now or datetime.now().astimezone()).astimezone()
+    expiry_date = (local_now + timedelta(days=30)).date()
+    local_expiry = datetime(
+        expiry_date.year,
+        expiry_date.month,
+        expiry_date.day,
+        23,
+        59,
+        59,
+        tzinfo=local_now.tzinfo,
+    )
+    return local_expiry.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class AccountError(Exception):
@@ -461,23 +508,26 @@ class AccountStore:
         membership = str(membership or "free")
         if membership not in MEMBERSHIPS:
             raise AccountError("会员等级无效", 400, "membership_invalid")
-        now = utc_now()
-        start_value = str(start or "").strip()
-        expires_value = str(expires or "").strip()
+        raw_start = str(start or "").strip()
+        raw_expires = str(expires or "").strip()
+        start_value = membership_time_value(raw_start) if raw_start else ""
+        expires_value = membership_time_value(raw_expires, end_of_day=True) if raw_expires else ""
         language_value = str(trial_language or "").strip().lower()
         if membership == "free":
             start_value = expires_value = language_value = ""
         elif membership == "lifetime":
+            if raw_start and not start_value:
+                raise AccountError("会员开始日期格式无效，请使用年/月/日", 400, "membership_start_invalid")
             start_value = start_value or iso_now()
             expires_value = ""
             language_value = ""
         else:
+            if raw_start and not start_value:
+                raise AccountError("会员开始日期格式无效，请使用年/月/日", 400, "membership_start_invalid")
+            if raw_expires and not expires_value:
+                raise AccountError("会员截止日期格式无效，请使用年/月/日", 400, "membership_expires_invalid")
             start_value = start_value or iso_now()
-            if not parse_time(start_value):
-                raise AccountError("会员开始时间格式无效", 400, "membership_start_invalid")
-            expires_value = expires_value or (now + timedelta(days=30)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-            if not parse_time(expires_value):
-                raise AccountError("会员到期时间格式无效", 400, "membership_expires_invalid")
+            expires_value = expires_value or default_membership_expiry()
             if membership == "trial_single_language":
                 if language_value not in LANGUAGES:
                     raise AccountError("体验版必须选择英语或日语", 400, "trial_language_invalid")

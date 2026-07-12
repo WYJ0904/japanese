@@ -1,8 +1,9 @@
-const APP_VERSION = "2026-07-12-accounts4";
+const APP_VERSION = "2026-07-13-accounts6";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const API_TIMEOUT_MS = 100000;
 const STATUS_TIMEOUT_MS = 8000;
+const STATUS_RETRY_DELAYS_MS = [0, 800, 2000];
 const PDF_TIMEOUT_MS = 120000;
 const MAX_WRONG_BOOK_ITEMS = 250;
 const MAX_ACCEPTED_ANSWERS = 14;
@@ -46,11 +47,14 @@ let adminUsers = [];
 let confirmAction = null;
 let lastLimitPromptKey = "";
 let projectRuntimeNeedsRestore = false;
+let backendStatusPromise = null;
 const projectRuntime = {
   english: null,
   japanese: null,
 };
-const BACKEND_OFFLINE_MESSAGE = "未连接本地后端，请先运行本地服务并配置 Cloudflare Pages 的 LOCAL_API_BASE。";
+const BACKEND_CONFIG_MESSAGE = "服务器代理尚未配置，请设置 Cloudflare Pages 的 LOCAL_API_BASE。";
+const BACKEND_NETWORK_MESSAGE = "暂时无法连接服务器，请检查网络后重试；微信中可关闭页面再重新打开。";
+let backendFailureMessage = BACKEND_NETWORK_MESSAGE;
 
 const restoredSession = localStorage.getItem("wyjAccountSession") || sessionStorage.getItem("vocabSession") || "";
 if (restoredSession) localStorage.setItem("wyjAccountSession", restoredSession);
@@ -398,6 +402,8 @@ async function registerAccount(event) {
   $("loginError").textContent = "";
   button.disabled = true;
   try {
+    $("loginError").textContent = "正在连接服务器…";
+    if (!(await ensureBackendConnection())) throw new Error(backendFailureMessage);
     const username = $("registerUsernameInput").value.trim();
     const secret = $("registerSecretInput").value;
     const confirmSecret = $("registerConfirmInput").value;
@@ -415,11 +421,13 @@ async function registerAccount(event) {
 
 async function logoutAccount() {
   const session = state.session;
+  const account = state.account;
   try {
     if (session) await api("/api/logout");
   } catch (_) {
     // Local cleanup still signs the browser out when the network is unavailable.
   }
+  clearSavedWordDrafts(account);
   clearSession();
   pendingScreen = "auth";
   pendingAuthMessage = "已退出登录";
@@ -502,6 +510,7 @@ async function deleteOwnAccount(event) {
     await api("/api/account/delete", { secret: $("deleteSecretInput").value });
     closeModal("deleteAccountModal", true);
     closeModal("accountModal", true);
+    clearSavedWordDrafts(state.account);
     clearSession();
     showProjectPicker();
     alert("账户已永久注销");
@@ -608,6 +617,48 @@ function leaveAdminPanel() {
   showProjectPicker();
 }
 
+function localDateValue(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}/${month}/${day}`;
+}
+
+function membershipDateValue(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : localDateValue(parsed);
+}
+
+function updateAdminMembershipFields(fillDefaults = true) {
+  const membership = $("adminMembershipSelect").value;
+  const free = membership === "free";
+  const lifetime = membership === "lifetime";
+  const trial = membership === "trial_single_language";
+  $("adminTrialLanguageSelect").disabled = !trial;
+  $("adminTrialLanguageField").classList.toggle("field-disabled", !trial);
+  $("adminMembershipStart").disabled = free;
+  $("adminMembershipExpires").disabled = free || lifetime;
+  $("adminMembershipStartField").classList.toggle("field-disabled", free);
+  $("adminMembershipExpiresField").classList.toggle("field-disabled", free || lifetime);
+  if (free) {
+    $("adminMembershipStart").value = "";
+    $("adminMembershipExpires").value = "";
+    $("adminTrialLanguageSelect").value = "";
+    return;
+  }
+  if (fillDefaults && !$("adminMembershipStart").value) $("adminMembershipStart").value = localDateValue();
+  if (lifetime) {
+    $("adminMembershipExpires").value = "";
+    $("adminTrialLanguageSelect").value = "";
+  } else if (fillDefaults && !$("adminMembershipExpires").value) {
+    const expiry = new Date();
+    expiry.setDate(expiry.getDate() + 30);
+    $("adminMembershipExpires").value = localDateValue(expiry);
+  }
+  if (!trial) $("adminTrialLanguageSelect").value = "";
+}
+
 function openAdminEditor(userId) {
   const user = adminUserById(userId);
   if (!user || user.is_super_admin) return;
@@ -615,16 +666,20 @@ function openAdminEditor(userId) {
   $("adminEditTitle").textContent = `编辑 ${user.username}`;
   $("adminMembershipSelect").value = user.membership;
   $("adminTrialLanguageSelect").value = user.trial_language || "";
-  $("adminMembershipStart").value = user.membership_start || "";
-  $("adminMembershipExpires").value = user.membership_expires || "";
+  $("adminMembershipStart").value = membershipDateValue(user.membership_start);
+  $("adminMembershipExpires").value = membershipDateValue(user.membership_expires);
   $("adminNewSecretInput").value = "";
   $("adminToggleBanBtn").textContent = user.banned ? "解除封禁" : "永久封禁";
   $("adminEditMessage").textContent = "";
+  updateAdminMembershipFields(false);
   openModal("adminEditModal");
 }
 
 async function saveAdminMembership() {
   const userId = $("adminEditUserId").value;
+  const button = $("saveAdminMembershipBtn");
+  if (button.disabled) return;
+  button.disabled = true;
   try {
     await api("/api/admin/membership", {
       user_id: userId,
@@ -635,7 +690,11 @@ async function saveAdminMembership() {
     });
     $("adminEditMessage").textContent = "会员设置已保存并立即生效";
     await loadAdminData();
-  } catch (error) { $("adminEditMessage").textContent = error.message; }
+  } catch (error) {
+    $("adminEditMessage").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function saveAdminSecret() {
@@ -685,18 +744,39 @@ function adminUserAction(kind) {
 }
 
 function wordDraftKey(language = state.quizLanguage, profile = state.profile) {
-  return `vocabWords:${language}:${profileStorageName(profile)}`;
+  const accountId = encodeURIComponent(String(state.account?.id || "no-account"));
+  return `vocabWords:${accountId}:${language}:${profileStorageName(profile)}`;
+}
+
+function clearSavedWordDrafts(account = state.account) {
+  const accountId = account?.id ? encodeURIComponent(String(account.id)) : "";
+  const accountPrefix = accountId ? `vocabWords:${accountId}:` : "";
+  const keysToRemove = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index) || "";
+    const legacySharedKey = /^vocabWords:(english|japanese):/.test(key);
+    if (legacySharedKey || (accountPrefix && key.startsWith(accountPrefix))) keysToRemove.push(key);
+  }
+  keysToRemove.forEach((key) => localStorage.removeItem(key));
+  projectRuntime.english = null;
+  projectRuntime.japanese = null;
+  projectRuntimeNeedsRestore = false;
+  state.words = [];
+  state.index = 0;
+  state.score = 0;
+  state.quizSession = "";
+  if ($("wordInput")) $("wordInput").value = "";
 }
 
 function saveCurrentWordDraft() {
   const input = $("wordInput");
-  if (!input || !currentProject) return;
+  if (!input || !currentProject || !state.account) return;
   localStorage.setItem(wordDraftKey(currentProject), input.value);
 }
 
 function loadCurrentWordDraft() {
   const input = $("wordInput");
-  if (!input || !currentProject) return;
+  if (!input || !currentProject || !state.account) return;
   input.value = localStorage.getItem(wordDraftKey(currentProject)) || "";
 }
 
@@ -843,7 +923,7 @@ function enterProject(value) {
 function showAuth(message = "") {
   pendingScreen = "auth";
   pendingAuthMessage = message;
-  if (currentProject) {
+  if (currentProject && state.account) {
     saveCurrentWordDraft();
     saveProjectRuntime();
   }
@@ -981,21 +1061,91 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = API_TIMEOUT_MS) {
   }
 }
 
+function waitForDelay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function backendErrorMessage(error) {
+  const detail = String(error?.message || "");
+  if (detail.includes("LOCAL_API_BASE")) return BACKEND_CONFIG_MESSAGE;
+  if (navigator.onLine === false) return "设备当前没有网络连接，请联网后重试。";
+  return BACKEND_NETWORK_MESSAGE;
+}
+
+function applyBackendStatus(data) {
+  backendAvailable = true;
+  backendFailureMessage = "";
+  aiAvailable = data.ai_ready !== false;
+  $("modelLabel").textContent = data.model || "qwen3:8b";
+  $("statusDot").classList.toggle("online", aiAvailable);
+}
+
+async function requestBackendStatus() {
+  let lastError = new Error(BACKEND_NETWORK_MESSAGE);
+  for (const delay of STATUS_RETRY_DELAYS_MS) {
+    if (delay) await waitForDelay(delay);
+    try {
+      const response = await fetchWithTimeout("/api/status", { cache: "no-store" }, STATUS_TIMEOUT_MS);
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.ok) return data;
+      const error = new Error(data.error || `服务器返回 ${response.status}`);
+      if (error.message.includes("LOCAL_API_BASE")) throw error;
+      lastError = error;
+    } catch (error) {
+      lastError = error;
+      if (String(error?.message || "").includes("LOCAL_API_BASE")) break;
+    }
+  }
+  throw lastError;
+}
+
+function checkBackendStatus() {
+  if (!backendStatusPromise) {
+    backendStatusPromise = requestBackendStatus().finally(() => {
+      backendStatusPromise = null;
+    });
+  }
+  return backendStatusPromise;
+}
+
+async function ensureBackendConnection() {
+  if (backendAvailable) return true;
+  try {
+    applyBackendStatus(await checkBackendStatus());
+    return true;
+  } catch (error) {
+    backendAvailable = false;
+    aiAvailable = false;
+    backendFailureMessage = backendErrorMessage(error);
+    $("modelLabel").textContent = "本地复习";
+    $("statusDot").classList.remove("online");
+    return false;
+  }
+}
+
 async function api(path, body = {}, options = {}) {
-  const response = await fetchWithTimeout(
-    path,
-    {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Session-Token": state.session,
+  let response;
+  try {
+    response = await fetchWithTimeout(
+      path,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Session-Token": state.session,
+        },
+        body: JSON.stringify(body),
+        controller: options.controller,
       },
-      body: JSON.stringify(body),
-      controller: options.controller,
-    },
-    options.timeoutMs || API_TIMEOUT_MS,
-  );
+      options.timeoutMs || API_TIMEOUT_MS,
+    );
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    backendAvailable = false;
+    backendFailureMessage = backendErrorMessage(error);
+    throw new Error(backendFailureMessage);
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401) {
@@ -1802,14 +1952,14 @@ function changeProfile(value) {
 async function login(event) {
   event.preventDefault();
   $("loginError").textContent = "";
-  if (!backendAvailable) {
-    $("loginError").textContent = BACKEND_OFFLINE_MESSAGE;
-    return;
-  }
   const button = $("loginSubmitBtn");
   if (button.disabled) return;
   button.disabled = true;
   try {
+    if (!backendAvailable) {
+      $("loginError").textContent = "正在重新连接服务器…";
+      if (!(await ensureBackendConnection())) throw new Error(backendFailureMessage);
+    }
     const data = await api("/api/login", {
       username: $("usernameInput").value.trim(),
       secret: $("secretInput").value,
@@ -1817,6 +1967,7 @@ async function login(event) {
     state.session = data.session;
     localStorage.setItem("wyjAccountSession", state.session);
     applyAccount(data.account);
+    clearSavedWordDrafts(data.account);
     pendingScreen = "workspace";
     pendingAuthMessage = "";
     $("modelLabel").textContent = data.model || "qwen3:8b";
@@ -1832,13 +1983,8 @@ async function login(event) {
 
 async function refreshBackendState() {
   try {
-    const response = await fetchWithTimeout("/api/status", { cache: "no-store" }, STATUS_TIMEOUT_MS);
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || "backend unavailable");
-    backendAvailable = true;
-    aiAvailable = data.ai_ready !== false;
-    $("modelLabel").textContent = data.model || "qwen3:8b";
-    $("statusDot").classList.toggle("online", aiAvailable);
+    const data = await checkBackendStatus();
+    applyBackendStatus(data);
 
     if (state.session) {
       const healthResponse = await fetchWithTimeout(
@@ -1871,11 +2017,12 @@ async function refreshBackendState() {
       pendingScreen = "auth";
       pendingAuthMessage = "";
     }
-  } catch (_) {
+  } catch (error) {
     backendAvailable = false;
     aiAvailable = false;
+    backendFailureMessage = backendErrorMessage(error);
     pendingScreen = state.session && state.account ? "workspace" : "auth";
-    pendingAuthMessage = state.session && state.account ? "" : BACKEND_OFFLINE_MESSAGE;
+    pendingAuthMessage = state.session && state.account ? "" : backendFailureMessage;
     $("modelLabel").textContent = "本地复习";
     $("statusDot").classList.remove("online");
   }
@@ -1924,6 +2071,7 @@ async function boot() {
     document.querySelectorAll(".admin-view").forEach((view) => view.classList.toggle("active", view.id === button.dataset.adminView));
   }));
   $("saveAdminMembershipBtn").addEventListener("click", saveAdminMembership);
+  $("adminMembershipSelect").addEventListener("change", () => updateAdminMembershipFields(true));
   $("saveAdminSecretBtn").addEventListener("click", saveAdminSecret);
   $("adminToggleBanBtn").addEventListener("click", () => adminUserAction("ban"));
   $("adminForceLogoutBtn").addEventListener("click", () => adminUserAction("logout"));
@@ -2008,6 +2156,10 @@ async function boot() {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register(`/sw.js?v=${APP_VERSION}`).catch(() => {});
   }
+  window.addEventListener("online", () => refreshBackendState());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && !backendAvailable) refreshBackendState();
+  });
 
   const backendPromise = refreshBackendState();
   if (state.session && state.account) showProjectPicker();

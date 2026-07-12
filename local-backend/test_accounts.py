@@ -1,10 +1,18 @@
 import tempfile
 import unittest
 from unittest import mock
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from account_store import ADMIN_SECRET, AccountError, AccountStore, iso_now, utc_now
+from account_store import (
+    ADMIN_SECRET,
+    AccountError,
+    AccountStore,
+    iso_now,
+    membership_time_value,
+    parse_time,
+    utc_now,
+)
 
 
 class AccountStoreTests(unittest.TestCase):
@@ -85,6 +93,34 @@ class AccountStoreTests(unittest.TestCase):
         user = self.register()
         self.store.admin_set_membership(self.admin, user["id"], "monthly")
         self.assertIsNone(self.store.quiz_limit(self.store.get_user(user["id"]), "english"))
+
+    def test_membership_dates_accept_common_separators_and_end_at_day_end(self):
+        local_zone = datetime.now().astimezone().tzinfo
+        for value in ("2099/01/02", "2099.01.02", "2099。01。02", "2099 01 02"):
+            parsed = parse_time(membership_time_value(value, end_of_day=True)).astimezone(local_zone)
+            self.assertEqual((parsed.year, parsed.month, parsed.day), (2099, 1, 2))
+            self.assertEqual((parsed.hour, parsed.minute, parsed.second), (23, 59, 59))
+
+        user = self.register()
+        updated = self.store.admin_set_membership(
+            self.admin,
+            user["id"],
+            "monthly",
+            start="2099/01/01",
+            expires="2099。02。01",
+        )
+        start_local = parse_time(updated["membership_start"]).astimezone(local_zone)
+        expiry_local = parse_time(updated["membership_expires"]).astimezone(local_zone)
+        current_local = datetime.now().astimezone(local_zone)
+        self.assertEqual((start_local.year, start_local.month, start_local.day), (2099, 1, 1))
+        self.assertLessEqual(
+            abs((start_local.hour * 3600 + start_local.minute * 60 + start_local.second)
+                - (current_local.hour * 3600 + current_local.minute * 60 + current_local.second)),
+            3,
+        )
+        self.assertEqual((expiry_local.year, expiry_local.month, expiry_local.day), (2099, 2, 1))
+        self.assertEqual((expiry_local.hour, expiry_local.minute, expiry_local.second), (23, 59, 59))
+
         self.assertIsNone(self.store.quiz_limit(self.store.get_user(user["id"]), "japanese"))
         self.store.admin_set_membership(self.admin, user["id"], "lifetime")
         self.assertIsNone(self.store.quiz_limit(self.store.get_user(user["id"]), "english"))
