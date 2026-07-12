@@ -374,6 +374,52 @@ textarea {
   margin-bottom: 12px;
 }
 
+.ai-suggest-section {
+  margin: 2px 0 14px;
+  padding: 16px 0;
+  border-top: 1px solid rgba(96, 196, 242, 0.18);
+  border-bottom: 1px solid rgba(96, 196, 242, 0.18);
+}
+
+.ai-suggest-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.ai-suggest-heading h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.ai-suggest-heading span {
+  color: #9edfff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ai-suggest-grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) 112px 132px 150px;
+  align-items: end;
+  gap: 10px;
+}
+
+.ai-suggest-button {
+  min-height: 48px;
+}
+
+.ai-suggest-message {
+  min-height: 20px;
+  margin-top: 10px;
+}
+
+.ai-suggest-message.error {
+  color: #ff9c8f;
+}
+
 .field-label {
   display: grid;
   gap: 6px;
@@ -640,6 +686,14 @@ textarea {
 
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+
+  .ai-suggest-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-suggest-button {
+    width: 100%;
   }
 }
 
@@ -1015,12 +1069,19 @@ button:active:not(:disabled) {
   .account-bar {
     left: max(10px, env(safe-area-inset-left));
     right: max(10px, env(safe-area-inset-right));
-    overflow-x: auto;
-    justify-content: flex-start;
+    overflow: visible;
+    justify-content: stretch;
   }
 
-  .account-bar button,
-  .account-badge { flex: 0 0 auto; }
+  .account-bar button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 6px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .account-badge { display: none; }
   .plan-grid { grid-template-columns: 1fr; }
   .plan-option { min-height: 104px; }
   .admin-panel { margin-top: 64px; }

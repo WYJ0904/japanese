@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-13-accounts6";
+const APP_VERSION = "2026-07-13-vocabulary1";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const API_TIMEOUT_MS = 100000;
@@ -18,6 +18,29 @@ const LANGUAGE_LABELS = {
 const PRACTICE_LABELS = {
   meaning: "释义",
   dictation: "听写",
+};
+const VOCABULARY_LEVEL_OPTIONS = {
+  japanese: [
+    ["n5", "JLPT N5"],
+    ["n4", "JLPT N4"],
+    ["n3", "JLPT N3"],
+    ["n2", "JLPT N2"],
+    ["n1", "JLPT N1"],
+  ],
+  english: [
+    ["primary_3", "小学三年级"],
+    ["primary_4", "小学四年级"],
+    ["primary_5", "小学五年级"],
+    ["primary_6", "小学六年级"],
+    ["middle_1", "初中一年级"],
+    ["middle_2", "初中二年级"],
+    ["middle_3", "初中三年级"],
+    ["high_1", "高中一年级"],
+    ["high_2", "高中二年级"],
+    ["high_3", "高中三年级"],
+    ["cet_4", "大学英语四级"],
+    ["cet_6", "大学英语六级"],
+  ],
 };
 const SKIPPED_ANSWER = "（跳过）";
 const EMPTY_ANSWER = "（空白）";
@@ -293,6 +316,7 @@ function applyAccount(account) {
   else localStorage.removeItem("wyjAccountCache");
   renderAccountUi();
   updateStats();
+  updateAiSuggestionControls();
 }
 
 function accountWordLimit(language = state.quizLanguage) {
@@ -975,6 +999,36 @@ function updateLanguageUi() {
   if (projectLabel) projectLabel.textContent = language ? `${quizLanguageLabel(language)}测试` : "";
   const input = $("wordInput");
   if (input) input.placeholder = language === "japanese" ? "输入日语词表，每行一个词" : "输入英语词表，每行一个词";
+  updateAiSuggestionControls();
+}
+
+function updateAiSuggestionControls() {
+  const language = state.quizLanguage;
+  const levelSelect = $("aiLevelSelect");
+  const countInput = $("aiSuggestCount");
+  if (!levelSelect || !countInput || !VOCABULARY_LEVEL_OPTIONS[language]) return;
+  const previousLanguage = levelSelect.dataset.language || "";
+  const previousLevel = previousLanguage === language ? levelSelect.value : "";
+  levelSelect.replaceChildren();
+  VOCABULARY_LEVEL_OPTIONS[language].forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    levelSelect.append(option);
+  });
+  if (previousLevel && VOCABULARY_LEVEL_OPTIONS[language].some(([value]) => value === previousLevel)) {
+    levelSelect.value = previousLevel;
+  }
+  levelSelect.dataset.language = language;
+  $("aiSuggestLanguage").textContent = quizLanguageLabel(language);
+  const accountLimit = accountWordLimit(language);
+  const maxCount = Number.isFinite(accountLimit) ? accountLimit : 100;
+  countInput.max = String(maxCount);
+  const currentCount = Number(countInput.value);
+  if (!Number.isInteger(currentCount) || currentCount < 1 || currentCount > maxCount) {
+    countInput.value = String(Math.min(10, maxCount));
+  }
+  if (previousLanguage && previousLanguage !== language) $("aiSuggestMessage").textContent = "";
 }
 
 function updatePracticeUi() {
@@ -1375,6 +1429,67 @@ function parseWords() {
     .value.split(/[\s,，、;；]+/)
     .map((word) => word.trim())
     .filter(Boolean);
+}
+
+async function generateAiVocabulary() {
+  const language = ensureQuizLanguage();
+  if (!language) return;
+  const message = $("aiSuggestMessage");
+  const button = $("aiSuggestBtn");
+  if (button.disabled) return;
+  if (!state.session || !state.account) {
+    showAuth("请先登录后使用 AI 联网选词");
+    return;
+  }
+  if (!backendAvailable) {
+    message.textContent = "正在重新连接服务器…";
+    if (!(await ensureBackendConnection())) {
+      message.textContent = backendFailureMessage;
+      message.classList.add("error");
+      return;
+    }
+  }
+  if (!aiAvailable) {
+    message.textContent = "本地 AI 尚未启动，请运行桌面启动程序";
+    message.classList.add("error");
+    return;
+  }
+  const level = $("aiLevelSelect").value;
+  const count = Number($("aiSuggestCount").value);
+  const mode = $("aiSuggestMode").value;
+  const maxCount = Number($("aiSuggestCount").max || 100);
+  if (!Number.isInteger(count) || count < 1 || count > maxCount) {
+    message.textContent = `请输入 1 至 ${maxCount} 之间的整数`;
+    message.classList.add("error");
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = "搜索中…";
+  message.classList.remove("error");
+  message.textContent = "正在联网搜索并由本地 AI 整理词汇…";
+  try {
+    const data = await api(
+      "/api/vocabulary/suggest",
+      { language, level, count },
+      { timeoutMs: 120000 },
+    );
+    const generated = filterWordsByLanguage(data.words || [], language);
+    if (!generated.length) throw new Error("没有生成可用词汇，请重试");
+    const baseWords = mode === "append" ? parseWords() : [];
+    const words = [...new Set([...baseWords, ...generated])];
+    $("wordInput").value = words.join("\n");
+    saveCurrentWordDraft();
+    updateStats();
+    const sourceText = data.online ? "联网资料与本地 AI" : "本地 AI（联网资料暂不可用）";
+    message.textContent = `${sourceText}已生成 ${generated.length} 个${data.level_label || ""}词汇`;
+  } catch (error) {
+    message.textContent = error.message;
+    message.classList.add("error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "生成词表";
+  }
 }
 
 function shuffle(items) {
@@ -2089,6 +2204,7 @@ async function boot() {
   });
   $("answerForm").addEventListener("submit", submitAnswer);
   $("startBtn").addEventListener("click", () => startQuiz(parseWords()));
+  $("aiSuggestBtn").addEventListener("click", generateAiVocabulary);
   $("shuffleBtn").addEventListener("click", () => {
     $("wordInput").value = shuffle(parseWords()).join("\n");
     saveCurrentWordDraft();

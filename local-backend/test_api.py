@@ -100,6 +100,86 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(status, 403, data)
         self.assertEqual(data["code"], "membership_required")
 
+    def test_ai_vocabulary_suggestion_levels_and_membership_limit(self):
+        _, _, session = self.new_user()
+        with mock.patch("server.search_vocabulary_sources") as search:
+            status, data = self.request(
+                "POST",
+                "/api/vocabulary/suggest",
+                {"language": "english", "level": "middle_1", "count": 16},
+                session,
+            )
+        self.assertEqual(status, 403, data)
+        self.assertEqual(data["code"], "membership_required")
+        search.assert_not_called()
+
+        source = {
+            "online": True,
+            "candidates": [],
+            "snippets": [{"title": "初一词汇", "description": "school study future careful important"}],
+            "sources": [{"title": "课程词汇", "url": "https://example.test/words"}],
+        }
+        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+            "server.call_ollama",
+            return_value=json.dumps({"words": ["school", "study", "future", "careful", "important"]}),
+        ):
+            status, data = self.request(
+                "POST",
+                "/api/vocabulary/suggest",
+                {"language": "english", "level": "middle_1", "count": 5},
+                self.admin_session,
+            )
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["level_label"], "初中一年级")
+        self.assertEqual(len(data["words"]), 5)
+        self.assertTrue(data["online"])
+
+        status, data = self.request(
+            "POST",
+            "/api/vocabulary/suggest",
+            {"language": "english", "level": "not-a-level", "count": 5},
+            self.admin_session,
+        )
+        self.assertEqual(status, 400, data)
+        self.assertEqual(data["code"], "suggest_level_invalid")
+
+    def test_japanese_suggestion_stays_inside_online_jlpt_candidates(self):
+        candidates = ["食べる", "見る", "行く", "来る", "話す"]
+        source = {
+            "online": True,
+            "candidates": candidates,
+            "snippets": [],
+            "sources": [{"title": "Jisho JLPT N5", "url": "https://jisho.org/search/%23jlpt-n5"}],
+        }
+        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+            "server.call_ollama", return_value=json.dumps({"words": ["食べる", "東京", "見る"]})
+        ):
+            status, data = self.request(
+                "POST",
+                "/api/vocabulary/suggest",
+                {"language": "japanese", "level": "n5", "count": 5},
+                self.admin_session,
+            )
+        self.assertEqual(status, 200, data)
+        self.assertEqual(len(data["words"]), 5)
+        self.assertEqual(set(data["words"]), set(candidates))
+
+    def test_vocabulary_source_cache_refetches_for_larger_japanese_request(self):
+        first = ["一", "二", "三", "四", "五"]
+        larger = first + ["六", "七", "八", "九", "十"]
+        with server.STATE_LOCK:
+            server.VOCABULARY_SOURCE_CACHE.clear()
+        with mock.patch("server.jisho_level_candidates", side_effect=[first, larger]) as jisho:
+            small = server.search_vocabulary_sources("japanese", "n5", 5)
+            cached = server.search_vocabulary_sources("japanese", "n5", 5)
+            expanded = server.search_vocabulary_sources("japanese", "n5", 10)
+        self.assertEqual(small["candidates"], first)
+        self.assertEqual(cached["candidates"], first)
+        self.assertEqual(expanded["candidates"], larger)
+        self.assertEqual(jisho.call_count, 2)
+        with server.STATE_LOCK:
+            server.VOCABULARY_SOURCE_CACHE.clear()
+
     def test_logout_invalidates_persistent_session(self):
         _, _, session = self.new_user()
         status, data = self.request("POST", "/api/logout", {}, session)
