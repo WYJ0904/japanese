@@ -19,3 +19,11 @@ latest-url.txt
 work/
 outputs/
 desktop-tools/
+
+# Account backend runtime data (contains plaintext login secrets by product design)
+local-backend/data/
+local-backend/users.txt
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal

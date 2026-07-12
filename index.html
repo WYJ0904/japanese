@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260710-2345" />
-    <link rel="stylesheet" href="/styles.css?v=20260710-2345" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260712-accounts3" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-accounts3" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -26,6 +26,13 @@
     </div>
 
     <main class="app-shell app-shell-pending" id="appShell" aria-hidden="true">
+      <nav class="account-bar" id="accountBar" aria-label="账户操作">
+        <span class="account-badge" id="accountBadge">未登录</span>
+        <button id="membershipBtn" type="button">会员充值</button>
+        <button class="hidden" id="accountBtn" type="button">账户设置</button>
+        <button class="hidden" id="adminBtn" type="button">管理后台</button>
+        <button class="hidden" id="logoutBtn" type="button">退出</button>
+      </nav>
       <section class="project-picker hidden" id="projectPicker" aria-labelledby="projectPickerTitle">
         <header class="project-brand">
           <img src="/assets/logo.png" alt="WYJ的网站 Logo" />
@@ -71,10 +78,21 @@
 
         <section class="panel auth-panel hidden" id="authPanel">
           <div class="lock-mark" aria-hidden="true">77</div>
-          <h2>访问口令</h2>
+          <h2 id="authTitle">账户登录</h2>
+          <div class="auth-tabs" role="tablist" aria-label="账户入口">
+            <button class="active" id="showLoginBtn" type="button" role="tab">登录</button>
+            <button id="showRegisterBtn" type="button" role="tab">注册</button>
+          </div>
           <form id="loginForm" class="login-form">
-            <input id="tokenInput" type="password" autocomplete="current-password" placeholder="输入口令" />
-            <button class="primary" type="submit">进入</button>
+            <input id="usernameInput" autocomplete="username" placeholder="用户名" required />
+            <input id="secretInput" type="password" autocomplete="current-password" placeholder="登录密钥" required />
+            <button class="primary" id="loginSubmitBtn" type="submit">登录</button>
+          </form>
+          <form id="registerForm" class="login-form hidden">
+            <input id="registerUsernameInput" autocomplete="username" placeholder="用户名" required />
+            <input id="registerSecretInput" type="password" autocomplete="new-password" placeholder="登录密钥" required />
+            <input id="registerConfirmInput" type="password" autocomplete="new-password" placeholder="确认登录密钥" required />
+            <button class="primary" id="registerSubmitBtn" type="submit">创建账户</button>
           </form>
           <button class="hidden" id="offlineReviewBtn" type="button">进入本地复习</button>
           <p class="error" id="loginError" aria-live="polite"></p>
@@ -121,6 +139,7 @@
               </div>
 
               <textarea id="wordInput" placeholder="输入词表，每行一个词"></textarea>
+              <p class="meta-line" id="wordLimitHint" aria-live="polite"></p>
               <div class="action-row">
                 <button class="primary" id="startBtn">开始</button>
                 <button id="shuffleBtn" title="打乱">↕</button>
@@ -206,7 +225,108 @@
           </section>
         </section>
       </section>
+
+      <section class="admin-panel hidden" id="adminPanel" aria-hidden="true">
+        <header class="admin-header">
+          <div>
+            <p class="section-kicker">SUPER ADMIN</p>
+            <h1>用户与会员管理</h1>
+          </div>
+          <div class="action-row compact">
+            <button id="refreshAdminBtn" type="button">刷新</button>
+            <button id="leaveAdminBtn" type="button">返回项目</button>
+          </div>
+        </header>
+        <div class="admin-tabs" role="tablist">
+          <button class="active" data-admin-view="adminUsersView" type="button">用户</button>
+          <button data-admin-view="adminRechargeView" type="button">充值申请</button>
+        </div>
+        <section class="admin-view active" id="adminUsersView">
+          <div class="admin-user-list" id="adminUserList"></div>
+        </section>
+        <section class="admin-view" id="adminRechargeView">
+          <div class="admin-user-list" id="adminRechargeList"></div>
+        </section>
+        <p class="error" id="adminError" aria-live="polite"></p>
+      </section>
     </main>
+
+    <div class="modal-layer hidden" id="membershipModal" aria-hidden="true">
+      <section class="modal-panel membership-panel" role="dialog" aria-modal="true" aria-labelledby="membershipTitle">
+        <button class="modal-close" data-close-modal="membershipModal" type="button" aria-label="关闭">×</button>
+        <p class="section-kicker">MEMBERSHIP</p>
+        <h2 id="membershipTitle">会员充值</h2>
+        <div class="plan-grid">
+          <button class="plan-option" data-plan="trial_single_language" type="button"><strong>单语言体验版</strong><span>5 CNY · 30 天</span><small>选择一门语言无限使用</small></button>
+          <button class="plan-option" data-plan="monthly" type="button"><strong>包月会员</strong><span>10 CNY · 30 天</span><small>英语和日语均无限使用</small></button>
+          <button class="plan-option" data-plan="lifetime" type="button"><strong>永久会员</strong><span>70 CNY · 永久</span><small>两种语言永久无限使用</small></button>
+        </div>
+        <label class="field-label hidden" id="trialLanguageField"><span>体验语言</span><select id="trialLanguageSelect"><option value="english">英语</option><option value="japanese">日语</option></select></label>
+        <div class="purchase-summary" id="purchaseSummary">请选择套餐</div>
+        <div class="wechat-row"><span>微信号：<strong id="wechatId">W2009Y94J</strong></span><button id="copyWechatBtn" type="button">复制微信号</button></div>
+        <p>付款后请添加微信 W2009Y94J，并提供你的用户名，由管理员人工开通会员。</p>
+        <p class="danger-note">注销账户后，账户数据、当前会员资格、剩余会员时间以及永久会员资格都将被清除，且无法恢复。</p>
+        <button class="primary" id="submitRechargeBtn" type="button" disabled>提交充值申请</button>
+        <p class="meta-line" id="rechargeMessage" aria-live="polite"></p>
+      </section>
+    </div>
+
+    <div class="modal-layer hidden" id="accountModal" aria-hidden="true">
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
+        <button class="modal-close" data-close-modal="accountModal" type="button" aria-label="关闭">×</button>
+        <p class="section-kicker">ACCOUNT</p>
+        <h2 id="accountTitle">账户设置</h2>
+        <dl class="account-details" id="accountDetails"></dl>
+        <form id="changeSecretForm" class="stack-form">
+          <h3>修改登录密钥</h3>
+          <input id="currentSecretInput" type="password" autocomplete="current-password" placeholder="当前登录密钥" required />
+          <input id="newSecretInput" type="password" autocomplete="new-password" placeholder="新登录密钥" required />
+          <button type="submit">保存并退出其他会话</button>
+        </form>
+        <div class="danger-zone">
+          <strong>注销账户</strong>
+          <p>注销账户后，账户数据、当前会员资格、剩余会员时间以及永久会员资格都将被清除，且无法恢复。</p>
+          <button id="openDeleteAccountBtn" type="button">注销账户</button>
+        </div>
+        <p class="error" id="accountMessage" aria-live="polite"></p>
+      </section>
+    </div>
+
+    <div class="modal-layer hidden" id="deleteAccountModal" aria-hidden="true">
+      <section class="modal-panel confirm-panel" role="alertdialog" aria-modal="true" aria-labelledby="deleteAccountTitle">
+        <h2 id="deleteAccountTitle">确认永久注销账户</h2>
+        <p class="danger-note">此操作会清除账户、会员资格、剩余时间、充值申请和全部登录会话，无法恢复。</p>
+        <form id="deleteAccountForm" class="stack-form">
+          <input id="deleteSecretInput" type="password" autocomplete="current-password" placeholder="重新输入当前登录密钥" required />
+          <div class="action-row"><button data-close-modal="deleteAccountModal" type="button">取消</button><button class="danger-button" id="confirmDeleteAccountBtn" type="submit">永久注销</button></div>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-layer hidden" id="adminEditModal" aria-hidden="true">
+      <section class="modal-panel admin-editor" role="dialog" aria-modal="true" aria-labelledby="adminEditTitle">
+        <button class="modal-close" data-close-modal="adminEditModal" type="button" aria-label="关闭">×</button>
+        <h2 id="adminEditTitle">编辑用户</h2>
+        <input id="adminEditUserId" type="hidden" />
+        <div class="settings-grid">
+          <label class="field-label"><span>会员等级</span><select id="adminMembershipSelect"><option value="free">普通用户</option><option value="trial_single_language">单语言体验版</option><option value="monthly">包月会员</option><option value="lifetime">永久会员</option></select></label>
+          <label class="field-label"><span>体验语言</span><select id="adminTrialLanguageSelect"><option value="">无</option><option value="english">英语</option><option value="japanese">日语</option></select></label>
+          <label class="field-label"><span>开始时间</span><input id="adminMembershipStart" placeholder="ISO 时间，留空自动" /></label>
+          <label class="field-label"><span>到期时间</span><input id="adminMembershipExpires" placeholder="ISO 时间，留空自动" /></label>
+        </div>
+        <button class="primary" id="saveAdminMembershipBtn" type="button">保存会员设置</button>
+        <div class="stack-form"><input id="adminNewSecretInput" type="text" placeholder="新的明文登录密钥" /><button id="saveAdminSecretBtn" type="button">修改密钥并退出该用户</button></div>
+        <div class="action-row"><button id="adminToggleBanBtn" type="button">永久封禁</button><button id="adminForceLogoutBtn" type="button">强制退出</button><button class="danger-button" id="adminDeleteUserBtn" type="button">删除用户</button></div>
+        <p class="error" id="adminEditMessage" aria-live="polite"></p>
+      </section>
+    </div>
+
+    <div class="modal-layer hidden" id="confirmModal" aria-hidden="true">
+      <section class="modal-panel confirm-panel" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p>
+        <div class="action-row"><button id="cancelConfirmBtn" type="button">取消</button><button class="danger-button" id="acceptConfirmBtn" type="button">确认</button></div>
+      </section>
+    </div>
 
     <template id="wrongItemTemplate">
       <article class="wrong-item">
@@ -218,6 +338,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260710-2345"></script>
+    <script src="/app.js?v=20260712-accounts3"></script>
   </body>
 </html>
