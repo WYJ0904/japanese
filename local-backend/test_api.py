@@ -100,6 +100,13 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(status, 403, data)
         self.assertEqual(data["code"], "membership_required")
 
+    def test_logout_invalidates_persistent_session(self):
+        _, _, session = self.new_user()
+        status, data = self.request("POST", "/api/logout", {}, session)
+        self.assertEqual(status, 200, data)
+        status, _ = self.request("GET", "/api/me", session=session)
+        self.assertEqual(status, 401)
+
     def test_ai_unavailable_is_retryable_service_unavailable(self):
         _, _, session = self.new_user()
         status, started = self.request(

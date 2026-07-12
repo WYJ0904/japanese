@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-12-accounts3";
+const APP_VERSION = "2026-07-12-accounts4";
 const NORMAL_RESULT_VISIBLE_MS = 3000;
 const AI_RESULT_VISIBLE_MS = 3000;
 const API_TIMEOUT_MS = 100000;
@@ -424,7 +424,7 @@ async function logoutAccount() {
   pendingScreen = "auth";
   pendingAuthMessage = "已退出登录";
   if (location.pathname === "/admin") history.replaceState({}, "", "/");
-  showProjectPicker();
+  showAuth(pendingAuthMessage);
 }
 
 function planDetails(plan) {
@@ -776,6 +776,10 @@ function showLanguageGate() {
 }
 
 function showProjectPicker() {
+  if (!state.session || !state.account) {
+    showAuth(pendingAuthMessage || "请先登录后选择测试项目");
+    return;
+  }
   if (currentProject) {
     saveCurrentWordDraft();
     saveProjectRuntime();
@@ -817,6 +821,10 @@ function applyPendingScreen() {
 }
 
 function enterProject(value) {
+  if (!state.session || !state.account) {
+    showAuth("请先登录后选择测试项目");
+    return;
+  }
   const language = normalizeQuizLanguage(value);
   if (!language) return;
   if (currentProject && currentProject !== language) {
@@ -835,13 +843,29 @@ function enterProject(value) {
 function showAuth(message = "") {
   pendingScreen = "auth";
   pendingAuthMessage = message;
-  if (!currentProject) return;
+  if (currentProject) {
+    saveCurrentWordDraft();
+    saveProjectRuntime();
+  }
+  currentProject = "";
+  state.quizLanguage = "";
+  if (judgeController) judgeController.abort();
+  clearNextTimer();
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   showAuthMode("login");
-  showMainShell();
+  $("adminPanel")?.classList.add("hidden");
+  $("adminPanel")?.setAttribute("aria-hidden", "true");
+  $("projectPicker").classList.add("hidden");
+  $("projectPicker").setAttribute("aria-hidden", "true");
+  $("projectApp").classList.remove("hidden");
+  $("projectApp").setAttribute("aria-hidden", "false");
+  $("topbar").classList.add("hidden");
+  $("projectNameLabel").textContent = "";
   $("authPanel").classList.remove("hidden");
   $("workspace").classList.add("hidden");
   $("loginError").textContent = message;
-  $("offlineReviewBtn").classList.toggle("hidden", !hasLocalReviewData());
+  $("offlineReviewBtn").classList.add("hidden");
+  document.body.classList.add("project-picker-active");
 }
 
 function showWorkspace() {
@@ -1793,9 +1817,11 @@ async function login(event) {
     state.session = data.session;
     localStorage.setItem("wyjAccountSession", state.session);
     applyAccount(data.account);
+    pendingScreen = "workspace";
+    pendingAuthMessage = "";
     $("modelLabel").textContent = data.model || "qwen3:8b";
     if (location.pathname === "/admin") await showAdminPanel(false);
-    else showWorkspace();
+    else showProjectPicker();
     updateStats();
   } catch (error) {
     $("loginError").textContent = error.message;
@@ -1848,8 +1874,8 @@ async function refreshBackendState() {
   } catch (_) {
     backendAvailable = false;
     aiAvailable = false;
-    pendingScreen = "workspace";
-    pendingAuthMessage = "";
+    pendingScreen = state.session && state.account ? "workspace" : "auth";
+    pendingAuthMessage = state.session && state.account ? "" : BACKEND_OFFLINE_MESSAGE;
     $("modelLabel").textContent = "本地复习";
     $("statusDot").classList.remove("online");
   }
@@ -1984,7 +2010,8 @@ async function boot() {
   }
 
   const backendPromise = refreshBackendState();
-  showProjectPicker();
+  if (state.session && state.account) showProjectPicker();
+  else showAuth();
   await runSplashSequence(() => {
     $("appShell").classList.remove("app-shell-pending");
     $("appShell").classList.add("app-shell-ready");
@@ -1992,6 +2019,8 @@ async function boot() {
   });
   await backendPromise;
   if (location.pathname === "/admin") await showAdminPanel(false);
+  else if (state.session && state.account) showProjectPicker();
+  else showAuth(pendingAuthMessage);
 }
 
 boot();
