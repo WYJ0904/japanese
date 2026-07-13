@@ -1190,6 +1190,7 @@ button:active:not(:disabled) {
   .account-bar button {
     flex: 1 1 52px;
     min-width: 48px;
+    min-height: 44px;
     padding: 0 5px;
     font-size: 11px;
     white-space: nowrap;
@@ -1199,6 +1200,7 @@ button:active:not(:disabled) {
     display: inline-flex;
     flex: 0 1 78px;
     min-width: 52px;
+    min-height: 44px;
     max-width: 78px;
     padding: 0 7px;
     overflow: hidden;
