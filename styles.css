@@ -306,6 +306,7 @@ h1 {
 .answer-form input,
 .field-label input,
 .field-label select,
+.admin-search input,
 .admin-secret-row input,
 textarea {
   width: 100%;
@@ -938,6 +939,45 @@ textarea {
   gap: 10px;
 }
 
+.admin-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.admin-search {
+  display: grid;
+  flex: 1 1 420px;
+  max-width: 560px;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.admin-search input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+.admin-toolbar > p {
+  margin: 0 0 11px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.admin-empty-state {
+  margin: 0;
+  padding: 28px 16px;
+  border: 1px dashed rgba(92, 195, 242, 0.28);
+  color: var(--muted);
+  text-align: center;
+}
+
 .admin-user-card {
   display: grid;
   grid-template-columns: minmax(180px, 1.05fr) minmax(260px, 1.35fr) minmax(230px, 1.2fr) auto;
@@ -1062,6 +1102,56 @@ textarea {
 
 .confirm-panel { width: min(460px, 100%); }
 
+.round-summary-panel {
+  width: min(580px, 100%);
+}
+
+.round-summary-panel h2 {
+  margin: 2px 0 6px;
+}
+
+.round-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.round-summary-grid div {
+  padding: 14px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(8, 24, 40, 0.72);
+  text-align: center;
+}
+
+.round-summary-grid strong,
+.round-summary-grid span {
+  display: block;
+}
+
+.round-summary-grid strong {
+  color: #f3fbff;
+  font-size: 26px;
+}
+
+.round-summary-grid span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.round-accuracy {
+  margin: 16px 0 0;
+  color: #bdefff;
+  font-weight: 700;
+  text-align: center;
+}
+
+.round-summary-actions {
+  margin-top: 22px;
+}
+
 .limit-exceeded {
   border-color: rgba(255, 137, 96, 0.65) !important;
   box-shadow: 0 0 0 2px rgba(255, 111, 77, 0.12);
@@ -1120,6 +1210,9 @@ button:active:not(:disabled) {
   .plan-option { min-height: 104px; }
   .admin-panel { margin-top: 64px; }
   .admin-header { align-items: start; flex-direction: column; }
+  .admin-toolbar { align-items: stretch; flex-direction: column; gap: 6px; }
+  .admin-search { flex-basis: auto; max-width: none; }
+  .admin-toolbar > p { margin: 0; }
   .admin-user-card { grid-template-columns: 1fr; }
   .admin-user-card .action-row { justify-content: flex-start; }
   .admin-user-facts p,
@@ -1136,6 +1229,9 @@ button:active:not(:disabled) {
   .admin-danger-actions { grid-template-columns: 1fr; }
   .admin-editor-save button,
   .admin-secret-row button { width: 100%; }
+
+  .round-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .round-summary-actions { display: grid; grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1570,6 +1666,7 @@ button:disabled {
 .answer-form input,
 .field-label input,
 .field-label select,
+.admin-search input,
 .admin-secret-row input,
 textarea {
   border-color: var(--line);

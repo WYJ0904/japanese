@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-13-ux1";
+const APP_VERSION = "2026-07-13-ux2";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -231,6 +231,8 @@ const state = {
   words: [],
   index: 0,
   score: 0,
+  roundSkipped: 0,
+  lastRound: null,
   mode: "normal",
   busy: false,
   wrongScope: "current",
@@ -616,10 +618,16 @@ function rechargeStatusLabel(status) {
   return { pending: "待处理", activated: "已开通", rejected: "已拒绝" }[status] || status || "未知";
 }
 
-function renderAdminUsers(users) {
-  adminUsers = users || [];
+function renderAdminUsers(users = null) {
+  if (Array.isArray(users)) adminUsers = users;
   const list = $("adminUserList");
-  list.innerHTML = adminUsers.map((user) => {
+  const query = $("adminUserSearch")?.value.trim().toLocaleLowerCase() || "";
+  const visibleUsers = query
+    ? adminUsers.filter((user) => [user.username, user.id].some((value) => String(value || "").toLocaleLowerCase().includes(query)))
+    : adminUsers;
+  const count = $("adminUserCount");
+  if (count) count.textContent = query ? `显示 ${visibleUsers.length} / ${adminUsers.length} 个用户` : `共 ${adminUsers.length} 个用户`;
+  list.innerHTML = visibleUsers.map((user) => {
     const protectedUser = user.is_super_admin;
     const stateClass = user.banned ? "account-state-bad" : "account-state-good";
     const membershipExpiry = user.membership === "lifetime" ? "永久" : formatLocalDateTime(user.membership_expires, "无到期时间");
@@ -630,7 +638,7 @@ function renderAdminUsers(users) {
       <div class="admin-user-security"><p><span class="admin-field-name">登录密钥</span><span class="secret-value" data-secret-value>${"•".repeat(Math.max(6, String(user.secret || "").length))}</span></p><div class="action-row compact"><button data-admin-secret-toggle type="button">查看密钥</button><button data-admin-secret-copy type="button">复制密钥</button></div><p class="admin-last-login">最后登录：${escapeHtml(formatLocalDateTime(user.last_login_at, "从未"))}</p></div>
       <div class="action-row compact admin-user-actions"><button data-admin-edit type="button" ${protectedUser ? "disabled" : ""}>编辑</button></div>
     </article>`;
-  }).join("");
+  }).join("") || `<p class="admin-empty-state">${query ? "没有匹配的用户" : "暂无用户"}</p>`;
   list.querySelectorAll("[data-admin-secret-toggle]").forEach((button) => button.addEventListener("click", () => {
     const card = button.closest("[data-user-id]");
     const user = adminUserById(card.dataset.userId);
@@ -1676,9 +1684,9 @@ async function startQuiz(words, mode = "normal") {
   state.words = shuffle(quizWords);
   state.index = 0;
   state.score = 0;
+  state.roundSkipped = 0;
+  state.lastRound = null;
   state.mode = mode;
-  unlockAchievement("firstQuiz");
-  if (isDictationMode()) unlockAchievement("firstDictation");
   updateStats();
   setView("quizView");
   showWord();
@@ -1764,16 +1772,58 @@ function nextWord() {
     state.index += 1;
     showWord();
   } else {
-    finishRound();
-    setView(Object.keys(activeWrongBook("current")).length ? "wrongView" : "setupView");
+    const summary = finishRound();
+    const hasWrong = Object.keys(activeWrongBook("current")).length > 0;
+    setView(hasWrong ? "wrongView" : "setupView");
+    showRoundSummary(summary);
   }
 }
 
 function finishRound() {
-  if (!state.words.length) return;
+  if (!state.words.length) return null;
+  const total = state.words.length;
+  const skipped = Math.min(state.roundSkipped, total);
+  const wrong = Math.max(0, total - state.score - skipped);
+  const summary = {
+    total,
+    correct: state.score,
+    wrong,
+    skipped,
+    accuracy: Math.round((state.score / total) * 100),
+    words: [...state.words],
+    mode: state.mode,
+    language: state.quizLanguage,
+    practiceMode: state.practiceMode,
+  };
+  state.lastRound = summary;
   if (state.score === state.words.length) unlockAchievement("perfectRound");
   if (state.words.length >= 20) unlockAchievement("longRound");
+  if (state.mode === "normal") {
+    unlockAchievement("firstQuiz");
+    if (state.practiceMode === "dictation") unlockAchievement("firstDictation");
+  }
   state.quizSession = "";
+  return summary;
+}
+
+function showRoundSummary(summary) {
+  if (!summary) return;
+  $("roundSummaryTitle").textContent = summary.correct === summary.total ? "本轮满分" : "本轮完成";
+  $("roundSummaryMessage").textContent = `${quizLanguageLabel(summary.language)} · ${summary.mode.startsWith("review-") ? "错题复习" : practiceModeLabel(summary.practiceMode)}`;
+  $("roundTotalCount").textContent = summary.total;
+  $("roundCorrectCount").textContent = summary.correct;
+  $("roundWrongCount").textContent = summary.wrong;
+  $("roundSkippedCount").textContent = summary.skipped;
+  $("roundAccuracy").textContent = `正确率 ${summary.accuracy}%`;
+  $("roundWrongBtn").disabled = summary.wrong + summary.skipped === 0;
+  openModal("roundSummaryModal");
+}
+
+async function retryLastRound() {
+  const summary = state.lastRound;
+  if (!summary?.words?.length) return;
+  closeModal("roundSummaryModal", true);
+  await startQuiz(summary.words, summary.mode);
 }
 
 function skipWord() {
@@ -1785,6 +1835,7 @@ function skipWord() {
 
   const word = state.words[state.index];
   if (!word) return;
+  state.roundSkipped += 1;
   const rubric = cachedRubric(word);
   markWrong(word, SKIPPED_ANSWER, rubric && rubric.gloss ? rubric.gloss : "跳过：未作答", rubric && rubric.accepted ? rubric.accepted : []);
   renderSkipResult();
@@ -2302,6 +2353,7 @@ async function boot() {
   $("deleteAccountForm").addEventListener("submit", deleteOwnAccount);
   $("refreshAdminBtn").addEventListener("click", loadAdminData);
   $("leaveAdminBtn").addEventListener("click", leaveAdminPanel);
+  $("adminUserSearch").addEventListener("input", () => renderAdminUsers());
   document.querySelectorAll("[data-admin-view]").forEach((button) => button.addEventListener("click", () => {
     document.querySelectorAll("[data-admin-view]").forEach((item) => item.classList.toggle("active", item === button));
     document.querySelectorAll(".admin-view").forEach((view) => view.classList.toggle("active", view.id === button.dataset.adminView));
@@ -2314,6 +2366,15 @@ async function boot() {
   $("adminDeleteUserBtn").addEventListener("click", () => adminUserAction("delete"));
   $("cancelConfirmBtn").addEventListener("click", () => { confirmAction = null; closeModal("confirmModal"); });
   $("acceptConfirmBtn").addEventListener("click", runConfirmedAction);
+  $("roundRetryBtn").addEventListener("click", retryLastRound);
+  $("roundWrongBtn").addEventListener("click", () => {
+    closeModal("roundSummaryModal", true);
+    setView("wrongView");
+  });
+  $("roundSetupBtn").addEventListener("click", () => {
+    closeModal("roundSummaryModal", true);
+    setView("setupView");
+  });
   window.addEventListener("popstate", () => {
     if (location.pathname === "/admin") showAdminPanel(false);
     else showProjectPicker();

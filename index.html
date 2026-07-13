@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260713-ux1" />
-    <link rel="stylesheet" href="/styles.css?v=20260713-ux1" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260713-ux2" />
+    <link rel="stylesheet" href="/styles.css?v=20260713-ux2" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -268,6 +268,10 @@
           <button data-admin-view="adminRechargeView" type="button">充值申请</button>
         </div>
         <section class="admin-view active" id="adminUsersView">
+          <div class="admin-toolbar">
+            <label class="admin-search" for="adminUserSearch"><span>搜索用户</span><input id="adminUserSearch" type="search" autocomplete="off" placeholder="输入用户名或用户 ID" /></label>
+            <p id="adminUserCount" aria-live="polite">共 0 个用户</p>
+          </div>
           <div class="admin-user-list" id="adminUserList"></div>
         </section>
         <section class="admin-view" id="adminRechargeView">
@@ -360,6 +364,26 @@
       </section>
     </div>
 
+    <div class="modal-layer hidden" id="roundSummaryModal" aria-hidden="true">
+      <section class="modal-panel round-summary-panel" role="dialog" aria-modal="true" aria-labelledby="roundSummaryTitle">
+        <p class="section-kicker">ROUND COMPLETE</p>
+        <h2 id="roundSummaryTitle">本轮完成</h2>
+        <p class="meta-line" id="roundSummaryMessage"></p>
+        <div class="round-summary-grid">
+          <div><strong id="roundTotalCount">0</strong><span>总题数</span></div>
+          <div><strong id="roundCorrectCount">0</strong><span>正确</span></div>
+          <div><strong id="roundWrongCount">0</strong><span>错误</span></div>
+          <div><strong id="roundSkippedCount">0</strong><span>跳过</span></div>
+        </div>
+        <p class="round-accuracy" id="roundAccuracy">正确率 0%</p>
+        <div class="action-row round-summary-actions">
+          <button class="primary" id="roundRetryBtn" type="button">再练一轮</button>
+          <button id="roundWrongBtn" type="button">查看错题</button>
+          <button id="roundSetupBtn" type="button">返回词表</button>
+        </div>
+      </section>
+    </div>
+
     <div class="modal-layer hidden" id="confirmModal" aria-hidden="true">
       <section class="modal-panel confirm-panel" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
         <h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p>
@@ -377,6 +401,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260713-ux1"></script>
+    <script src="/app.js?v=20260713-ux2"></script>
   </body>
 </html>
