@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-13-ux3";
+const APP_VERSION = "2026-07-13-ux4";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -521,6 +521,7 @@ function selectRechargePlan(plan) {
 }
 
 function openMembershipModal() {
+  $("copyWechatBtn").textContent = "复制微信号";
   selectRechargePlan(selectedRechargePlan);
   openModal("membershipModal");
 }
@@ -593,6 +594,48 @@ function escapeHtml(value) {
   }[char]));
 }
 
+async function writeClipboardText(value) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(String(value));
+      return true;
+    } catch (_) {
+      // Embedded browsers may expose the API but reject it; fall back below.
+    }
+  }
+
+  const helper = document.createElement("textarea");
+  helper.value = String(value);
+  helper.setAttribute("readonly", "");
+  helper.style.position = "fixed";
+  helper.style.opacity = "0";
+  helper.style.pointerEvents = "none";
+  document.body.appendChild(helper);
+  helper.focus();
+  helper.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (_) {
+    copied = false;
+  } finally {
+    helper.remove();
+  }
+  return copied;
+}
+
+async function copyTextWithFeedback(value, button) {
+  if (!button) return false;
+  const originalLabel = button.dataset.copyLabel || button.textContent;
+  button.dataset.copyLabel = originalLabel;
+  const copied = await writeClipboardText(value);
+  button.textContent = copied ? "已复制" : "复制失败";
+  window.setTimeout(() => {
+    if (button.isConnected) button.textContent = button.dataset.copyLabel || originalLabel;
+  }, 1600);
+  return copied;
+}
+
 function adminUserById(id) {
   return adminUsers.find((user) => user.id === id);
 }
@@ -650,8 +693,7 @@ function renderAdminUsers(users = null) {
   }));
   list.querySelectorAll("[data-admin-secret-copy]").forEach((button) => button.addEventListener("click", async () => {
     const user = adminUserById(button.closest("[data-user-id]").dataset.userId);
-    await navigator.clipboard.writeText(user.secret);
-    button.textContent = "已复制";
+    await copyTextWithFeedback(user.secret, button);
   }));
   list.querySelectorAll("[data-admin-edit]").forEach((button) => button.addEventListener("click", () => openAdminEditor(button.closest("[data-user-id]").dataset.userId)));
 }
@@ -1335,6 +1377,7 @@ function updateStats() {
       ? `当前账户每次最多测试 ${limit} 个单词${exceeded ? "，请开通会员后继续" : ""}`
       : "当前语言不限单次测试数量";
   }
+  updateSetupActionState();
   const promptKey = `${state.quizLanguage}:${eligibleWords.length}`;
   if (exceeded && promptKey !== lastLimitPromptKey && !$("entryScreen")) {
     lastLimitPromptKey = promptKey;
@@ -1344,10 +1387,21 @@ function updateStats() {
 
 function setBusy(busy) {
   state.busy = busy;
-  ["startBtn", "submitBtn", "skipBtn", "reviewBtn", "reviewHistoryBtn", "speakBtn"].forEach((id) => {
+  ["submitBtn", "skipBtn", "reviewBtn", "reviewHistoryBtn", "speakBtn"].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = busy;
   });
+  updateSetupActionState();
+}
+
+function updateSetupActionState() {
+  const wordCount = parseWords().length;
+  if ($("startBtn")) $("startBtn").disabled = state.busy || wordCount === 0;
+  if ($("shuffleBtn")) $("shuffleBtn").disabled = state.busy || wordCount < 2;
+  if ($("clearBtn")) $("clearBtn").disabled = state.busy || wordCount === 0;
+  if ($("exportWordsBtn")) $("exportWordsBtn").disabled = state.busy || wordCount === 0;
+  if ($("importWordsBtn")) $("importWordsBtn").disabled = state.busy;
+  if ($("wordInput")) $("wordInput").disabled = state.busy;
 }
 
 function setNextNowEnabled(enabled) {
@@ -2187,6 +2241,28 @@ function exportWords() {
   downloadText(`vocab-words-${Date.now()}.txt`, words.join("\n"));
 }
 
+function confirmClearWords() {
+  const count = parseWords().length;
+  if (!count) return;
+  askConfirmation(`确认清空当前词表中的 ${count} 个词？`, () => {
+    $("wordInput").value = "";
+    saveCurrentWordDraft();
+    updateStats();
+  });
+}
+
+function confirmClearWrongBook(scope) {
+  const history = scope === "history";
+  const count = Object.keys(activeWrongBook(history ? "history" : "current")).length;
+  if (!count) return;
+  askConfirmation(`确认清空${history ? "历史" : "本轮"}错题中的 ${count} 个词？此操作不可撤销。`, () => {
+    if (history) state.historyWrongBook = removeLanguageFromWrongBook(state.historyWrongBook);
+    else state.currentWrongBook = removeLanguageFromWrongBook(state.currentWrongBook);
+    saveState();
+    renderWrongBook();
+  });
+}
+
 function parseImportedWords(text) {
   const trimmed = text.trim();
   if (!trimmed) return [];
@@ -2339,15 +2415,20 @@ async function boot() {
   $("adminBtn").addEventListener("click", () => showAdminPanel(true));
   $("logoutBtn").addEventListener("click", logoutAccount);
   $("submitRechargeBtn").addEventListener("click", submitRechargeRequest);
-  $("copyWechatBtn").addEventListener("click", async () => {
-    await navigator.clipboard.writeText("W2009Y94J");
-    $("copyWechatBtn").textContent = "已复制";
-  });
+  $("copyWechatBtn").addEventListener("click", () => copyTextWithFeedback("W2009Y94J", $("copyWechatBtn")));
   document.querySelectorAll("[data-plan]").forEach((button) => button.addEventListener("click", () => selectRechargePlan(button.dataset.plan)));
   document.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", () => closeModal(button.dataset.closeModal)));
   document.querySelectorAll(".modal-layer").forEach((modal) => modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal(modal.id);
   }));
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    const openModals = [...document.querySelectorAll(".modal-layer:not(.hidden)")];
+    const modal = openModals[openModals.length - 1];
+    if (!modal) return;
+    if (modal.id === "confirmModal") confirmAction = null;
+    closeModal(modal.id);
+  });
   $("changeSecretForm").addEventListener("submit", changeOwnSecret);
   $("openDeleteAccountBtn").addEventListener("click", () => openModal("deleteAccountModal"));
   $("deleteAccountForm").addEventListener("submit", deleteOwnAccount);
@@ -2395,11 +2476,7 @@ async function boot() {
     saveCurrentWordDraft();
     updateStats();
   });
-  $("clearBtn").addEventListener("click", () => {
-    $("wordInput").value = "";
-    saveCurrentWordDraft();
-    updateStats();
-  });
+  $("clearBtn").addEventListener("click", confirmClearWords);
   $("importWordsBtn").addEventListener("click", () => $("wordFileInput").click());
   $("exportWordsBtn").addEventListener("click", exportWords);
   $("wordFileInput").addEventListener("change", importWords);
@@ -2417,16 +2494,8 @@ async function boot() {
   $("exportWrongDataBtn").addEventListener("click", exportWrongData);
   $("importWrongDataBtn").addEventListener("click", () => $("wrongDataFileInput").click());
   $("wrongDataFileInput").addEventListener("change", importWrongData);
-  $("clearWrongBtn").addEventListener("click", () => {
-    state.currentWrongBook = removeLanguageFromWrongBook(state.currentWrongBook);
-    saveState();
-    renderWrongBook();
-  });
-  $("clearHistoryBtn").addEventListener("click", () => {
-    state.historyWrongBook = removeLanguageFromWrongBook(state.historyWrongBook);
-    saveState();
-    renderWrongBook();
-  });
+  $("clearWrongBtn").addEventListener("click", () => confirmClearWrongBook("current"));
+  $("clearHistoryBtn").addEventListener("click", () => confirmClearWrongBook("history"));
   $("currentWrongTab").addEventListener("click", () => setWrongScope("current"));
   $("historyWrongTab").addEventListener("click", () => setWrongScope("history"));
   $("wordInput").addEventListener("input", () => {
