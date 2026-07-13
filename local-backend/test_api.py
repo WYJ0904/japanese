@@ -16,6 +16,7 @@ os.environ["VOCAB_USERS_DB"] = str(ROOT / "data" / "users.sqlite3")
 os.environ["VOCAB_USERS_TXT"] = str(ROOT / "users.txt")
 
 import server  # noqa: E402
+from account_store import ADMIN_SECRET  # noqa: E402
 
 
 class AccountApiTests(unittest.TestCase):
@@ -25,7 +26,7 @@ class AccountApiTests(unittest.TestCase):
         cls.base = f"http://127.0.0.1:{cls.httpd.server_port}"
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
         cls.thread.start()
-        status, admin = cls.request("POST", "/api/login", {"username": "wyj", "secret": "77796A"})
+        status, admin = cls.request("POST", "/api/login", {"username": "wyj", "secret": ADMIN_SECRET})
         assert status == 200, admin
         cls.admin_session = admin["session"]
 
@@ -62,7 +63,7 @@ class AccountApiTests(unittest.TestCase):
         return username, login["account"], login["session"]
 
     def test_admin_login_is_strict_and_admin_api_is_protected(self):
-        status, _ = self.request("POST", "/api/login", {"username": "WYJ", "secret": "77796A"})
+        status, _ = self.request("POST", "/api/login", {"username": "WYJ", "secret": ADMIN_SECRET})
         self.assertEqual(status, 403)
         status, users = self.request("GET", "/api/admin/users", session=self.admin_session)
         self.assertEqual(status, 200, users)
@@ -142,6 +143,36 @@ class AccountApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 400, data)
         self.assertEqual(data["code"], "suggest_level_invalid")
+
+    def test_ai_vocabulary_suggestion_excludes_existing_words(self):
+        source = {
+            "online": True,
+            "candidates": [],
+            "snippets": [{"title": "初一词汇", "description": "school study future careful important"}],
+            "sources": [{"title": "课程词汇", "url": "https://example.test/words"}],
+        }
+        responses = [
+            json.dumps({"words": ["school", "study", "future"]}),
+            json.dumps({"words": ["future", "careful", "important"]}),
+        ]
+        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+            "server.call_ollama", side_effect=responses
+        ):
+            status, data = self.request(
+                "POST",
+                "/api/vocabulary/suggest",
+                {
+                    "language": "english",
+                    "level": "middle_1",
+                    "count": 3,
+                    "exclude": ["school", "study"],
+                },
+                self.admin_session,
+            )
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["words"], ["future", "careful", "important"])
+        self.assertNotIn("school", data["words"])
+        self.assertNotIn("study", data["words"])
 
     def test_japanese_suggestion_stays_inside_online_jlpt_candidates(self):
         candidates = ["食べる", "見る", "行く", "来る", "話す"]

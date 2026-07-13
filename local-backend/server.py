@@ -30,7 +30,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-13-vocabulary1"
+APP_BUILD = "2026-07-13-ux1"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -857,14 +857,16 @@ def ai_vocabulary_batch(language, level_label, count, source_data, exclude=None)
         ]
     )
     obj = extract_json(content) or {}
-    return sanitize_suggested_words(
+    words = sanitize_suggested_words(
         obj.get("words", []),
         language,
         candidates if language == "japanese" and candidates else None,
     )
+    excluded_keys = {str(word).casefold() for word in exclude or []}
+    return [word for word in words if word.casefold() not in excluded_keys]
 
 
-def suggest_vocabulary(user, language, level, count):
+def suggest_vocabulary(user, language, level, count, exclude=None):
     language = str(language or "").strip().lower()
     level = str(level or "").strip().lower()
     try:
@@ -877,6 +879,8 @@ def suggest_vocabulary(user, language, level, count):
         raise AccountError("学习等级无效", 400, "suggest_level_invalid")
     if count < 1 or count > MAX_SUGGESTED_WORDS:
         raise AccountError(f"每次可生成 1 至 {MAX_SUGGESTED_WORDS} 个词", 400, "suggest_count_invalid")
+    raw_exclude = exclude if isinstance(exclude, list) else []
+    exclude = sanitize_suggested_words(raw_exclude[:120], language)
     account_limit = ACCOUNT_STORE.quiz_limit(user, language)
     if account_limit is not None and count > account_limit:
         raise AccountError(
@@ -886,13 +890,16 @@ def suggest_vocabulary(user, language, level, count):
         )
 
     level_label = VOCABULARY_LEVELS[language][level][0]
-    source_data = search_vocabulary_sources(language, level, count)
-    words = ai_vocabulary_batch(language, level_label, count, source_data)
+    source_count = min(MAX_SUGGESTED_WORDS, count + len(exclude))
+    source_data = search_vocabulary_sources(language, level, source_count)
+    words = ai_vocabulary_batch(language, level_label, count, source_data, exclude)
     if len(words) < count:
-        supplement = ai_vocabulary_batch(language, level_label, count - len(words), source_data, words)
+        supplement = ai_vocabulary_batch(language, level_label, count - len(words), source_data, exclude + words)
         words = sanitize_suggested_words(words + supplement, language)
     if language == "japanese" and len(words) < count:
-        words = sanitize_suggested_words(words + source_data.get("candidates", []), language)
+        excluded_keys = {word.casefold() for word in exclude}
+        candidates = [word for word in source_data.get("candidates", []) if word.casefold() not in excluded_keys]
+        words = sanitize_suggested_words(words + candidates, language)
     if len(words) < count:
         raise AiUnavailable(f"AI 只整理出 {len(words)} 个合格词，请减少数量或重试")
     return {
@@ -1707,6 +1714,7 @@ class VocabHandler(BaseHTTPRequestHandler):
                     payload.get("language"),
                     payload.get("level"),
                     payload.get("count"),
+                    payload.get("exclude"),
                 )
                 result.update({"ok": True, "build": APP_BUILD})
                 json_response(self, HTTPStatus.OK, result)

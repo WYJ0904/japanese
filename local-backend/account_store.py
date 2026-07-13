@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ADMIN_USERNAME = "wyj"
-ADMIN_SECRET = "77796A"
+ADMIN_SECRET = os.environ.get("VOCAB_ADMIN_SECRET", "").strip() or secrets.token_urlsafe(12)
 MEMBERSHIPS = {"free", "trial_single_language", "monthly", "lifetime"}
 LANGUAGES = {"english", "japanese"}
 RECHARGE_PLANS = {"trial_single_language", "monthly", "lifetime"}
@@ -172,12 +172,12 @@ class AccountStore:
             if admin:
                 connection.execute(
                     """
-                    UPDATE users SET username = ?, secret = ?, role = 'super_admin',
+                    UPDATE users SET username = ?, role = 'super_admin',
                         membership = 'lifetime', membership_start = '', membership_expires = '',
                         trial_language = '', banned = 0, permanent_ban = 0, deleted = 0,
                         ban_reason = '', updated_at = ? WHERE id = ?
                     """,
-                    (ADMIN_USERNAME, ADMIN_SECRET, now, admin["id"]),
+                    (ADMIN_USERNAME, now, admin["id"]),
                 )
             else:
                 admin_id = str(uuid.uuid4())
@@ -381,7 +381,7 @@ class AccountStore:
         if row["banned"]:
             raise AccountError("账户已被封禁", 403, "account_banned")
         if row["username_normalized"] == ADMIN_USERNAME:
-            valid = username_text == ADMIN_USERNAME and secret_text == ADMIN_SECRET and row["role"] == "super_admin"
+            valid = username_text == ADMIN_USERNAME and secrets.compare_digest(secret_text, row["secret"]) and row["role"] == "super_admin"
         else:
             valid = secrets.compare_digest(secret_text, row["secret"])
         if not valid:

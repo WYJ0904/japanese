@@ -1,6 +1,7 @@
-const APP_VERSION = "2026-07-13-vocabulary1";
-const NORMAL_RESULT_VISIBLE_MS = 3000;
-const AI_RESULT_VISIBLE_MS = 3000;
+const APP_VERSION = "2026-07-13-ux1";
+const NORMAL_RESULT_VISIBLE_MS = 8000;
+const AI_RESULT_VISIBLE_MS = 10000;
+const SKIP_RESULT_VISIBLE_MS = 5000;
 const API_TIMEOUT_MS = 100000;
 const STATUS_TIMEOUT_MS = 8000;
 const STATUS_RETRY_DELAYS_MS = [0, 800, 2000];
@@ -11,6 +12,7 @@ const MAX_RUBRIC_CACHE_ITEMS = 500;
 const WRONG_BOOK_EXPORT_TYPE = "vocab-wrong-book";
 const WRONG_BOOK_EXPORT_VERSION = 1;
 const DEFAULT_PROFILE = "我";
+const BUSINESS_TIME_ZONE = "Asia/Hong_Kong";
 const LANGUAGE_LABELS = {
   english: "英语",
   japanese: "日语",
@@ -91,6 +93,23 @@ function loadJson(key, fallback) {
     return fallback;
   }
 }
+
+function migrateProjectPreferences() {
+  const legacyGrading = ["strict", "normal", "lenient"].includes(localStorage.getItem("gradingMode"))
+    ? localStorage.getItem("gradingMode")
+    : "normal";
+  const legacyPractice = normalizePracticeMode(localStorage.getItem("practiceMode"));
+  Object.keys(LANGUAGE_LABELS).forEach((language) => {
+    if (localStorage.getItem(`gradingMode:${language}`) === null) {
+      localStorage.setItem(`gradingMode:${language}`, legacyGrading);
+    }
+    if (localStorage.getItem(`practiceMode:${language}`) === null) {
+      localStorage.setItem(`practiceMode:${language}`, legacyPractice);
+    }
+  });
+}
+
+migrateProjectPreferences();
 
 function limitText(value, maxLength = 500) {
   return String(value || "").trim().slice(0, maxLength);
@@ -258,12 +277,28 @@ function saveAchievements() {
   localStorage.setItem(achievementKey(), JSON.stringify(state.achievements));
 }
 
+function loadProjectPreferences(language) {
+  if (!LANGUAGE_LABELS[language]) return;
+  const grading = localStorage.getItem(`gradingMode:${language}`);
+  state.gradingMode = ["strict", "normal", "lenient"].includes(grading) ? grading : "normal";
+  state.practiceMode = normalizePracticeMode(localStorage.getItem(`practiceMode:${language}`));
+  if ($("gradingModeSelect")) $("gradingModeSelect").value = state.gradingMode;
+  updatePracticeUi();
+}
+
+function saveProjectPreferences() {
+  if (!LANGUAGE_LABELS[state.quizLanguage]) return;
+  localStorage.setItem(`gradingMode:${state.quizLanguage}`, state.gradingMode);
+  localStorage.setItem(`practiceMode:${state.quizLanguage}`, state.practiceMode);
+}
+
 function saveState() {
   localStorage.setItem("vocabAppVersion", APP_VERSION);
   localStorage.setItem("vocabProfile", state.profile);
   localStorage.setItem("gradingMode", state.gradingMode);
   localStorage.setItem("practiceMode", state.practiceMode);
   localStorage.setItem("quizLanguage", state.quizLanguage);
+  saveProjectPreferences();
   state.rubricCache = trimRubricCache(state.rubricCache);
   localStorage.setItem("rubricCache", JSON.stringify(state.rubricCache));
   saveWrongBooks();
@@ -292,6 +327,10 @@ function clearSession() {
   localStorage.removeItem("vocabSession");
   localStorage.removeItem("wyjAccountSession");
   localStorage.removeItem("wyjAccountCache");
+  ["secretInput", "registerSecretInput", "registerConfirmInput", "currentSecretInput", "newSecretInput", "deleteSecretInput", "adminNewSecretInput"].forEach((id) => {
+    const input = $(id);
+    if (input) input.value = "";
+  });
   renderAccountUi();
 }
 
@@ -556,17 +595,40 @@ function adminUserById(id) {
   return adminUsers.find((user) => user.id === id);
 }
 
+function formatLocalDateTime(value, fallback = "无") {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+function rechargeStatusLabel(status) {
+  return { pending: "待处理", activated: "已开通", rejected: "已拒绝" }[status] || status || "未知";
+}
+
 function renderAdminUsers(users) {
   adminUsers = users || [];
   const list = $("adminUserList");
   list.innerHTML = adminUsers.map((user) => {
     const protectedUser = user.is_super_admin;
     const stateClass = user.banned ? "account-state-bad" : "account-state-good";
+    const membershipExpiry = user.membership === "lifetime" ? "永久" : formatLocalDateTime(user.membership_expires, "无到期时间");
+    const trialLanguage = user.trial_language ? quizLanguageLabel(user.trial_language) : "无";
     return `<article class="admin-user-card" data-user-id="${escapeHtml(user.id)}">
-      <div><h3>${escapeHtml(user.username)}</h3><p>${escapeHtml(user.id)}</p><p class="${stateClass}">${user.banned ? "已永久封禁" : "正常"}</p></div>
-      <div><p>${escapeHtml(membershipLabel(user.membership))}</p><p>${escapeHtml(user.trial_language || "无体验语言")}</p><p>${escapeHtml(user.membership_expires || (user.membership === "lifetime" ? "永久" : "无到期时间"))}</p></div>
-      <div><p class="secret-value" data-secret-value>${"•".repeat(Math.max(6, String(user.secret || "").length))}</p><div class="action-row compact"><button data-admin-secret-toggle type="button">查看密钥</button><button data-admin-secret-copy type="button">复制密钥</button></div><p>最后登录：${escapeHtml(user.last_login_at || "从未")}</p></div>
-      <div class="action-row compact"><button data-admin-edit type="button" ${protectedUser ? "disabled" : ""}>编辑</button></div>
+      <div class="admin-user-identity"><h3>${escapeHtml(user.username)}</h3><p class="admin-user-id">${escapeHtml(user.id)}</p><p class="${stateClass}">${user.banned ? "已永久封禁" : "正常"}</p></div>
+      <div class="admin-user-facts"><p><span>会员</span><strong>${escapeHtml(membershipLabel(user.membership))}</strong></p><p><span>体验语言</span><strong>${escapeHtml(trialLanguage)}</strong></p><p><span>截止时间</span><strong>${escapeHtml(membershipExpiry)}</strong></p></div>
+      <div class="admin-user-security"><p><span class="admin-field-name">登录密钥</span><span class="secret-value" data-secret-value>${"•".repeat(Math.max(6, String(user.secret || "").length))}</span></p><div class="action-row compact"><button data-admin-secret-toggle type="button">查看密钥</button><button data-admin-secret-copy type="button">复制密钥</button></div><p class="admin-last-login">最后登录：${escapeHtml(formatLocalDateTime(user.last_login_at, "从未"))}</p></div>
+      <div class="action-row compact admin-user-actions"><button data-admin-edit type="button" ${protectedUser ? "disabled" : ""}>编辑</button></div>
     </article>`;
   }).join("");
   list.querySelectorAll("[data-admin-secret-toggle]").forEach((button) => button.addEventListener("click", () => {
@@ -589,10 +651,10 @@ function renderAdminUsers(users) {
 function renderAdminRecharge(requests) {
   const list = $("adminRechargeList");
   list.innerHTML = (requests || []).map((request) => `<article class="admin-user-card" data-request-id="${escapeHtml(request.id)}">
-    <div><h3>${escapeHtml(request.username)}</h3><p>${escapeHtml(request.requested_at)}</p></div>
-    <div><p>${escapeHtml(membershipLabel(request.plan))}</p><p>${escapeHtml(request.trial_language || "两种语言")}</p></div>
-    <div><p>${escapeHtml(request.status)}</p></div>
-    <div class="action-row compact">${request.status === "pending" ? '<button data-recharge-approve type="button">开通</button><button data-recharge-reject type="button">拒绝</button>' : ""}</div>
+    <div class="admin-user-identity"><h3>${escapeHtml(request.username)}</h3><p class="admin-last-login">申请时间：${escapeHtml(formatLocalDateTime(request.requested_at, "未知"))}</p></div>
+    <div class="admin-user-facts"><p><span>套餐</span><strong>${escapeHtml(membershipLabel(request.plan))}</strong></p><p><span>可用语言</span><strong>${escapeHtml(request.trial_language ? quizLanguageLabel(request.trial_language) : "英语和日语")}</strong></p></div>
+    <div class="admin-request-status"><span>状态</span><strong>${escapeHtml(rechargeStatusLabel(request.status))}</strong></div>
+    <div class="action-row compact admin-user-actions">${request.status === "pending" ? '<button data-recharge-approve type="button">开通</button><button data-recharge-reject type="button">拒绝</button>' : ""}</div>
   </article>`).join("") || "<p>暂无充值申请</p>";
   list.querySelectorAll("[data-recharge-approve], [data-recharge-reject]").forEach((button) => button.addEventListener("click", () => {
     const requestId = button.closest("[data-request-id]").dataset.requestId;
@@ -642,10 +704,13 @@ function leaveAdminPanel() {
 }
 
 function localDateValue(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}/${month}/${day}`;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.year}/${parts.month}/${parts.day}`;
 }
 
 function membershipDateValue(value) {
@@ -937,6 +1002,7 @@ function enterProject(value) {
   }
   currentProject = language;
   state.quizLanguage = language;
+  loadProjectPreferences(language);
   projectRuntimeNeedsRestore = true;
   loadCurrentWordDraft();
   saveState();
@@ -1002,6 +1068,18 @@ function updateLanguageUi() {
   updateAiSuggestionControls();
 }
 
+function aiSuggestionSettingsKey(language = state.quizLanguage) {
+  return `aiSuggestSettings:${language}`;
+}
+
+function saveAiSuggestionSettings() {
+  if (!LANGUAGE_LABELS[state.quizLanguage]) return;
+  const level = $("aiLevelSelect")?.value || "";
+  const count = Number($("aiSuggestCount")?.value);
+  const mode = $("aiSuggestMode")?.value === "append" ? "append" : "replace";
+  localStorage.setItem(aiSuggestionSettingsKey(), JSON.stringify({ level, count, mode }));
+}
+
 function updateAiSuggestionControls() {
   const language = state.quizLanguage;
   const levelSelect = $("aiLevelSelect");
@@ -1009,6 +1087,7 @@ function updateAiSuggestionControls() {
   if (!levelSelect || !countInput || !VOCABULARY_LEVEL_OPTIONS[language]) return;
   const previousLanguage = levelSelect.dataset.language || "";
   const previousLevel = previousLanguage === language ? levelSelect.value : "";
+  const saved = previousLanguage === language ? null : loadJson(aiSuggestionSettingsKey(language), {});
   levelSelect.replaceChildren();
   VOCABULARY_LEVEL_OPTIONS[language].forEach(([value, label]) => {
     const option = document.createElement("option");
@@ -1016,14 +1095,19 @@ function updateAiSuggestionControls() {
     option.textContent = label;
     levelSelect.append(option);
   });
+  const savedLevel = String(saved?.level || "");
   if (previousLevel && VOCABULARY_LEVEL_OPTIONS[language].some(([value]) => value === previousLevel)) {
     levelSelect.value = previousLevel;
+  } else if (savedLevel && VOCABULARY_LEVEL_OPTIONS[language].some(([value]) => value === savedLevel)) {
+    levelSelect.value = savedLevel;
   }
   levelSelect.dataset.language = language;
   $("aiSuggestLanguage").textContent = quizLanguageLabel(language);
   const accountLimit = accountWordLimit(language);
   const maxCount = Number.isFinite(accountLimit) ? accountLimit : 100;
   countInput.max = String(maxCount);
+  if (saved && Number.isInteger(Number(saved.count))) countInput.value = String(saved.count);
+  if (saved && $("aiSuggestMode")) $("aiSuggestMode").value = saved.mode === "append" ? "append" : "replace";
   const currentCount = Number(countInput.value);
   if (!Number.isInteger(currentCount) || currentCount < 1 || currentCount > maxCount) {
     countInput.value = String(Math.min(10, maxCount));
@@ -1216,6 +1300,13 @@ async function api(path, body = {}, options = {}) {
 }
 
 function setView(id) {
+  const leavingQuiz = id !== "quizView" && $("quizView")?.classList.contains("active");
+  if (leavingQuiz) {
+    if (judgeController) judgeController.abort();
+    clearNextTimer();
+    hideResultPanel();
+    setNextNowEnabled(false);
+  }
   document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.id === id));
   document.querySelectorAll(".tabs button").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === id));
   if (id === "wrongView") renderWrongBook();
@@ -1458,8 +1549,19 @@ async function generateAiVocabulary() {
   const count = Number($("aiSuggestCount").value);
   const mode = $("aiSuggestMode").value;
   const maxCount = Number($("aiSuggestCount").max || 100);
+  const baseWords = mode === "append" ? parseWords() : [];
+  const existingLanguageWords = filterWordsByLanguage(baseWords, language);
   if (!Number.isInteger(count) || count < 1 || count > maxCount) {
     message.textContent = `请输入 1 至 ${maxCount} 之间的整数`;
+    message.classList.add("error");
+    return;
+  }
+  const accountLimit = accountWordLimit(language);
+  const remaining = Number.isFinite(accountLimit) ? Math.max(0, accountLimit - new Set(existingLanguageWords).size) : Infinity;
+  if (mode === "append" && count > remaining) {
+    message.textContent = remaining > 0
+      ? `当前词表还能追加 ${remaining} 个词，请减少数量`
+      : "当前词表已达到本次测试上限，请改用替换词表或开通会员";
     message.classList.add("error");
     return;
   }
@@ -1468,21 +1570,29 @@ async function generateAiVocabulary() {
   button.textContent = "搜索中…";
   message.classList.remove("error");
   message.textContent = "正在联网搜索并由本地 AI 整理词汇…";
+  saveAiSuggestionSettings();
   try {
     const data = await api(
       "/api/vocabulary/suggest",
-      { language, level, count },
+      { language, level, count, exclude: existingLanguageWords },
       { timeoutMs: 120000 },
     );
     const generated = filterWordsByLanguage(data.words || [], language);
     if (!generated.length) throw new Error("没有生成可用词汇，请重试");
-    const baseWords = mode === "append" ? parseWords() : [];
-    const words = [...new Set([...baseWords, ...generated])];
+    const existingKeys = new Set(baseWords.map((word) => word.toLocaleLowerCase()));
+    const added = generated.filter((word) => {
+      const key = word.toLocaleLowerCase();
+      if (existingKeys.has(key)) return false;
+      existingKeys.add(key);
+      return true;
+    });
+    if (!added.length) throw new Error("这次找到的词都已在词表中，请重试或改用替换词表");
+    const words = mode === "append" ? [...baseWords, ...added] : added;
     $("wordInput").value = words.join("\n");
     saveCurrentWordDraft();
     updateStats();
     const sourceText = data.online ? "联网资料与本地 AI" : "本地 AI（联网资料暂不可用）";
-    message.textContent = `${sourceText}已生成 ${generated.length} 个${data.level_label || ""}词汇`;
+    message.textContent = `${sourceText} 已${mode === "append" ? "追加" : "生成"} ${added.length} 个${data.level_label || ""}词汇`;
   } catch (error) {
     message.textContent = error.message;
     message.classList.add("error");
@@ -1644,7 +1754,7 @@ function renderSkipResult() {
   $("resultTitle").textContent = "已跳过";
   $("resultGloss").textContent = "已加入错题本";
   $("acceptedChips").innerHTML = "";
-  scheduleResultHide(900);
+  scheduleResultHide(SKIP_RESULT_VISIBLE_MS);
 }
 
 function nextWord() {
@@ -1679,7 +1789,7 @@ function skipWord() {
   markWrong(word, SKIPPED_ANSWER, rubric && rubric.gloss ? rubric.gloss : "跳过：未作答", rubric && rubric.accepted ? rubric.accepted : []);
   renderSkipResult();
   updateStats();
-  scheduleNext(900);
+  scheduleNext(SKIP_RESULT_VISIBLE_MS);
 }
 
 async function submitAnswer(event) {
@@ -1826,6 +1936,14 @@ function setWrongScope(scope) {
 function renderWrongBook() {
   const list = $("wrongList");
   list.innerHTML = "";
+  const currentCount = Object.keys(activeWrongBook("current")).length;
+  const historyCount = Object.keys(activeWrongBook("history")).length;
+  [["reviewBtn", currentCount], ["exportBtn", currentCount], ["clearWrongBtn", currentCount], ["reviewHistoryBtn", historyCount], ["exportHistoryBtn", historyCount], ["clearHistoryBtn", historyCount]].forEach(([id, count]) => {
+    const button = $(id);
+    if (!button) return;
+    button.disabled = count === 0;
+    button.title = count === 0 ? "暂无可操作的错题" : "";
+  });
   const scope = state.wrongScope;
   const book = activeWrongBook(scope);
   const entries = Object.entries(book).sort((a, b) => (b[1].wrong_count || 0) - (a[1].wrong_count || 0));
@@ -1865,7 +1983,9 @@ function startWrongReview(scope) {
 async function exportWrongBook(scope = "current") {
   const book = activeWrongBook(scope);
   if (!Object.keys(book).length) {
-    alert(scope === "history" ? "历史错题为空，暂无可导出的 PDF。" : "本轮错题为空，暂无可导出的 PDF。");
+    $("wrongScopeLabel").textContent = scope === "history"
+      ? "历史错题为空，暂无可导出的 PDF"
+      : "本轮错题为空，暂无可导出的 PDF";
     return;
   }
 
@@ -2082,6 +2202,7 @@ async function login(event) {
     state.session = data.session;
     localStorage.setItem("wyjAccountSession", state.session);
     applyAccount(data.account);
+    $("secretInput").value = "";
     clearSavedWordDrafts(data.account);
     pendingScreen = "workspace";
     pendingAuthMessage = "";
@@ -2205,6 +2326,9 @@ async function boot() {
   $("answerForm").addEventListener("submit", submitAnswer);
   $("startBtn").addEventListener("click", () => startQuiz(parseWords()));
   $("aiSuggestBtn").addEventListener("click", generateAiVocabulary);
+  ["aiLevelSelect", "aiSuggestCount", "aiSuggestMode"].forEach((id) => {
+    $(id).addEventListener("change", saveAiSuggestionSettings);
+  });
   $("shuffleBtn").addEventListener("click", () => {
     $("wordInput").value = shuffle(parseWords()).join("\n");
     saveCurrentWordDraft();

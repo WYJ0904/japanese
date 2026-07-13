@@ -20,14 +20,7 @@
 
 前端会对 `/api/status` 做短间隔重试；设备重新联网或从微信后台回到页面时会自动复查。登录和注册按钮也会主动恢复连接，单次网络超时不会再被永久误判为 `LOCAL_API_BASE` 未配置。
 
-账户区位于页面右上角。固定超级管理员为：
-
-```text
-用户名：wyj
-登录密钥：77796A
-```
-
-只有数据库会话中同时满足 `username == "wyj"` 和 `role == "super_admin"` 的账户才能看到并访问 `/admin`。普通用户即使手工打开该路径或直接调用管理员 API，也会被服务器拒绝。
+账户区位于页面右上角。超级管理员用户名固定为 `wyj`，但登录密钥不再写入公开仓库。已有数据库保留原密钥；全新数据库首次创建时读取本机 `VOCAB_ADMIN_SECRET`，未设置时生成随机密钥并写入运行目录的 `users.txt`。只有数据库会话中同时满足 `username == "wyj"` 和 `role == "super_admin"` 的账户才能看到并访问 `/admin`。普通用户即使手工打开该路径或直接调用管理员 API，也会被服务器拒绝。
 
 ## 账户与会员
 
@@ -49,7 +42,7 @@
 
 普通账户每次最多测试 15 个单词。前端会提示并打开会员窗口，后端 `/api/quiz/start` 仍会独立校验，因此不能通过修改浏览器变量绕过。体验会员只对已选语言无限；包月、永久和超级管理员对两种语言无限。后端在每次读取账户和授权测试时检查到期时间，过期后立即恢复 `free`。
 
-词表页提供“AI 联网选词”：日语支持 JLPT N5 至 N1，英语支持小学三至六年级、初中一至三年级、高中一至三年级及大学英语四、六级。用户可填写数量并选择替换或追加词表。后端只访问预设搜索服务，日语优先使用 JLPT 标签候选，搜索资料由本地 Ollama 过滤和去重；外网资料暂不可用时会明确降级为本地 AI。普通账户仍受 15 词限制，其他账户单次最多生成 100 词。
+词表页提供“AI 联网选词”：日语支持 JLPT N5 至 N1，英语支持小学三至六年级、初中一至三年级、高中一至三年级及大学英语四、六级。用户可填写数量并选择替换或追加词表。追加时前端会把已有词传给后端排除，后端也会再次过滤重复词；界面按实际新增数量反馈，不会把重复词误报为已追加。后端只访问预设搜索服务，日语优先使用 JLPT 标签候选，搜索资料由本地 Ollama 过滤和去重；外网资料暂不可用时会明确降级为本地 AI。普通账户仍受 15 词限制，其他账户单次最多生成 100 词。
 
 管理员编辑会员时，开始和截止日期可按 `年/月/日` 输入，分隔符支持 `/`、`.`、`。` 和空格。开始日期会采用管理员点击保存时的本地时、分、秒；截止日期固定保存为所选日期当天 `23:59:59`。数据库中仍统一存储为 UTC ISO 时间，旧数据格式保持兼容。
 
@@ -71,6 +64,8 @@ users.txt
 `users.txt` 先写临时文件，再使用 `os.replace` 原子替换。数据库提交成功但 TXT 同步失败时，API 会明确返回“数据库已保存但 TXT 同步失败”，不会向界面伪报成功。以上文件不在 `static` 中，也已被 `.gitignore` 排除，不能通过网站 URL 下载。
 
 浏览器中的错题、成就、设置和会话继续保存在原有 `localStorage` / `sessionStorage` 键中。待测试词表使用账户 ID、语言和使用者名称隔离；每次重新登录、退出或注销账户时会清除待测试词表以及旧版共享词表键，避免上一次登录留下的单词再次出现。错题、成就和设置不会随之清除。
+
+英语和日语的判卷方式、练习方式与 AI 选词选项分别保存在新增的 `gradingMode:english|japanese`、`practiceMode:english|japanese` 和 `aiSuggestSettings:english|japanese` 键中。首次升级会从旧版共享设置迁移一份初始值，之后两个项目互不串台；原有键仍保留用于向旧版本兼容。登录成功和退出登录都会清空页面中的明文密钥输入框。
 
 明文密钥存在固有安全风险。不要公开运行目录、SQLite 文件或 `users.txt`，也不要把它们提交到 GitHub。此实现仅用于满足当前产品要求。
 
@@ -165,6 +160,6 @@ node --check desktop-tools\vocab-ui-test.cjs
 
 ## 环境变量
 
-本地后端支持：`OLLAMA_HOST`、`OLLAMA_MODEL`、`OLLAMA_TIMEOUT_SEC`、`VOCAB_HOST`、`VOCAB_PORT`、`VOCAB_SESSION_TTL_SEC`、`VOCAB_SESSION_MAX_ITEMS`、`VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`、`VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`、`VOCAB_USERS_DB`、`VOCAB_USERS_TXT`、`VOCAB_STATIC_DIR`。
+本地后端支持：`OLLAMA_HOST`、`OLLAMA_MODEL`、`OLLAMA_TIMEOUT_SEC`、`VOCAB_HOST`、`VOCAB_PORT`、`VOCAB_SESSION_TTL_SEC`、`VOCAB_SESSION_MAX_ITEMS`、`VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`、`VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`、`VOCAB_USERS_DB`、`VOCAB_USERS_TXT`、`VOCAB_STATIC_DIR`、`VOCAB_ADMIN_SECRET`。`VOCAB_ADMIN_SECRET` 只在创建全新管理员记录时使用，不会在重启时覆盖已有管理员密钥。
 
 不要把 Ollama 的 `11434` 端口直接暴露到公网。公网只通过 Tunnel 访问受账户和会话保护的 Python 后端 `8765`。

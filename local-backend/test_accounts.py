@@ -38,6 +38,20 @@ class AccountStoreTests(unittest.TestCase):
             with self.assertRaises(AccountError):
                 self.store.login(username, ADMIN_SECRET)
 
+    def test_existing_admin_secret_survives_restart(self):
+        local_secret = "LOCAL-ADMIN-ONLY"
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE users SET secret = ? WHERE username_normalized = ?",
+                (local_secret, "wyj"),
+            )
+        restarted = AccountStore(self.store.database_path, self.text_path)
+        token, user = restarted.login("wyj", local_secret)
+        self.assertTrue(token)
+        self.assertTrue(restarted.is_super_admin(user))
+        with self.assertRaises(AccountError):
+            restarted.login("wyj", ADMIN_SECRET)
+
     def test_registration_and_case_insensitive_uniqueness(self):
         user = self.register("UserOne")
         self.assertEqual(user["membership"], "free")
