@@ -30,7 +30,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-13-ux1"
+APP_BUILD = "2026-07-14-vocab1"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -61,7 +61,10 @@ STATE_LOCK = threading.RLock()
 AI_SEMAPHORE = threading.BoundedSemaphore(AI_MAX_CONCURRENCY)
 QUIZ_RUN_TTL_SEC = 2 * 60 * 60
 MAX_QUIZ_WORDS = 500
-MAX_SUGGESTED_WORDS = 100
+MAX_SUGGESTED_WORDS = 200
+MAX_VOCABULARY_SOURCE_WORDS = 500
+MAX_JAPANESE_READING_WORDS = 200
+AI_VOCABULARY_BATCH_SIZE = 50
 WEB_SEARCH_TIMEOUT_SEC = 12
 VOCABULARY_SOURCE_CACHE_TTL_SEC = 6 * 60 * 60
 VOCABULARY_LEVELS = {
@@ -223,6 +226,18 @@ def validate_quiz_run(user, token, word):
     return run
 
 
+def validate_quiz_words(user, token, words, language=None):
+    if not words:
+        raise AccountError("词表不能为空", 400, "words_required")
+    run = validate_quiz_run(user, token, words[0])
+    if language and run["language"] != language:
+        raise AccountError("测试语言与请求不一致", 400, "language_invalid")
+    unauthorized = [word for word in words if str(word).strip().casefold() not in run["words"]]
+    if unauthorized:
+        raise AccountError("单词不在本轮测试中", 403, "word_not_authorized")
+    return run
+
+
 def limit_text(value, max_len=MAX_TEXT_LEN):
     return str(value or "").strip()[:max_len]
 
@@ -310,6 +325,14 @@ def clean_accepted(values):
     return out
 
 
+def clean_japanese_reading(value):
+    reading = unicodedata.normalize("NFKC", str(value or ""))
+    reading = re.sub(r"\s+", "", reading).strip()[:64]
+    if not re.fullmatch(r"[\u3040-\u30ff\u31f0-\u31ffー・]+", reading):
+        return ""
+    return reading
+
+
 def sanitize_rubric(value):
     if not isinstance(value, dict):
         return None
@@ -322,6 +345,7 @@ def sanitize_rubric(value):
         "gloss": limit_text(value.get("gloss"), MAX_RUBRIC_TEXT_LEN),
         "accepted": clean_accepted(accepted),
         "notes": limit_text(value.get("notes"), MAX_RUBRIC_TEXT_LEN),
+        "reading": clean_japanese_reading(value.get("reading")),
     }
 
 
@@ -357,7 +381,7 @@ def detect_word_language(word):
     word = (word or "").strip()
     if re.fullmatch(r"[A-Za-z][A-Za-z' -]*", word):
         return "英语"
-    if re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", word):
+    if re.search(r"[\u3040-\u30ff\u31f0-\u31ff\u3400-\u9fff々〆ヶ]", word):
         return "日语"
     return "外语"
 
@@ -738,8 +762,9 @@ def bing_search_context(query):
 
 def jisho_level_candidates(level, desired):
     candidates = []
+    readings = {}
     seen = set()
-    pages = min(8, max(1, (desired + 19) // 20 + 2))
+    pages = min(30, max(2, (desired + 19) // 20 + 1))
     expected_tag = f"jlpt-{level}"
     for page in range(1, pages + 1):
         params = urllib.parse.urlencode({"keyword": f"#jlpt-{level}", "page": page})
@@ -752,15 +777,19 @@ def jisho_level_candidates(level, desired):
             forms = entry.get("japanese") or []
             if not forms:
                 continue
-            word = str(forms[0].get("word") or forms[0].get("reading") or "").strip()
+            primary = forms[0] if isinstance(forms[0], dict) else {}
+            word = str(primary.get("word") or primary.get("reading") or "").strip()
+            reading = clean_japanese_reading(primary.get("reading"))
             key = word.casefold()
             if word and key not in seen and len(word) <= 32 and not re.search(r"\s", word):
                 seen.add(key)
                 candidates.append(word)
+                if reading:
+                    readings[word] = reading
         if len(candidates) >= desired:
             break
     random.shuffle(candidates)
-    return candidates
+    return candidates, readings
 
 
 def search_vocabulary_sources(language, level, count):
@@ -773,10 +802,14 @@ def search_vocabulary_sources(language, level, count):
         cache_has_enough_words = language != "japanese" or len(cached_candidates) >= count
         if cached and cache_has_enough_words and now - cached["created_at"] < VOCABULARY_SOURCE_CACHE_TTL_SEC:
             return json.loads(json.dumps(cached["data"], ensure_ascii=False))
-    result = {"online": False, "candidates": [], "snippets": [], "sources": []}
+    result = {"online": False, "candidates": [], "readings": {}, "snippets": [], "sources": []}
     if language == "japanese":
         try:
-            result["candidates"] = jisho_level_candidates(level, count)
+            jisho_result = jisho_level_candidates(level, count)
+            if isinstance(jisho_result, tuple):
+                result["candidates"], result["readings"] = jisho_result
+            else:
+                result["candidates"] = list(jisho_result or [])
             if result["candidates"]:
                 result["online"] = True
                 result["sources"].append(
@@ -824,8 +857,8 @@ def sanitize_suggested_words(values, language, allowed=None):
     return result
 
 
-def ai_vocabulary_batch(language, level_label, count, source_data, exclude=None):
-    candidates = source_data.get("candidates", [])[:240]
+def ai_vocabulary_batch(language, level_label, count, source_data, exclude=None, batch_index=0):
+    candidates = source_data.get("candidates", [])[:MAX_VOCABULARY_SOURCE_WORDS]
     reference = {
         "online_candidates": candidates,
         "search_snippets": source_data.get("snippets", [])[:8],
@@ -847,7 +880,8 @@ def ai_vocabulary_batch(language, level_label, count, source_data, exclude=None)
                         "language": language,
                         "level": level_label,
                         "count": count,
-                        "exclude": list(exclude or [])[:120],
+                        "exclude": list(exclude or [])[:MAX_VOCABULARY_SOURCE_WORDS],
+                        "batch_index": int(batch_index),
                         "request_nonce": secrets.randbelow(1_000_000),
                         "reference": reference,
                     },
@@ -866,6 +900,27 @@ def ai_vocabulary_batch(language, level_label, count, source_data, exclude=None)
     return [word for word in words if word.casefold() not in excluded_keys]
 
 
+def collect_ai_vocabulary(language, level_label, count, source_data, exclude=None):
+    words = []
+    excluded = list(exclude or [])
+    attempts = max(3, min(10, (count + AI_VOCABULARY_BATCH_SIZE - 1) // AI_VOCABULARY_BATCH_SIZE + 3))
+    for batch_index in range(attempts):
+        remaining = count - len(words)
+        if remaining <= 0:
+            break
+        requested = min(AI_VOCABULARY_BATCH_SIZE, remaining)
+        batch = ai_vocabulary_batch(
+            language,
+            level_label,
+            requested,
+            source_data,
+            excluded + words,
+            batch_index,
+        )
+        words = sanitize_suggested_words(words + batch, language)
+    return words[:count]
+
+
 def suggest_vocabulary(user, language, level, count, exclude=None):
     language = str(language or "").strip().lower()
     level = str(level or "").strip().lower()
@@ -880,7 +935,7 @@ def suggest_vocabulary(user, language, level, count, exclude=None):
     if count < 1 or count > MAX_SUGGESTED_WORDS:
         raise AccountError(f"每次可生成 1 至 {MAX_SUGGESTED_WORDS} 个词", 400, "suggest_count_invalid")
     raw_exclude = exclude if isinstance(exclude, list) else []
-    exclude = sanitize_suggested_words(raw_exclude[:120], language)
+    exclude = sanitize_suggested_words(raw_exclude[:MAX_VOCABULARY_SOURCE_WORDS], language)
     account_limit = ACCOUNT_STORE.quiz_limit(user, language)
     if account_limit is not None and count > account_limit:
         raise AccountError(
@@ -890,20 +945,33 @@ def suggest_vocabulary(user, language, level, count, exclude=None):
         )
 
     level_label = VOCABULARY_LEVELS[language][level][0]
-    source_count = min(MAX_SUGGESTED_WORDS, count + len(exclude))
+    source_count = min(MAX_VOCABULARY_SOURCE_WORDS, count + len(exclude))
     source_data = search_vocabulary_sources(language, level, source_count)
-    words = ai_vocabulary_batch(language, level_label, count, source_data, exclude)
-    if len(words) < count:
-        supplement = ai_vocabulary_batch(language, level_label, count - len(words), source_data, exclude + words)
-        words = sanitize_suggested_words(words + supplement, language)
-    if language == "japanese" and len(words) < count:
+    if language == "japanese" and source_data.get("candidates"):
+        words = ai_vocabulary_batch(
+            language,
+            level_label,
+            min(count, AI_VOCABULARY_BATCH_SIZE),
+            source_data,
+            exclude,
+        )
         excluded_keys = {word.casefold() for word in exclude}
         candidates = [word for word in source_data.get("candidates", []) if word.casefold() not in excluded_keys]
         words = sanitize_suggested_words(words + candidates, language)
+    else:
+        words = collect_ai_vocabulary(language, level_label, count, source_data, exclude)
     if len(words) < count:
         raise AiUnavailable(f"AI 只整理出 {len(words)} 个合格词，请减少数量或重试")
+    selected = words[:count]
+    source_readings = source_data.get("readings", {})
+    readings = {
+        word: clean_japanese_reading(source_readings.get(word))
+        for word in selected
+        if clean_japanese_reading(source_readings.get(word))
+    }
     return {
-        "words": words[:count],
+        "words": selected,
+        "readings": readings,
         "language": language,
         "level": level,
         "level_label": level_label,
@@ -912,15 +980,76 @@ def suggest_vocabulary(user, language, level, count, exclude=None):
     }
 
 
+def cached_japanese_readings(words):
+    requested = set(words)
+    result = {}
+    with STATE_LOCK:
+        cached_items = [item.get("data", {}) for item in VOCABULARY_SOURCE_CACHE.values()]
+    for data in cached_items:
+        for word, reading in data.get("readings", {}).items():
+            clean_reading = clean_japanese_reading(reading)
+            if word in requested and clean_reading:
+                result[word] = clean_reading
+    return result
+
+
+def ai_japanese_reading_batch(words, batch_index=0):
+    system = (
+        "你是日语词典助手。请给每个日语汉字词写出标准现代日语假名读音。\n"
+        "读音只能使用平假名、片假名和长音符，不要罗马字、声调、释义或解释。\n"
+        "键名必须与输入词完全一致；只输出 JSON。\n"
+        '{"readings":{"学校":"がっこう","珈琲":"コーヒー"}}'
+    )
+    content = call_ollama(
+        [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"words": words, "batch_index": int(batch_index)},
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+    )
+    obj = extract_json(content) or {}
+    raw = obj.get("readings", {})
+    if not isinstance(raw, dict):
+        return {}
+    requested = set(words)
+    return {
+        str(word): clean_japanese_reading(reading)
+        for word, reading in raw.items()
+        if str(word) in requested and clean_japanese_reading(reading)
+    }
+
+
+def resolve_japanese_readings(words):
+    unique_words = []
+    seen = set()
+    for item in list(words or [])[:MAX_JAPANESE_READING_WORDS]:
+        word = limit_text(item, 64)
+        if not word or word in seen or not re.search(r"[\u3400-\u9fff々〆ヶ]", word):
+            continue
+        seen.add(word)
+        unique_words.append(word)
+    readings = cached_japanese_readings(unique_words)
+    missing = [word for word in unique_words if word not in readings]
+    for index in range(0, len(missing), AI_VOCABULARY_BATCH_SIZE):
+        batch = missing[index : index + AI_VOCABULARY_BATCH_SIZE]
+        readings.update(ai_japanese_reading_batch(batch, index // AI_VOCABULARY_BATCH_SIZE))
+    return {word: readings[word] for word in unique_words if word in readings}
+
+
 def ai_build_rubric(word):
     language = detect_word_language(word)
     system = (
         "你是外语词汇测验的出题/判卷老师，支持日语和英语。\n"
         "给定一个外语词，请输出最常见、最适合作为背诵测验的中文释义。\n"
         "如果是英语，重点给中文释义、常见近义中文答案和词性相关义项；"
-        "如果是日语，覆盖常见汉字/假名对应义项。\n"
+        "如果是日语，覆盖常见汉字/假名对应义项，并在 reading 中给出标准假名读音；英语 reading 留空。\n"
         "要求：必须用中文；不要在释义里重复原外语词；只输出 JSON；accepted 最多14条。\n"
-        "{\"gloss\":\"...\",\"accepted\":[\"...\"],\"notes\":\"\"}"
+        "{\"gloss\":\"...\",\"accepted\":[\"...\"],\"notes\":\"\",\"reading\":\"\"}"
     )
     content = call_ollama(
         [
@@ -930,14 +1059,20 @@ def ai_build_rubric(word):
     )
     obj = extract_json(content)
     if not obj:
-        return {"gloss": "（模型输出异常）", "accepted": [], "notes": "rubric解析失败"}
+        return {"gloss": "（模型输出异常）", "accepted": [], "notes": "rubric解析失败", "reading": ""}
 
     gloss = str(obj.get("gloss", "")).strip() or "（未给出释义）"
     accepted = clean_accepted(obj.get("accepted", []))
     if re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", gloss):
         gloss = "（释义异常：请重试）"
         accepted = []
-    return {"language": language, "gloss": gloss, "accepted": accepted, "notes": str(obj.get("notes", "")).strip()}
+    return {
+        "language": language,
+        "gloss": gloss,
+        "accepted": accepted,
+        "notes": str(obj.get("notes", "")).strip(),
+        "reading": clean_japanese_reading(obj.get("reading")) if language == "日语" else "",
+    }
 
 
 def ai_self_review(word, student, rubric):
@@ -1718,6 +1853,38 @@ class VocabHandler(BaseHTTPRequestHandler):
                 )
                 result.update({"ok": True, "build": APP_BUILD})
                 json_response(self, HTTPStatus.OK, result)
+                return
+
+            if request_path == "/api/japanese/readings":
+                payload = self.read_json()
+                raw_words = payload.get("words")
+                if not isinstance(raw_words, list):
+                    raise AccountError("日语词表格式无效", 400, "words_invalid")
+                if len(raw_words) > MAX_JAPANESE_READING_WORDS:
+                    raise AccountError(
+                        f"每次最多查询 {MAX_JAPANESE_READING_WORDS} 个日语读音",
+                        413,
+                        "readings_too_large",
+                    )
+                words = []
+                seen = set()
+                for item in raw_words:
+                    word = limit_text(item, 64)
+                    if word and word not in seen and re.search(r"[\u3400-\u9fff々〆ヶ]", word):
+                        seen.add(word)
+                        words.append(word)
+                validate_quiz_words(self.account_user, payload.get("quiz_session"), words, "japanese")
+                readings = resolve_japanese_readings(words)
+                json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "readings": readings,
+                        "missing": [word for word in words if word not in readings],
+                        "build": APP_BUILD,
+                    },
+                )
                 return
 
             if request_path.startswith("/api/admin/"):

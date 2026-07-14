@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-13-ux4";
+const APP_VERSION = "2026-07-14-ux5";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -9,6 +9,8 @@ const PDF_TIMEOUT_MS = 120000;
 const MAX_WRONG_BOOK_ITEMS = 250;
 const MAX_ACCEPTED_ANSWERS = 14;
 const MAX_RUBRIC_CACHE_ITEMS = 500;
+const MAX_JAPANESE_READING_CACHE_ITEMS = 2000;
+const JAPANESE_READING_CACHE_KEY = "japaneseReadingCache:v1";
 const WRONG_BOOK_EXPORT_TYPE = "vocab-wrong-book";
 const WRONG_BOOK_EXPORT_VERSION = 1;
 const DEFAULT_PROFILE = "我";
@@ -45,7 +47,6 @@ const VOCABULARY_LEVEL_OPTIONS = {
   ],
 };
 const SKIPPED_ANSWER = "（跳过）";
-const EMPTY_ANSWER = "（空白）";
 const ACHIEVEMENTS = [
   { id: "firstQuiz", title: "开测", desc: "完成一次词表测试。" },
   { id: "firstDictation", title: "听写启动", desc: "完成一次听写练习。" },
@@ -172,6 +173,25 @@ function trimRubricCache(cache) {
   return Object.fromEntries(Object.entries(cache).slice(-MAX_RUBRIC_CACHE_ITEMS));
 }
 
+function normalizeJapaneseReading(value) {
+  return String(value || "").normalize("NFKC").replace(/\s+/g, "").trim();
+}
+
+function isJapaneseReading(value) {
+  return /^[\u3040-\u30ff\u31f0-\u31ffー・]+$/u.test(normalizeJapaneseReading(value));
+}
+
+function sanitizeJapaneseReadings(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const cleaned = {};
+  Object.entries(value).forEach(([word, reading]) => {
+    const cleanWord = limitText(word, 64);
+    const cleanReading = normalizeJapaneseReading(reading).slice(0, 64);
+    if (cleanWord && isJapaneseReading(cleanReading)) cleaned[cleanWord] = cleanReading;
+  });
+  return Object.fromEntries(Object.entries(cleaned).slice(-MAX_JAPANESE_READING_CACHE_ITEMS));
+}
+
 function sanitizeProfile(value) {
   const cleaned = String(value || "").trim().slice(0, 30);
   return cleaned || DEFAULT_PROFILE;
@@ -237,6 +257,7 @@ const state = {
   busy: false,
   wrongScope: "current",
   rubricCache: loadJson("rubricCache", {}),
+  japaneseReadings: sanitizeJapaneseReadings(loadJson(JAPANESE_READING_CACHE_KEY, {})),
   currentWrongBook: {},
   historyWrongBook: {},
   achievements: {},
@@ -303,6 +324,8 @@ function saveState() {
   saveProjectPreferences();
   state.rubricCache = trimRubricCache(state.rubricCache);
   localStorage.setItem("rubricCache", JSON.stringify(state.rubricCache));
+  state.japaneseReadings = sanitizeJapaneseReadings(state.japaneseReadings);
+  localStorage.setItem(JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
   saveWrongBooks();
   saveAchievements();
 }
@@ -1114,7 +1137,9 @@ function updateLanguageUi() {
   const projectLabel = $("projectNameLabel");
   if (projectLabel) projectLabel.textContent = language ? `${quizLanguageLabel(language)}测试` : "";
   const input = $("wordInput");
-  if (input) input.placeholder = language === "japanese" ? "输入日语词表，每行一个词" : "输入英语词表，每行一个词";
+  if (input) input.placeholder = language === "japanese"
+    ? "输入日语词表，每行一个词；可写 学校｜がっこう"
+    : "输入英语词表，每行一个词";
   updateAiSuggestionControls();
 }
 
@@ -1154,7 +1179,7 @@ function updateAiSuggestionControls() {
   levelSelect.dataset.language = language;
   $("aiSuggestLanguage").textContent = quizLanguageLabel(language);
   const accountLimit = accountWordLimit(language);
-  const maxCount = Number.isFinite(accountLimit) ? accountLimit : 100;
+  const maxCount = Number.isFinite(accountLimit) ? accountLimit : 200;
   countInput.max = String(maxCount);
   if (saved && Number.isInteger(Number(saved.count))) countInput.value = String(saved.count);
   if (saved && $("aiSuggestMode")) $("aiSuggestMode").value = saved.mode === "append" ? "append" : "replace";
@@ -1470,8 +1495,72 @@ function normalizeDictationAnswer(value) {
   return normalized.replace(/\s+/g, "");
 }
 
-function dictationCorrect(word, answer) {
-  return normalizeDictationAnswer(word) === normalizeDictationAnswer(answer);
+function hasJapaneseKanji(value) {
+  return /[\u3400-\u9fff々〆ヶ]/u.test(String(value || ""));
+}
+
+function normalizeKana(value) {
+  return [...normalizeJapaneseReading(value)].map((character) => {
+    const code = character.charCodeAt(0);
+    return code >= 0x30a1 && code <= 0x30f6 ? String.fromCharCode(code - 0x60) : character;
+  }).join("");
+}
+
+function rememberJapaneseReadings(readings, persist = true) {
+  const clean = sanitizeJapaneseReadings(readings);
+  if (!Object.keys(clean).length) return;
+  state.japaneseReadings = sanitizeJapaneseReadings({ ...state.japaneseReadings, ...clean });
+  if (persist) localStorage.setItem(JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
+}
+
+function japaneseReadingFor(word) {
+  return state.japaneseReadings[String(word || "").trim()] || "";
+}
+
+function formatJapaneseDictationAnswer(word) {
+  const reading = japaneseReadingFor(word);
+  return hasJapaneseKanji(word) && reading ? `${word} / ${reading}` : word;
+}
+
+function dictationEvaluation(word, answer) {
+  const expectedWord = normalizeDictationAnswer(word);
+  const student = normalizeDictationAnswer(answer);
+  if (state.quizLanguage !== "japanese" || !hasJapaneseKanji(word)) {
+    return {
+      correct: expectedWord === student,
+      expected: word,
+      guidance: "",
+    };
+  }
+
+  const reading = japaneseReadingFor(word);
+  if (!reading) {
+    return {
+      correct: false,
+      expected: word,
+      guidance: "未能取得该词的假名读音，请返回词表后重试",
+    };
+  }
+
+  const compact = student.replace(/[\/、，,；;：:|｜=＝·・]/g, "");
+  const hasWrittenForm = compact.includes(expectedWord);
+  const hasReading = normalizeKana(compact).includes(normalizeKana(reading));
+  const normalizedCompact = normalizeKana(compact);
+  const normalizedWord = normalizeKana(expectedWord);
+  const normalizedReading = normalizeKana(reading);
+  const correct = normalizedCompact === `${normalizedWord}${normalizedReading}`
+    || normalizedCompact === `${normalizedReading}${normalizedWord}`;
+  let guidance = "";
+  if (!hasWrittenForm && hasReading) guidance = "还需要填写汉字词形";
+  else if (hasWrittenForm && !hasReading) guidance = "还需要填写假名读音";
+  else if (!hasWrittenForm || !hasReading) guidance = "汉字词形或假名读音不正确";
+  else if (!correct) guidance = "请只填写汉字词形和假名读音";
+
+  return {
+    correct,
+    expected: formatJapaneseDictationAnswer(word),
+    guidance,
+  };
 }
 
 function normalizeMeaning(value) {
@@ -1539,6 +1628,12 @@ function cachedRubric(word) {
   return state.rubricCache[rubricCacheKey(word)] || state.rubricCache[word] || null;
 }
 
+function cacheRubric(word, rubric) {
+  if (!rubric || typeof rubric !== "object") return;
+  state.rubricCache[rubricCacheKey(word)] = rubric;
+  if (rubric.reading) rememberJapaneseReadings({ [word]: rubric.reading });
+}
+
 function hasUsableMeaning(info) {
   const answer = limitText(info && info.correct_answer);
   return Boolean(answer && !answer.startsWith("跳过：") && answer !== "（未给出释义）");
@@ -1577,11 +1672,42 @@ function localReviewResult(word, answer, info) {
   };
 }
 
+function parseWordText(value, captureReadings = true) {
+  const words = [];
+  const readings = {};
+  String(value || "").split(/\r?\n/).forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    const pair = state.quizLanguage === "japanese"
+      ? line.match(/^(.+?)\s*[|｜=＝]\s*([^|｜=＝]+)$/u)
+      : null;
+    if (pair) {
+      const word = pair[1].trim();
+      const reading = normalizeJapaneseReading(pair[2]);
+      if (wordMatchesLanguage(word, "japanese") && isJapaneseReading(reading)) {
+        words.push(word);
+        readings[word] = reading;
+        return;
+      }
+    }
+    line.split(/[\s,，、;；]+/).map((word) => word.trim()).filter(Boolean).forEach((word) => words.push(word));
+  });
+  if (captureReadings) rememberJapaneseReadings(readings);
+  return words;
+}
+
 function parseWords() {
-  return $("wordInput")
-    .value.split(/[\s,，、;；]+/)
-    .map((word) => word.trim())
-    .filter(Boolean);
+  return parseWordText($("wordInput").value);
+}
+
+function formatWordInputEntry(word) {
+  if (state.quizLanguage !== "japanese") return word;
+  const reading = japaneseReadingFor(word);
+  return hasJapaneseKanji(word) && reading ? `${word}｜${reading}` : word;
+}
+
+function formatWordsForInput(words) {
+  return words.map(formatWordInputEntry).join("\n");
 }
 
 async function generateAiVocabulary() {
@@ -1610,7 +1736,7 @@ async function generateAiVocabulary() {
   const level = $("aiLevelSelect").value;
   const count = Number($("aiSuggestCount").value);
   const mode = $("aiSuggestMode").value;
-  const maxCount = Number($("aiSuggestCount").max || 100);
+  const maxCount = Number($("aiSuggestCount").max || 200);
   const baseWords = mode === "append" ? parseWords() : [];
   const existingLanguageWords = filterWordsByLanguage(baseWords, language);
   if (!Number.isInteger(count) || count < 1 || count > maxCount) {
@@ -1637,8 +1763,9 @@ async function generateAiVocabulary() {
     const data = await api(
       "/api/vocabulary/suggest",
       { language, level, count, exclude: existingLanguageWords },
-      { timeoutMs: 120000 },
+      { timeoutMs: 240000 },
     );
+    rememberJapaneseReadings(data.readings || {});
     const generated = filterWordsByLanguage(data.words || [], language);
     if (!generated.length) throw new Error("没有生成可用词汇，请重试");
     const existingKeys = new Set(baseWords.map((word) => word.toLocaleLowerCase()));
@@ -1650,7 +1777,7 @@ async function generateAiVocabulary() {
     });
     if (!added.length) throw new Error("这次找到的词都已在词表中，请重试或改用替换词表");
     const words = mode === "append" ? [...baseWords, ...added] : added;
-    $("wordInput").value = words.join("\n");
+    $("wordInput").value = formatWordsForInput(words);
     saveCurrentWordDraft();
     updateStats();
     const sourceText = data.online ? "联网资料与本地 AI" : "本地 AI（联网资料暂不可用）";
@@ -1671,6 +1798,37 @@ function shuffle(items) {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy;
+}
+
+async function ensureJapaneseDictationReadings(words) {
+  if (state.quizLanguage !== "japanese" || state.practiceMode !== "dictation") return true;
+  const required = words.filter(hasJapaneseKanji);
+  const missing = required.filter((word) => !japaneseReadingFor(word));
+  if (!missing.length) return true;
+  if (!backendAvailable || !state.session || !aiAvailable) {
+    alert("这些汉字词还缺少假名读音。请启动本地 AI 后重试，或在词表中写成“学校｜がっこう”。");
+    return false;
+  }
+
+  try {
+    const data = await api(
+      "/api/japanese/readings",
+      { words: missing, quiz_session: state.quizSession },
+      { timeoutMs: 180000 },
+    );
+    rememberJapaneseReadings(data.readings || {});
+  } catch (error) {
+    alert(`获取日语假名读音失败：${error.message}`);
+    return false;
+  }
+
+  const unresolved = required.filter((word) => !japaneseReadingFor(word));
+  if (unresolved.length) {
+    const preview = unresolved.slice(0, 5).join("、");
+    alert(`以下词暂时无法取得假名读音：${preview}${unresolved.length > 5 ? "等" : ""}。请在词表中用“汉字｜假名”补充后再开始。`);
+    return false;
+  }
+  return true;
 }
 
 async function startQuiz(words, mode = "normal") {
@@ -1715,6 +1873,7 @@ async function startQuiz(words, mode = "normal") {
       const authorization = await api("/api/quiz/start", { language, words: quizWords });
       state.quizSession = authorization.quiz_session;
       applyAccount(authorization.account);
+      if (mode === "normal" && !(await ensureJapaneseDictationReadings(quizWords))) return;
     } catch (error) {
       if (error.code !== "membership_required") alert(error.message);
       return;
@@ -1756,7 +1915,12 @@ function showWord() {
   $("quizLanguageLabel").textContent = quizLanguageLabel(state.quizLanguage);
   $("practiceModeLabel").textContent = state.mode.startsWith("review-") ? "错题复习" : practiceModeLabel(state.practiceMode);
   $("answerInput").value = "";
-  $("answerInput").placeholder = dictation ? "输入听到的单词" : "中文意思";
+  $("answerInput").placeholder = dictation
+    ? state.quizLanguage === "japanese"
+      ? "输入日语；汉字词需写成 学校 / がっこう"
+      : "输入听到的单词"
+    : "中文意思";
+  clearAnswerValidation();
   $("speakBtn").classList.toggle("hidden", !dictation);
   hideResultPanel();
   clearNextTimer();
@@ -1817,6 +1981,40 @@ function renderSkipResult() {
   $("resultGloss").textContent = "已加入错题本";
   $("acceptedChips").innerHTML = "";
   scheduleResultHide(SKIP_RESULT_VISIBLE_MS);
+}
+
+function clearAnswerValidation() {
+  const input = $("answerInput");
+  const message = $("answerValidation");
+  if (input) {
+    input.classList.remove("input-invalid");
+    input.removeAttribute("aria-invalid");
+  }
+  if (message) {
+    message.textContent = "";
+    message.classList.add("hidden");
+  }
+}
+
+function showAnswerValidation() {
+  const dictation = isDictationMode();
+  const text = !dictation
+    ? "请输入中文意思"
+    : state.quizLanguage === "japanese"
+      ? "请输入日语单词；汉字词还需填写假名读音"
+      : "请输入听到的英语单词";
+  const input = $("answerInput");
+  const message = $("answerValidation");
+  clearNextTimer();
+  if (input) {
+    input.classList.add("input-invalid");
+    input.setAttribute("aria-invalid", "true");
+    input.focus();
+  }
+  if (message) {
+    message.textContent = text;
+    message.classList.remove("hidden");
+  }
 }
 
 function nextWord() {
@@ -1903,24 +2101,29 @@ async function submitAnswer(event) {
   const word = state.words[state.index];
   const answer = $("answerInput").value.trim();
   if (!word) return;
+  if (!answer) {
+    showAnswerValidation();
+    return;
+  }
+  clearAnswerValidation();
 
   if (isDictationMode()) {
     clearNextTimer();
     hideResultPanel();
     setNextNowEnabled(false);
-    const correct = dictationCorrect(word, answer);
-    if (correct) {
+    const evaluation = dictationEvaluation(word, answer);
+    if (evaluation.correct) {
       state.score += 1;
       removeReviewedWord(word);
       unlockAchievement("firstCorrect");
     } else {
-      markWrong(word, answer || EMPTY_ANSWER, word, [word]);
+      markWrong(word, answer, evaluation.expected, [evaluation.expected]);
     }
     saveState();
     renderResult({
-      correct,
-      gloss: word,
-      accepted: [word],
+      correct: evaluation.correct,
+      gloss: evaluation.expected,
+      accepted: evaluation.guidance ? [evaluation.guidance] : [],
       kind: "dictation",
     });
     updateStats();
@@ -1947,7 +2150,7 @@ async function submitAnswer(event) {
         const rubric = data.rubric || {};
         info.correct_answer = limitText(rubric.gloss) || info.correct_answer;
         info.accepted = sanitizeAccepted(rubric.accepted);
-        state.rubricCache[rubricCacheKey(word)] = rubric;
+        cacheRubric(word, rubric);
         saveState();
       }
 
@@ -1962,7 +2165,7 @@ async function submitAnswer(event) {
         removeReviewedWord(word);
         unlockAchievement("firstCorrect");
       } else {
-        markWrong(word, answer || EMPTY_ANSWER, result.gloss, result.accepted);
+        markWrong(word, answer, result.gloss, result.accepted);
       }
       saveState();
       renderResult(result);
@@ -2003,7 +2206,7 @@ async function submitAnswer(event) {
       mode: state.gradingMode,
       language: state.quizLanguage,
     }, { controller: judgeController, timeoutMs: API_TIMEOUT_MS });
-    if (result.rubric) state.rubricCache[rubricCacheKey(word)] = result.rubric;
+    if (result.rubric) cacheRubric(word, result.rubric);
 
     if (result.correct) {
       state.score += 1;
@@ -2238,7 +2441,7 @@ function downloadText(filename, text, type = "text/plain;charset=utf-8") {
 function exportWords() {
   const words = parseWords();
   if (!words.length) return;
-  downloadText(`vocab-words-${Date.now()}.txt`, words.join("\n"));
+  downloadText(`vocab-words-${Date.now()}.txt`, formatWordsForInput(words));
 }
 
 function confirmClearWords() {
@@ -2269,16 +2472,16 @@ function parseImportedWords(text) {
 
   try {
     const data = JSON.parse(trimmed);
-    if (Array.isArray(data)) return data.map(String).filter(Boolean);
-    if (Array.isArray(data.words)) return data.words.map(String).filter(Boolean);
+    if (Array.isArray(data)) return parseWordText(data.map(String).join("\n"));
+    if (Array.isArray(data.words)) {
+      rememberJapaneseReadings(data.readings || {});
+      return parseWordText(data.words.map(String).join("\n"));
+    }
   } catch (_) {
     // Fall through to plain text parsing.
   }
 
-  return trimmed
-    .split(/[\s,，、;；]+/)
-    .map((word) => word.trim())
-    .filter(Boolean);
+  return parseWordText(trimmed);
 }
 
 async function importWords(event) {
@@ -2287,7 +2490,7 @@ async function importWords(event) {
   const text = await file.text();
   const words = parseImportedWords(text);
   if (words.length) {
-    $("wordInput").value = [...new Set(words)].join("\n");
+    $("wordInput").value = formatWordsForInput([...new Set(words)]);
     saveCurrentWordDraft();
     updateStats();
   } else {
@@ -2466,13 +2669,14 @@ async function boot() {
     setView("wrongView");
   });
   $("answerForm").addEventListener("submit", submitAnswer);
+  $("answerInput").addEventListener("input", clearAnswerValidation);
   $("startBtn").addEventListener("click", () => startQuiz(parseWords()));
   $("aiSuggestBtn").addEventListener("click", generateAiVocabulary);
   ["aiLevelSelect", "aiSuggestCount", "aiSuggestMode"].forEach((id) => {
     $(id).addEventListener("change", saveAiSuggestionSettings);
   });
   $("shuffleBtn").addEventListener("click", () => {
-    $("wordInput").value = shuffle(parseWords()).join("\n");
+    $("wordInput").value = formatWordsForInput(shuffle(parseWords()));
     saveCurrentWordDraft();
     updateStats();
   });

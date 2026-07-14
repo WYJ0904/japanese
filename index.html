@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260713-ux4" />
-    <link rel="stylesheet" href="/styles.css?v=20260713-ux4" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260714-ux5" />
+    <link rel="stylesheet" href="/styles.css?v=20260714-ux5" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -194,9 +194,10 @@
               </div>
               <div class="word-display" id="wordLabel">-</div>
               <form id="answerForm" class="answer-form">
-                <input id="answerInput" autocomplete="off" placeholder="中文意思" />
+                <input id="answerInput" autocomplete="off" placeholder="中文意思" aria-describedby="answerValidation" />
                 <button class="primary" id="submitBtn" type="submit">提交</button>
               </form>
+              <p class="answer-validation hidden" id="answerValidation" role="alert"></p>
               <div class="action-row compact">
                 <button id="speakBtn" class="hidden" type="button">播放</button>
                 <button id="skipBtn" type="button">跳过</button>
@@ -401,6 +402,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260713-ux4"></script>
+    <script src="/app.js?v=20260714-ux5"></script>
   </body>
 </html>

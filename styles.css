@@ -517,6 +517,23 @@ textarea {
   flex: 0 0 104px;
 }
 
+.answer-validation {
+  margin: 8px 2px 0;
+  color: #ffb09f;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.answer-validation.hidden {
+  display: none;
+}
+
+#answerInput.input-invalid {
+  border-color: rgba(255, 122, 101, 0.9);
+  box-shadow: 0 0 0 3px rgba(255, 122, 101, 0.13);
+}
+
 .result-panel {
   margin-top: 12px;
   padding: 14px;
