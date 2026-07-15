@@ -59,6 +59,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
+        release_token = "20260715-tools4"
+        for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
+            self.assertIn(f'/{asset}?v={release_token}', self.html)
+            self.assertIn(f'/{asset}?v={release_token}', self.worker)
+        self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
+        self.assertIn('const APP_VERSION = "2026-07-15-tools4"', self.app)
+        server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('APP_BUILD = "2026-07-15-tools4"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -99,7 +107,7 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("temporary_store.py", launcher)
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.1.0"', launcher)
+        self.assertIn('$LauncherVersion = "8.1.1"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
