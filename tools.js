@@ -185,7 +185,7 @@
 
   TOOLS.forEach((tool) => {
     const category = CATEGORY_MAP.get(tool.category);
-    tool.searchTerms = [tool.name, tool.description, tool.aliases, tool.id, category?.name || "", category?.description || ""]
+    tool.searchTerms = [tool.name, tool.description, tool.aliases, tool.id, category?.name || ""]
       .map(normalizeSearch)
       .filter(Boolean);
     tool.searchText = tool.searchTerms.join(" ");
@@ -208,7 +208,8 @@
           if (compactToken.length >= 2 && word.length <= compactToken.length + 3 && isSubsequence(compactToken, word)) {
             tokenScore = Math.max(tokenScore, 38);
           }
-          const limit = token.length >= 4 ? 2 : 1;
+          if (isAdjacentTransposition(compactToken, word)) tokenScore = Math.max(tokenScore, 64);
+          const limit = token.length >= 6 ? 2 : 1;
           if (token.length >= 3 && boundedEditDistance(token, word, limit) <= limit) tokenScore = Math.max(tokenScore, 54);
         }
       }
@@ -223,7 +224,7 @@
       if (primaryTerms.some((term) => term.includes(token))) total += 55;
       else if (primaryTerms.some((term) => isAdjacentTransposition(token, term))) total += 72;
       else {
-        const limit = token.length >= 4 ? 2 : 1;
+        const limit = token.length >= 6 ? 2 : 1;
         if (token.length >= 3 && primaryTerms.some((term) => boundedEditDistance(token, term, limit) <= limit)) {
           total += 45;
         }

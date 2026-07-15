@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "8.1.1"
+$LauncherVersion = "8.1.2"
 
 $FrontendRoot = "C:\Users\78252\Documents\Codex\2026-07-05\cloudflare-pages-1-zip-2-html"
 $BackendSourceRoot = Join-Path $FrontendRoot "local-backend"
