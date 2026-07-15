@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import sqlite3
@@ -59,14 +60,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260715-tools5"
+        release_token = "20260715-tools8"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-15-tools5"', self.app)
+        self.assertIn('const APP_VERSION = "2026-07-15-tools8"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-15-tools5"', server)
+        self.assertIn('APP_BUILD = "2026-07-15-tools8"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -91,6 +92,37 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("isAdjacentTransposition(compactToken, word)", self.tools)
         self.assertNotIn('category?.description || ""', self.tools)
 
+    def test_tool_edge_cases_have_production_guards(self):
+        self.assertIn('new TextDecoder(encoding || "utf-8", { fatal: true })', self.tools)
+        self.assertIn("function validateCsvTable", self.tools)
+        self.assertIn("const rows = validateCsvTable(parseCsv(text), file.name)", self.tools)
+        self.assertIn("的表头与第一个 CSV 文件不一致", self.tools)
+        self.assertIn("CSV 表头存在重复字段", self.tools)
+        self.assertIn("csvString([header, ...rows.slice(index, index + size)])", self.tools)
+        self.assertIn('value="vertical">垂直翻转', self.tools)
+        self.assertIn("function parseColorValue", self.tools)
+        self.assertIn("function stripJpegMetadata", self.tools)
+        self.assertIn("相机型号", self.tools)
+        self.assertIn("function temporaryQrContent", self.tools)
+        self.assertIn("BEGIN:VCARD", self.tools)
+        self.assertIn("WIFI:T:", self.tools)
+        self.assertIn("请至少选择一种密码字符", self.tools)
+        self.assertIn("const matrix = new Uint16Array(cells)", self.tools)
+
+    def test_opencc_character_dictionaries_are_local_and_cached(self):
+        expected = {
+            "opencc-st-characters.txt": "81c27e6364fd164181276197b9215cf95f7f12a050aa207375248a5badf8d6fc",
+            "opencc-ts-characters.txt": "737c21c66f55a419dd6956cb3089476cdefc5a36877452631617696df1e5d925",
+        }
+        for name, checksum in expected.items():
+            path = ROOT / "vendor" / name
+            content = path.read_bytes()
+            self.assertGreater(len(content.splitlines()), 3000)
+            self.assertEqual(hashlib.sha256(content).hexdigest(), checksum)
+            self.assertIn(f'fetch("/vendor/{name}")', self.tools)
+            self.assertIn(f'"/vendor/{name}"', self.worker)
+        self.assertIn("OpenCC 1.4.1", (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8"))
+
     def test_initial_flow_and_security_headers_are_present(self):
         self.assertRegex(self.html, r'id="entryScreen"[^>]*aria-hidden="false"')
         self.assertRegex(self.html, r'id="appShell"[^>]*aria-hidden="true"')
@@ -109,7 +141,7 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("temporary_store.py", launcher)
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.1.2"', launcher)
+        self.assertIn('$LauncherVersion = "8.1.5"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)

@@ -39,7 +39,7 @@
       ["json-format", "JSON 格式化", "校验并缩进 JSON，便于阅读和排查。", "美化 pretty"],
       ["json-minify", "JSON 压缩", "移除 JSON 中不必要的空白和换行。", "紧凑 minify"],
       ["json-validate", "JSON 合法性检查", "检查 JSON 语法并定位无法解析的内容。", "校验 validate"],
-      ["chinese-convert", "简繁体转换", "转换常见简体与繁体汉字。", "简体 繁体 中文"],
+      ["chinese-convert", "简繁体转换", "使用本地 OpenCC 字符词典双向转换简体与繁体。", "简体 繁体 中文"],
     ],
     file: [
       ["file-md5", "MD5 计算", "在本地计算文件的 MD5 校验值。", "哈希 hash 校验"],
@@ -71,7 +71,7 @@
       ["crop-four-three", "4:3 裁剪", "从图片中央裁出 4:3 比例画面。", "四比三"],
       ["crop-sixteen-nine", "16:9 裁剪", "从图片中央裁出 16:9 宽屏画面。", "宽屏 十六比九"],
       ["image-rotate", "图片旋转", "把图片旋转 90、180 或 270 度。", "方向 转向"],
-      ["image-flip", "图片翻转", "把图片进行水平镜像翻转。", "镜像"],
+      ["image-flip", "图片翻转", "按水平、垂直或双向镜像翻转图片。", "镜像"],
       ["image-rounded", "图片圆角", "为图片四角添加可调透明圆角。", "圆角 半径"],
       ["image-avatar", "圆形头像", "把图片中央区域裁成透明圆形头像。", "头像 圆图"],
       ["text-watermark", "文本水印", "在图片右下角添加半透明文字水印。", "署名 版权"],
@@ -81,11 +81,11 @@
       ["image-blur", "高斯模糊", "为整张图片添加可调强度模糊。", "虚化 blur"],
       ["image-redact", "黑色遮挡", "用纯黑矩形永久遮挡指定区域。", "涂黑 隐私"],
       ["image-pdf", "图片转 PDF", "把选中的图片按顺序生成 PDF 文档。", "照片 文档"],
-      ["exif-view", "EXIF 信息查看", "检查 JPEG 是否包含 EXIF 和 GPS 标签。", "元数据 相机"],
-      ["exif-remove", "EXIF 信息删除", "重新编码图片以移除原始元数据。", "隐私 清除"],
+      ["exif-view", "EXIF 信息查看", "本地查看 JPEG 的相机、时间、方向和 GPS 标签。", "元数据 相机"],
+      ["exif-remove", "EXIF 信息删除", "清除图片元数据；JPEG 不重新压缩像素。", "隐私 清除"],
       ["gps-warning", "GPS 隐私提醒", "检测 JPEG 中可能泄露位置的 GPS 标签。", "定位 经纬度"],
       ["color-extract", "图片颜色提取", "从图片中提取最多八种主要颜色。", "配色 主色"],
-      ["color-convert", "HEX、RGB 和 HSL 取色", "查看同一颜色的 HEX、RGB 和 HSL 数值。", "颜色代码"],
+      ["color-convert", "HEX、RGB 和 HSL 取色", "输入任一 HEX、RGB 或 HSL 颜色并互相转换。", "颜色代码"],
       ["gradient-generator", "渐变背景生成器", "生成指定尺寸、颜色和角度的渐变图片。", "背景 渐变图"],
       ["gradient-css", "CSS 渐变代码生成", "预览渐变并生成可复制的 CSS 代码。", "linear-gradient 样式"],
       ["solid-image", "纯色图片生成器", "生成指定尺寸和颜色的纯色 PNG。", "背景 色块"],
@@ -96,7 +96,7 @@
       ["random-integer", "随机数字", "在指定最小值和最大值之间生成整数。", "整数 数字"],
       ["random-decimal", "随机小数", "在指定范围内生成随机小数。", "浮点 数字"],
       ["random-string", "随机字符串", "按指定长度和字符集生成随机文本。", "字符 token"],
-      ["random-password", "安全密码生成器", "使用浏览器安全随机数生成高强度密码。", "口令 密钥"],
+      ["random-password", "安全密码生成器", "用安全随机数和可选字符类型生成高强度密码。", "口令 密钥"],
       ["random-uuid", "UUID v4 生成器", "生成符合 UUID v4 格式的随机标识符。", "guid 标识"],
       ["random-draw", "随机抽签", "从候选名单中公平抽取一个结果。", "抽奖 点名"],
       ["random-groups", "随机分组", "把名单打乱后平均分配到多个小组。", "分队 分班"],
@@ -120,7 +120,7 @@
       ["temporary-text", "临时文本分享", "创建带密码、过期和访问次数限制的文本链接。", "阅后即焚 分享"],
       ["temporary-file", "临时文件分享", "创建有期限和下载次数限制的文件链接。", "传文件 下载"],
       ["temporary-clipboard", "临时剪贴板", "用六位连接码在设备间临时传递文本。", "跨设备 复制"],
-      ["temporary-qr", "临时二维码", "为文本、网址或动态失效链接生成二维码。", "扫码 qr"],
+      ["temporary-qr", "临时二维码", "生成文本、网址、Wi-Fi、联系人或动态失效二维码。", "扫码 qr"],
       ["temporary-room", "临时留言房间", "创建无公开列表、可加密码的限时留言房间。", "聊天室 留言"],
     ],
   };
@@ -417,6 +417,7 @@
       if (!field) return;
       if (field.type === "checkbox") field.checked = Boolean(value);
       else field.value = value;
+      if (["qrKind", "qrDynamic"].includes(field.id)) field.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }
 
@@ -496,12 +497,61 @@
     ["弥", "彌"], ["弯", "彎"], ["弹", "彈"], ["强", "強"], ["归", "歸"], ["录", "錄"], ["当", "當"], ["彻", "徹"], ["径", "徑"], ["忆", "憶"],
   ];
 
+  let openCcMaps = null;
+  let openCcMapsPromise = null;
+
+  function fallbackChineseMaps() {
+    return {
+      traditional: new Map(TRADITIONAL_PAIRS),
+      simple: new Map(TRADITIONAL_PAIRS.map(([simple, traditional]) => [traditional, simple])),
+      source: "fallback",
+    };
+  }
+
+  function parseOpenCcCharacterDictionary(text) {
+    const map = new Map();
+    String(text || "").split(/\r?\n/).forEach((line) => {
+      const value = line.trim();
+      if (!value || value.startsWith("#")) return;
+      const [source, rawTargets] = value.split("\t", 2);
+      const target = String(rawTargets || "").trim().split(/\s+/)[0];
+      if (source && target) map.set(source, target);
+    });
+    return map;
+  }
+
+  function loadOpenCcMaps() {
+    if (openCcMaps) return Promise.resolve(openCcMaps);
+    if (!openCcMapsPromise) {
+      openCcMapsPromise = Promise.all([
+        fetch("/vendor/opencc-st-characters.txt").then((response) => response.ok ? response.text() : Promise.reject(new Error(`ST ${response.status}`))),
+        fetch("/vendor/opencc-ts-characters.txt").then((response) => response.ok ? response.text() : Promise.reject(new Error(`TS ${response.status}`))),
+      ]).then(([simplifiedToTraditional, traditionalToSimplified]) => {
+        const maps = {
+          traditional: parseOpenCcCharacterDictionary(simplifiedToTraditional),
+          simple: parseOpenCcCharacterDictionary(traditionalToSimplified),
+          source: "opencc",
+        };
+        if (maps.traditional.size < 3000 || maps.simple.size < 3000) throw new Error("OpenCC 字符词典不完整");
+        openCcMaps = maps;
+        return maps;
+      }).catch(() => {
+        openCcMaps = fallbackChineseMaps();
+        return openCcMaps;
+      });
+    }
+    return openCcMapsPromise;
+  }
+
   function runTextOperation(toolId, input, secondary, parameter, option) {
     const lines = input.replace(/\r\n?/g, "\n").split("\n");
     if (toolId === "text-stats") {
       const words = textWords(input).length;
+      const cjkCharacters = (input.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) || []).length;
+      const latinWords = textWords(input).filter((word) => !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(word)).length;
       const paragraphs = input.trim() ? input.trim().split(/\n\s*\n/).filter(Boolean).length : 0;
-      return `字符（含空格）：${[...input].length}\n字符（不含空格）：${[...input.replace(/\s/g, "")].length}\n单词：${words}\n行：${input ? lines.length : 0}\n段落：${paragraphs}\n预计阅读：${Math.max(1, Math.ceil(words / 220))} 分钟`;
+      const readingMinutes = input.trim() ? Math.max(1, Math.ceil(latinWords / 220 + cjkCharacters / 400)) : 0;
+      return `字符（含空格）：${[...input].length}\n字符（不含空格）：${[...input.replace(/\s/g, "")].length}\n单词/连续词组：${words}\n中日韩字符：${cjkCharacters}\n行：${input ? lines.length : 0}\n段落：${paragraphs}\n预计阅读：${readingMinutes} 分钟`;
     }
     if (toolId === "dedupe-lines") return [...new Set(lines)].join("\n");
     if (toolId === "remove-empty-lines") return lines.filter((line) => line.trim()).join("\n");
@@ -527,11 +577,33 @@
     }
     if (toolId === "text-diff") {
       const right = secondary.replace(/\r\n?/g, "\n").split("\n");
+      const cells = (lines.length + 1) * (right.length + 1);
+      if (cells > 1_000_000) throw new Error("对比文本过长，请将两侧文本控制在约 1000 行以内");
+      const width = right.length + 1;
+      const matrix = new Uint16Array(cells);
+      for (let leftIndex = lines.length - 1; leftIndex >= 0; leftIndex -= 1) {
+        for (let rightIndex = right.length - 1; rightIndex >= 0; rightIndex -= 1) {
+          const offset = leftIndex * width + rightIndex;
+          matrix[offset] = lines[leftIndex] === right[rightIndex]
+            ? matrix[(leftIndex + 1) * width + rightIndex + 1] + 1
+            : Math.max(matrix[(leftIndex + 1) * width + rightIndex], matrix[leftIndex * width + rightIndex + 1]);
+        }
+      }
       const result = [];
-      const length = Math.max(lines.length, right.length);
-      for (let index = 0; index < length; index += 1) {
-        if (lines[index] === right[index]) result.push(`  ${lines[index] ?? ""}`);
-        else { if (lines[index] !== undefined) result.push(`- ${lines[index]}`); if (right[index] !== undefined) result.push(`+ ${right[index]}`); }
+      let leftIndex = 0;
+      let rightIndex = 0;
+      while (leftIndex < lines.length || rightIndex < right.length) {
+        if (leftIndex < lines.length && rightIndex < right.length && lines[leftIndex] === right[rightIndex]) {
+          result.push(`  ${lines[leftIndex]}`);
+          leftIndex += 1;
+          rightIndex += 1;
+        } else if (rightIndex < right.length && (leftIndex >= lines.length || matrix[leftIndex * width + rightIndex + 1] >= matrix[(leftIndex + 1) * width + rightIndex])) {
+          result.push(`+ ${right[rightIndex]}`);
+          rightIndex += 1;
+        } else {
+          result.push(`- ${lines[leftIndex]}`);
+          leftIndex += 1;
+        }
       }
       return result.join("\n");
     }
@@ -558,7 +630,8 @@
       return JSON.stringify(parsed, null, toolId === "json-format" ? 2 : 0);
     }
     if (toolId === "chinese-convert") {
-      const map = new Map((option === "traditional" ? TRADITIONAL_PAIRS : TRADITIONAL_PAIRS.map(([simple, traditional]) => [traditional, simple])));
+      const maps = openCcMaps || fallbackChineseMaps();
+      const map = option === "traditional" ? maps.traditional : maps.simple;
       return [...input].map((char) => map.get(char) || char).join("");
     }
     return input;
@@ -593,11 +666,15 @@
       <label class="tool-wide"><span>结果</span><textarea id="textToolOutput" readonly></textarea></label>
       ${renderConfigControls(tool.id)}
     </div>`;
-    byId("runTextToolBtn").addEventListener("click", () => {
+    byId("runTextToolBtn").addEventListener("click", async () => {
       try {
+        if (tool.id === "chinese-convert") {
+          setMessage("正在加载本地简繁词典…");
+          await loadOpenCcMaps();
+        }
         const output = runTextOperation(tool.id, byId("textToolInput").value, byId("textToolSecondary").value, byId("textToolParameter").value, byId("textToolOption")?.value || "");
         byId("textToolOutput").value = output;
-        setMessage("处理完成");
+        setMessage(tool.id === "chinese-convert" && openCcMaps?.source !== "opencc" ? "官方词典不可用，已使用内置基础词典" : "处理完成");
       } catch (error) { setMessage(`处理失败：${error.message}`, true); }
     });
     byId("copyTextToolBtn").addEventListener("click", (event) => copyText(byId("textToolOutput").value, event.currentTarget));
@@ -650,10 +727,25 @@
     const entries = String(values.entries || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
     if (toolId === "random-integer") return Array.from({ length: count }, () => secureInt(minimum, maximum)).join("\n");
     if (toolId === "random-decimal") return Array.from({ length: count }, () => (minimum + randomUnit() * (maximum - minimum)).toFixed(Math.max(0, Math.min(12, Number(values.precision || 2))))).join("\n");
-    if (toolId === "random-string" || toolId === "random-password") {
-      const alphabet = toolId === "random-password" ? "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=" : String(values.alphabet || "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789");
-      const length = Math.max(1, Math.min(4096, Number(values.length || (toolId === "random-password" ? 20 : 16))));
+    if (toolId === "random-string") {
+      const alphabet = [...new Set(String(values.alphabet || "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"))].join("");
+      if (!alphabet) throw new Error("字符集不能为空");
+      const length = Math.max(1, Math.min(4096, Number(values.length || 16)));
       return Array.from({ length }, () => alphabet[secureInt(0, alphabet.length - 1)]).join("");
+    }
+    if (toolId === "random-password") {
+      const sets = [
+        values.passwordUpper !== false && "ABCDEFGHJKLMNPQRSTUVWXYZ",
+        values.passwordLower !== false && "abcdefghijkmnopqrstuvwxyz",
+        values.passwordDigits !== false && "23456789",
+        values.passwordSymbols !== false && "!@#$%^&*_-+=",
+      ].filter(Boolean);
+      if (!sets.length) throw new Error("请至少选择一种密码字符");
+      const length = Math.max(sets.length, Math.min(4096, Number(values.length || 20)));
+      const alphabet = sets.join("");
+      const characters = sets.map((set) => set[secureInt(0, set.length - 1)]);
+      while (characters.length < length) characters.push(alphabet[secureInt(0, alphabet.length - 1)]);
+      return shuffled(characters).join("");
     }
     if (toolId === "random-uuid") return Array.from({ length: count }, secureUuid).join("\n");
     if (["random-draw", "random-wheel", "random-decision"].includes(toolId)) {
@@ -699,6 +791,7 @@
         ${numeric || tool.id === "random-uuid" || tool.id === "random-palette" ? '<label><span>数量</span><input data-config="count" id="randomCount" type="number" min="1" max="1000" value="1" /></label>' : ""}
         ${strings ? `<label><span>长度</span><input data-config="length" id="randomLength" type="number" min="1" max="4096" value="${tool.id === "random-password" ? 20 : 16}" /></label>` : ""}
         ${tool.id === "random-string" ? '<label class="tool-wide"><span>字符集</span><input data-config="alphabet" id="randomAlphabet" value="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" /></label>' : ""}
+        ${tool.id === "random-password" ? '<label class="admin-checkbox"><input data-config="passwordUpper" id="passwordUpper" type="checkbox" checked /> 大写字母</label><label class="admin-checkbox"><input data-config="passwordLower" id="passwordLower" type="checkbox" checked /> 小写字母</label><label class="admin-checkbox"><input data-config="passwordDigits" id="passwordDigits" type="checkbox" checked /> 数字</label><label class="admin-checkbox"><input data-config="passwordSymbols" id="passwordSymbols" type="checkbox" checked /> 符号</label>' : ""}
         ${tool.id === "random-groups" ? '<label><span>组数</span><input data-config="groups" id="randomGroups" type="number" min="1" value="2" /></label>' : ""}
         ${tool.id === "custom-dice" ? '<label><span>骰子面数</span><input data-config="sides" id="randomSides" type="number" min="2" value="6" /></label>' : ""}
         ${tool.id === "random-date" ? '<label><span>开始日期</span><input data-config="startDate" id="randomStartDate" type="date" value="2000-01-01" /></label><label><span>结束日期</span><input data-config="endDate" id="randomEndDate" type="date" /></label>' : ""}
@@ -718,6 +811,8 @@
           groups: byId("randomGroups")?.value, sides: byId("randomSides")?.value,
           startDate: byId("randomStartDate")?.value, endDate: byId("randomEndDate")?.value,
           entries: byId("randomEntries")?.value,
+          passwordUpper: byId("passwordUpper")?.checked, passwordLower: byId("passwordLower")?.checked,
+          passwordDigits: byId("passwordDigits")?.checked, passwordSymbols: byId("passwordSymbols")?.checked,
         };
         const result = randomToolResult(tool.id, values);
         byId("randomResult").textContent = result;
@@ -894,6 +989,25 @@
     return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
   }
 
+  async function decodeLocalText(file, encoding = "utf-8") {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    try {
+      return new TextDecoder(encoding || "utf-8", { fatal: true }).decode(bytes);
+    } catch (error) {
+      if (error instanceof RangeError) throw new Error(`当前浏览器不支持 ${encoding} 编码`);
+      throw new Error(`${file.name} 不是有效的 ${String(encoding || "utf-8").toUpperCase()} 文本，请选择正确的源编码`);
+    }
+  }
+
+  function validateCsvTable(rows, fileName = "CSV 文件") {
+    if (!rows.length || (rows.length === 1 && rows[0].every((cell) => !cell))) throw new Error(`${fileName} 没有可处理的数据`);
+    const width = rows[0].length;
+    if (!width || rows[0].every((cell) => !String(cell).trim())) throw new Error(`${fileName} 缺少表头`);
+    const invalidRow = rows.findIndex((row) => row.length !== width);
+    if (invalidRow >= 0) throw new Error(`${fileName} 第 ${invalidRow + 1} 行列数与表头不一致`);
+    return rows;
+  }
+
   function md5Bytes(input) {
     const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
     const length = bytes.length;
@@ -1020,42 +1134,55 @@
       return { text: files.map((file, index) => `${file.name}  →  ${prefix}-${String(index + 1).padStart(3, "0")}${file.name.includes(".") ? `.${file.name.split(".").pop()}` : ""}`).join("\n") };
     }
     if (["txt-merge", "csv-merge", "json-array-merge"].includes(tool.id)) {
-      const texts = await Promise.all(files.map((file) => file.text()));
+      const texts = await Promise.all(files.map((file) => decodeLocalText(file, encoding)));
       if (tool.id === "txt-merge") return { text: texts.join("\n"), blob: new Blob([texts.join("\n")], { type: "text/plain;charset=utf-8" }), name: `merged-${Date.now()}.txt` };
       if (tool.id === "csv-merge") {
-        const tables = texts.map(parseCsv);
+        const tables = texts.map((text, index) => validateCsvTable(parseCsv(text), files[index].name));
+        const header = tables[0][0].map((cell) => String(cell).trim());
+        const mismatch = tables.findIndex((table) => table[0].length !== header.length || table[0].some((cell, index) => String(cell).trim() !== header[index]));
+        if (mismatch >= 0) throw new Error(`${files[mismatch].name} 的表头与第一个 CSV 文件不一致`);
         const merged = [tables[0][0], ...tables.flatMap((table) => table.slice(1))];
         const output = csvString(merged);
-        return { text: output, blob: new Blob([output], { type: "text/csv;charset=utf-8" }), name: `merged-${Date.now()}.csv` };
+        return { text: output, blob: new Blob(["\ufeff", output], { type: "text/csv;charset=utf-8" }), name: `merged-${Date.now()}.csv` };
       }
       const output = JSON.stringify(texts.flatMap((text) => { const value = JSON.parse(text); if (!Array.isArray(value)) throw new Error("每个 JSON 文件根节点必须是数组"); return value; }), null, 2);
       return { text: output, blob: new Blob([output], { type: "application/json" }), name: `merged-${Date.now()}.json` };
     }
     const file = files[0];
-    const raw = new Uint8Array(await file.arrayBuffer());
-    const decoder = new TextDecoder(encoding || "utf-8");
-    const text = decoder.decode(raw);
+    const text = await decodeLocalText(file, encoding);
     if (tool.id === "csv-json") {
-      const rows = parseCsv(text); const headers = rows.shift() || [];
-      const output = JSON.stringify(rows.map((row) => Object.fromEntries(headers.map((header, index) => [header || `column_${index + 1}`, row[index] ?? ""]))), null, 2);
+      const rows = validateCsvTable(parseCsv(text), file.name); const headers = rows.shift() || [];
+      const names = headers.map((header, index) => String(header).trim() || `column_${index + 1}`);
+      if (new Set(names).size !== names.length) throw new Error("CSV 表头存在重复字段，请先重命名后再转换");
+      const output = JSON.stringify(rows.map((row) => Object.fromEntries(names.map((header, index) => [header, row[index] ?? ""]))), null, 2);
       return { text: output, blob: new Blob([output], { type: "application/json" }), name: `${file.name.replace(/\.[^.]+$/, "")}.json` };
     }
     if (tool.id === "json-csv") {
       const parsed = JSON.parse(text); if (!Array.isArray(parsed)) throw new Error("JSON 根节点必须是数组");
-      const headers = [...new Set(parsed.flatMap((item) => Object.keys(item && typeof item === "object" ? item : {})))];
+      if (parsed.some((item) => !item || typeof item !== "object" || Array.isArray(item))) throw new Error("JSON 数组中的每一项都必须是对象");
+      const headers = [...new Set(parsed.flatMap((item) => Object.keys(item)))];
+      if (parsed.length && !headers.length) throw new Error("JSON 对象没有可转换的字段");
       const output = csvString([headers, ...parsed.map((item) => headers.map((header) => item?.[header] ?? ""))]);
       return { text: output, blob: new Blob(["\ufeff", output], { type: "text/csv;charset=utf-8" }), name: `${file.name.replace(/\.[^.]+$/, "")}.csv` };
     }
     if (tool.id === "text-encoding") return { text, blob: new Blob([text], { type: "text/plain;charset=utf-8" }), name: `${file.name.replace(/\.[^.]+$/, "")}-utf8.txt` };
     if (["text-split", "csv-split"].includes(tool.id)) {
       const size = Math.max(1, Math.min(100000, Number(parameter || 1000)));
-      const lines = text.replace(/\r\n?/g, "\n").split("\n");
-      const header = tool.id === "csv-split" ? lines.shift() : null;
       const entries = [];
-      for (let index = 0; index < lines.length; index += size) {
-        const part = header === null ? lines.slice(index, index + size) : [header, ...lines.slice(index, index + size)];
-        entries.push({ name: `part-${String(entries.length + 1).padStart(3, "0")}.${tool.id === "csv-split" ? "csv" : "txt"}`, data: new TextEncoder().encode(part.join("\n")) });
+      if (tool.id === "csv-split") {
+        const rows = validateCsvTable(parseCsv(text), file.name);
+        const header = rows.shift();
+        for (let index = 0; index < rows.length; index += size) {
+          const output = csvString([header, ...rows.slice(index, index + size)]);
+          entries.push({ name: `part-${String(entries.length + 1).padStart(3, "0")}.csv`, data: new TextEncoder().encode(`\ufeff${output}`) });
+        }
+      } else {
+        const lines = text.replace(/\r\n?/g, "\n").split("\n");
+        for (let index = 0; index < lines.length; index += size) {
+          entries.push({ name: `part-${String(entries.length + 1).padStart(3, "0")}.txt`, data: new TextEncoder().encode(lines.slice(index, index + size).join("\n")) });
+        }
       }
+      if (!entries.length) throw new Error("没有可拆分的数据行");
       return { text: `已拆分为 ${entries.length} 个文件`, blob: zipBlob(entries), name: `split-${Date.now()}.zip` };
     }
     throw new Error("暂不支持该文件操作");
@@ -1070,7 +1197,7 @@
       <p class="local-processing-note">文件默认只在本地浏览器中处理，不会上传服务器。单次最多 50 个文件、总计 50 MB。</p>
       <div class="tool-options">
         ${["text-split", "csv-split", "rename-preview"].includes(tool.id) ? `<label><span>${parameterLabel}</span><input id="fileToolParameter" data-config="parameter" value="${tool.id === "rename-preview" ? "file" : "1000"}" /></label>` : '<input id="fileToolParameter" type="hidden" />'}
-        ${["csv-json", "json-csv", "text-encoding", "text-split", "csv-split"].includes(tool.id) ? '<label><span>源文本编码</span><select id="fileToolEncoding" data-config="encoding"><option value="utf-8">UTF-8</option><option value="gbk">GBK</option><option value="big5">Big5</option><option value="shift_jis">Shift-JIS</option></select></label>' : '<select id="fileToolEncoding" class="hidden"><option value="utf-8"></option></select>'}
+        ${["csv-json", "json-csv", "text-encoding", "text-split", "csv-split", "txt-merge", "csv-merge", "json-array-merge"].includes(tool.id) ? '<label><span>源文本编码</span><select id="fileToolEncoding" data-config="encoding"><option value="utf-8">UTF-8</option><option value="gbk">GBK</option><option value="big5">Big5</option><option value="shift_jis">Shift-JIS</option></select></label>' : '<select id="fileToolEncoding" class="hidden"><option value="utf-8"></option></select>'}
       </div>
       <div class="tool-command-row"><button class="primary" id="runFileToolBtn" type="button">开始处理</button><button id="downloadFileToolBtn" type="button" disabled>下载结果</button><button id="copyFileToolBtn" type="button">复制文本结果</button></div>
       <pre class="file-result" id="fileToolResult">等待处理</pre>
@@ -1132,7 +1259,8 @@
     return {
       width: Number(value("imageWidth", 0)), height: Number(value("imageHeight", 0)), scale: Number(value("imageScale", 100)),
       quality: Number(value("imageQuality", 85)) / 100, format: value("imageFormat", "image/png"), angle: Number(value("imageAngle", 90)),
-      radius: Number(value("imageRadius", 32)), text: value("imageWatermarkText", "WYJ"), color: value("imageColor", "#7ed8ff"),
+      flip: value("imageFlip", "horizontal"),
+      radius: Number(value("imageRadius", 32)), text: value("imageWatermarkText", "WYJ"), color: value("imageColorText", value("imageColor", "#7ed8ff")),
       background: value("imageBackground", "#07111f"), x: Number(value("imageRegionX", 25)), y: Number(value("imageRegionY", 25)),
       regionWidth: Number(value("imageRegionWidth", 50)), regionHeight: Number(value("imageRegionHeight", 30)), blur: Number(value("imageBlur", 8)),
       gradientEnd: value("imageGradientEnd", "#246da8"), gradientAngle: Number(value("imageGradientAngle", 135)),
@@ -1144,6 +1272,35 @@
     if (!/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(normalized)) throw new Error("请输入有效的 HEX 颜色");
     const full = normalized.length === 3 ? [...normalized].map((char) => char + char).join("") : normalized;
     return [0, 2, 4].map((index) => parseInt(full.slice(index, index + 2), 16));
+  }
+
+  function hslToRgb(hue, saturation, light) {
+    const h = ((Number(hue) % 360) + 360) % 360;
+    const s = Math.max(0, Math.min(100, Number(saturation))) / 100;
+    const l = Math.max(0, Math.min(100, Number(light))) / 100;
+    const chroma = (1 - Math.abs(2 * l - 1)) * s;
+    const section = h / 60;
+    const second = chroma * (1 - Math.abs((section % 2) - 1));
+    const [red, green, blue] = section < 1 ? [chroma, second, 0] : section < 2 ? [second, chroma, 0] : section < 3 ? [0, chroma, second] : section < 4 ? [0, second, chroma] : section < 5 ? [second, 0, chroma] : [chroma, 0, second];
+    const match = l - chroma / 2;
+    return [red, green, blue].map((value) => Math.round((value + match) * 255));
+  }
+
+  function parseColorValue(value) {
+    const input = String(value || "").trim();
+    if (/^#?[0-9a-f]{3}([0-9a-f]{3})?$/i.test(input)) return colorRgb(input);
+    const rgb = input.match(/^rgba?\(\s*([\d.]+)%?\s*[, ]\s*([\d.]+)%?\s*[, ]\s*([\d.]+)%?(?:\s*[,/]\s*[\d.]+%?)?\s*\)$/i);
+    if (rgb) {
+      const percent = /%/.test(input);
+      return rgb.slice(1, 4).map((item) => Math.round(Math.max(0, Math.min(percent ? 100 : 255, Number(item))) * (percent ? 2.55 : 1)));
+    }
+    const hsl = input.match(/^hsla?\(\s*([-\d.]+)(?:deg)?\s*[, ]\s*([\d.]+)%\s*[, ]\s*([\d.]+)%(?:\s*[,/]\s*[\d.]+%?)?\s*\)$/i);
+    if (hsl) return hslToRgb(hsl[1], hsl[2], hsl[3]);
+    throw new Error("请输入 HEX、RGB 或 HSL 颜色，例如 #246da8、rgb(36,109,168) 或 hsl(204,65%,40%)");
+  }
+
+  function rgbToHex(red, green, blue) {
+    return `#${[red, green, blue].map((value) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")).join("")}`;
   }
 
   function rgbToHsl(red, green, blue) {
@@ -1182,7 +1339,11 @@
     if (["image-format", "image-compress"].includes(toolId) && values.format === "image/jpeg") { context.fillStyle = values.background; context.fillRect(0, 0, width, height); }
     context.save();
     if (rotation) { context.translate(width / 2, height / 2); context.rotate(rotation * Math.PI / 180); context.translate(-(rotation === 90 || rotation === 270 ? height : width) / 2, -(rotation === 90 || rotation === 270 ? width : height) / 2); }
-    if (toolId === "image-flip") { context.translate(width, 0); context.scale(-1, 1); }
+    if (toolId === "image-flip") {
+      if (values.flip === "vertical") { context.translate(0, height); context.scale(1, -1); }
+      else if (values.flip === "both") { context.translate(width, height); context.scale(-1, -1); }
+      else { context.translate(width, 0); context.scale(-1, 1); }
+    }
     if (toolId === "image-rounded") { roundedPath(context, 0, 0, width, height, values.radius); context.clip(); }
     if (toolId === "image-avatar") { context.beginPath(); context.arc(width / 2, height / 2, Math.min(width, height) / 2, 0, Math.PI * 2); context.clip(); }
     if (toolId === "image-blur") context.filter = `blur(${Math.max(0, Math.min(40, values.blur))}px)`;
@@ -1229,19 +1390,99 @@
     return [...colors.entries()].sort((a, b) => b[1] - a[1]).slice(0, count).map(([key]) => `#${key.split(",").map((value) => Number(value).toString(16).padStart(2, "0")).join("")}`);
   }
 
+  function readExifField(bytes, view, tiffStart, entryOffset, littleEndian) {
+    if (entryOffset + 12 > bytes.length) return null;
+    const type = view.getUint16(entryOffset + 2, littleEndian);
+    const count = view.getUint32(entryOffset + 4, littleEndian);
+    const unitSize = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 }[type] || 0;
+    const byteLength = count * unitSize;
+    if (!unitSize || !Number.isSafeInteger(byteLength) || byteLength > bytes.length) return null;
+    const dataOffset = byteLength <= 4 ? entryOffset + 8 : tiffStart + view.getUint32(entryOffset + 8, littleEndian);
+    if (dataOffset < 0 || dataOffset + byteLength > bytes.length) return null;
+    if (type === 2) return new TextDecoder("ascii").decode(bytes.slice(dataOffset, dataOffset + byteLength)).replace(/\0+$/, "").trim();
+    if (type === 3) return view.getUint16(dataOffset, littleEndian);
+    if (type === 4) return view.getUint32(dataOffset, littleEndian);
+    return null;
+  }
+
+  function parseExifIfd(bytes, view, tiffStart, relativeOffset, littleEndian) {
+    const start = tiffStart + Number(relativeOffset || 0);
+    if (start < 0 || start + 2 > bytes.length) return new Map();
+    const count = view.getUint16(start, littleEndian);
+    if (count > 512 || start + 2 + count * 12 > bytes.length) return new Map();
+    const fields = new Map();
+    for (let index = 0; index < count; index += 1) {
+      const entry = start + 2 + index * 12;
+      const tag = view.getUint16(entry, littleEndian);
+      const value = readExifField(bytes, view, tiffStart, entry, littleEndian);
+      if (value !== null && value !== "") fields.set(tag, value);
+    }
+    return fields;
+  }
+
   function exifSummary(bytes) {
-    if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return "不是 JPEG 文件；PNG/WebP 通常不包含 JPEG EXIF 区块。";
-    let offset = 2; let app1 = 0; let gps = false;
-    while (offset + 4 < bytes.length && bytes[offset] === 0xff) {
-      const marker = bytes[offset + 1]; const length = (bytes[offset + 2] << 8) + bytes[offset + 3];
+    if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return "不是 JPEG 文件；当前查看器只解析 JPEG EXIF，图片仍然只在本机读取。";
+    let offset = 2;
+    let app1 = 0;
+    let fields = new Map();
+    let exifFields = new Map();
+    while (offset + 4 <= bytes.length && bytes[offset] === 0xff) {
+      const marker = bytes[offset + 1];
+      if (marker === 0xda || marker === 0xd9) break;
+      const length = (bytes[offset + 2] << 8) + bytes[offset + 3];
+      const segmentEnd = offset + 2 + length;
+      if (length < 2 || segmentEnd > bytes.length) break;
+      const payload = offset + 4;
       if (marker === 0xe1) {
         app1 += 1;
-        for (let index = offset + 4; index < Math.min(bytes.length - 1, offset + length + 2); index += 1) if ((bytes[index] === 0x25 && bytes[index + 1] === 0x88) || (bytes[index] === 0x88 && bytes[index + 1] === 0x25)) gps = true;
+        const exifHeader = bytes[payload] === 0x45 && bytes[payload + 1] === 0x78 && bytes[payload + 2] === 0x69 && bytes[payload + 3] === 0x66 && bytes[payload + 4] === 0 && bytes[payload + 5] === 0;
+        if (exifHeader) {
+          const tiffStart = payload + 6;
+          if (tiffStart + 8 <= segmentEnd) {
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            const littleEndian = bytes[tiffStart] === 0x49 && bytes[tiffStart + 1] === 0x49;
+            const bigEndian = bytes[tiffStart] === 0x4d && bytes[tiffStart + 1] === 0x4d;
+            if ((littleEndian || bigEndian) && view.getUint16(tiffStart + 2, littleEndian) === 42) {
+              fields = parseExifIfd(bytes, view, tiffStart, view.getUint32(tiffStart + 4, littleEndian), littleEndian);
+              if (fields.has(0x8769)) exifFields = parseExifIfd(bytes, view, tiffStart, fields.get(0x8769), littleEndian);
+            }
+          }
+        }
       }
-      if (length < 2) break;
-      offset += length + 2;
+      offset = segmentEnd;
     }
-    return `JPEG EXIF 区块：${app1}\nGPS 标签：${gps ? "检测到，分享前建议移除" : "未检测到"}\n说明：浏览器本地检查不会上传图片。`;
+    const orientationNames = { 1: "正常", 2: "水平镜像", 3: "旋转 180°", 4: "垂直镜像", 5: "镜像并旋转 90°", 6: "旋转 90°", 7: "镜像并旋转 270°", 8: "旋转 270°" };
+    const details = [
+      `JPEG APP1 区块：${app1}`,
+      `相机厂商：${fields.get(0x010f) || "未记录"}`,
+      `相机型号：${fields.get(0x0110) || "未记录"}`,
+      `拍摄时间：${exifFields.get(0x9003) || fields.get(0x0132) || "未记录"}`,
+      `镜头型号：${exifFields.get(0xa434) || "未记录"}`,
+      `方向：${orientationNames[fields.get(0x0112)] || fields.get(0x0112) || "未记录"}`,
+      `图像尺寸：${exifFields.get(0xa002) && exifFields.get(0xa003) ? `${exifFields.get(0xa002)} × ${exifFields.get(0xa003)}` : "未记录"}`,
+      `GPS 标签：${fields.has(0x8825) ? "检测到，分享前建议移除" : "未检测到"}`,
+      "说明：仅在浏览器本地读取，不显示具体定位坐标。",
+    ];
+    return details.join("\n");
+  }
+
+  function stripJpegMetadata(bytes) {
+    if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return bytes;
+    const parts = [bytes.slice(0, 2)];
+    let offset = 2;
+    while (offset < bytes.length) {
+      if (bytes[offset] !== 0xff || offset + 1 >= bytes.length) { parts.push(bytes.slice(offset)); break; }
+      const marker = bytes[offset + 1];
+      if (marker === 0xda || marker === 0xd9) { parts.push(bytes.slice(offset)); break; }
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { parts.push(bytes.slice(offset, offset + 2)); offset += 2; continue; }
+      if (offset + 4 > bytes.length) break;
+      const length = (bytes[offset + 2] << 8) + bytes[offset + 3];
+      const segmentEnd = offset + 2 + length;
+      if (length < 2 || segmentEnd > bytes.length) { parts.push(bytes.slice(offset)); break; }
+      if (marker !== 0xe1 && marker !== 0xfe) parts.push(bytes.slice(offset, segmentEnd));
+      offset = segmentEnd;
+    }
+    return joinBytes(parts);
   }
 
   function imageFields(toolId) {
@@ -1250,12 +1491,14 @@
     if (toolId === "image-scale") fields.push('<label><span>缩放百分比</span><input id="imageScale" data-config="scale" type="number" min="1" max="1000" value="50" /></label>');
     if (["image-compress", "image-batch-compress", "image-format"].includes(toolId)) fields.push('<label><span>格式</span><select id="imageFormat" data-config="format"><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select></label><label><span>质量</span><input id="imageQuality" data-config="quality" type="number" min="10" max="100" value="85" /></label>');
     if (toolId === "image-rotate") fields.push('<label><span>旋转角度</span><select id="imageAngle" data-config="angle"><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label>');
+    if (toolId === "image-flip") fields.push('<label><span>翻转方向</span><select id="imageFlip" data-config="flip"><option value="horizontal">水平翻转</option><option value="vertical">垂直翻转</option><option value="both">水平并垂直</option></select></label>');
     if (toolId === "image-rounded") fields.push('<label><span>圆角半径</span><input id="imageRadius" data-config="radius" type="number" min="0" value="32" /></label>');
     if (["text-watermark", "tile-watermark"].includes(toolId)) fields.push('<label><span>水印文字</span><input id="imageWatermarkText" data-config="text" value="WYJ" /></label><label><span>水印颜色</span><input id="imageColor" data-config="color" type="color" value="#7ed8ff" /></label>');
     if (["image-crop", "image-mosaic", "image-redact"].includes(toolId)) fields.push('<label><span>左侧 %</span><input id="imageRegionX" data-config="x" type="number" min="0" max="100" value="25" /></label><label><span>顶部 %</span><input id="imageRegionY" data-config="y" type="number" min="0" max="100" value="25" /></label><label><span>宽度 %</span><input id="imageRegionWidth" data-config="regionWidth" type="number" min="1" max="100" value="50" /></label><label><span>高度 %</span><input id="imageRegionHeight" data-config="regionHeight" type="number" min="1" max="100" value="30" /></label>');
     if (toolId === "image-blur") fields.push('<label><span>模糊半径</span><input id="imageBlur" data-config="blur" type="number" min="0" max="40" value="8" /></label>');
     if (["gradient-generator", "gradient-css"].includes(toolId)) fields.push('<label><span>起始色</span><input id="imageColor" data-config="color" type="color" value="#07111f" /></label><label><span>结束色</span><input id="imageGradientEnd" data-config="gradientEnd" type="color" value="#246da8" /></label><label><span>角度</span><input id="imageGradientAngle" data-config="gradientAngle" type="number" value="135" /></label>');
-    if (["solid-image", "color-convert"].includes(toolId)) fields.push('<label><span>颜色</span><input id="imageColor" data-config="color" type="color" value="#246da8" /></label>');
+    if (toolId === "color-convert") fields.push('<label class="tool-wide"><span>HEX、RGB 或 HSL</span><input id="imageColorText" data-config="color" value="#246da8" placeholder="#246da8 / rgb(36,109,168) / hsl(204,65%,40%)" /></label>');
+    if (toolId === "solid-image") fields.push('<label><span>颜色</span><input id="imageColor" data-config="color" type="color" value="#246da8" /></label>');
     if (["solid-image", "gradient-generator"].includes(toolId)) fields.push('<label><span>宽度</span><input id="imageWidth" data-config="width" type="number" min="1" value="1200" /></label><label><span>高度</span><input id="imageHeight" data-config="height" type="number" min="1" value="630" /></label>');
     return fields.join("");
   }
@@ -1263,8 +1506,11 @@
   async function processImageTool(tool, files, overlayFile) {
     const values = imageControlValues();
     if (tool.id === "color-convert") {
-      const [red, green, blue] = colorRgb(values.color); const [hue, saturation, light] = rgbToHsl(red, green, blue);
-      return { text: `${values.color.toUpperCase()}\nRGB(${red}, ${green}, ${blue})\nHSL(${hue}, ${saturation}%, ${light}%)` };
+      const [red, green, blue] = parseColorValue(values.color); const [hue, saturation, light] = rgbToHsl(red, green, blue);
+      const hex = rgbToHex(red, green, blue).toUpperCase();
+      const canvas = document.createElement("canvas"); canvas.width = 480; canvas.height = 180;
+      const context = canvas.getContext("2d"); context.fillStyle = hex; context.fillRect(0, 0, canvas.width, canvas.height);
+      return { text: `${hex}\nRGB(${red}, ${green}, ${blue})\nHSL(${hue}, ${saturation}%, ${light}%)`, canvas };
     }
     if (["gradient-generator", "gradient-css", "solid-image"].includes(tool.id)) {
       const canvas = document.createElement("canvas"); canvas.width = Math.max(1, Math.min(4096, values.width || 1200)); canvas.height = Math.max(1, Math.min(4096, values.height || 630));
@@ -1300,6 +1546,13 @@
       }
       previewCanvas = canvas;
       if (tool.id === "color-extract") { releaseBitmap(bitmap); releaseBitmap(overlay); return { text: extractColors(canvas).join("\n"), canvas }; }
+      if (tool.id === "exif-remove" && file.type === "image/jpeg") {
+        const cleanBytes = stripJpegMetadata(new Uint8Array(await file.arrayBuffer()));
+        const blob = new Blob([cleanBytes], { type: "image/jpeg" });
+        outputs.push({ name: `${file.name.replace(/\.[^.]+$/, "")}-metadata-removed.jpg`, data: cleanBytes, blob });
+        releaseBitmap(bitmap);
+        continue;
+      }
       if (tool.id === "multi-icon-zip") {
         const entries = [];
         for (const size of [16, 32, 48, 64, 128, 192, 512]) {
@@ -1309,7 +1562,9 @@
         releaseBitmap(bitmap); releaseBitmap(overlay);
         return { text: "已生成 7 种尺寸图标", canvas, blob: zipBlob(entries), name: `icons-${Date.now()}.zip` };
       }
-      const format = tool.id === "image-format" || tool.id.includes("compress") ? values.format : "image/png";
+      const format = tool.id === "image-format" || tool.id.includes("compress")
+        ? values.format
+        : tool.id === "exif-remove" && file.type === "image/webp" ? "image/webp" : "image/png";
       const blob = await canvasBlob(canvas, format, values.quality);
       const extension = blob.type === "image/jpeg" ? "jpg" : blob.type === "image/webp" ? "webp" : "png";
       outputs.push({ name: `${file.name.replace(/\.[^.]+$/, "")}-${tool.id}.${extension}`, data: new Uint8Array(await blob.arrayBuffer()), blob });
@@ -1453,21 +1708,85 @@
     bindConfigControls();
   }
 
+  function qrStructuredFields(kind) {
+    if (kind === "url") return '<label class="tool-wide"><span>网址</span><input id="qrUrl" data-config="url" inputmode="url" placeholder="https://example.com" /></label>';
+    if (kind === "wifi") return `<div class="tool-options tool-wide">
+      <label><span>网络名称（SSID）</span><input id="qrWifiName" data-config="wifiName" maxlength="128" /></label>
+      <label><span>安全类型</span><select id="qrWifiSecurity" data-config="wifiSecurity"><option value="WPA">WPA/WPA2/WPA3</option><option value="WEP">WEP</option><option value="nopass">无密码</option></select></label>
+      <label><span>Wi-Fi 密码</span><input id="qrWifiPassword" data-config="wifiPassword" type="password" maxlength="128" autocomplete="new-password" /></label>
+      <label class="admin-checkbox"><input id="qrWifiHidden" data-config="wifiHidden" type="checkbox" /> 隐藏网络</label>
+    </div>`;
+    if (kind === "contact") return `<div class="tool-options tool-wide">
+      <label><span>姓名</span><input id="qrContactName" data-config="contactName" maxlength="100" /></label>
+      <label><span>电话</span><input id="qrContactPhone" data-config="contactPhone" inputmode="tel" maxlength="50" /></label>
+      <label><span>邮箱</span><input id="qrContactEmail" data-config="contactEmail" inputmode="email" maxlength="254" /></label>
+      <label><span>组织</span><input id="qrContactOrg" data-config="contactOrg" maxlength="100" /></label>
+      <label class="tool-wide"><span>网址（可空）</span><input id="qrContactUrl" data-config="contactUrl" inputmode="url" maxlength="500" /></label>
+    </div>`;
+    return '<label class="tool-wide"><span>文本内容</span><textarea id="qrText" data-config="text" maxlength="3000"></textarea></label>';
+  }
+
+  function escapeWifiValue(value) {
+    return String(value || "").replace(/([\\;,:"])/g, "\\$1");
+  }
+
+  function escapeVcardValue(value) {
+    return String(value || "").replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/([;,])/g, "\\$1");
+  }
+
+  function temporaryQrContent(kind) {
+    if (kind === "url") {
+      const value = byId("qrUrl").value.trim();
+      let url;
+      try { url = new URL(value); } catch (_error) { throw new Error("请输入完整网址，例如 https://example.com"); }
+      if (!["http:", "https:"].includes(url.protocol)) throw new Error("网址只支持 http 或 https");
+      return url.href;
+    }
+    if (kind === "wifi") {
+      const name = byId("qrWifiName").value.trim(); if (!name) throw new Error("请输入 Wi-Fi 网络名称");
+      const security = byId("qrWifiSecurity").value;
+      const password = byId("qrWifiPassword").value;
+      if (security !== "nopass" && !password) throw new Error("请输入 Wi-Fi 密码，或将安全类型改为无密码");
+      return `WIFI:T:${security};S:${escapeWifiValue(name)};P:${escapeWifiValue(password)};H:${byId("qrWifiHidden").checked ? "true" : "false"};;`;
+    }
+    if (kind === "contact") {
+      const name = byId("qrContactName").value.trim();
+      const phone = byId("qrContactPhone").value.trim();
+      const email = byId("qrContactEmail").value.trim();
+      const organization = byId("qrContactOrg").value.trim();
+      const website = byId("qrContactUrl").value.trim();
+      if (![name, phone, email, organization, website].some(Boolean)) throw new Error("请至少填写一项联系人信息");
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("联系人邮箱格式不正确");
+      if (website) { try { new URL(website); } catch (_error) { throw new Error("联系人网址格式不正确"); } }
+      return ["BEGIN:VCARD", "VERSION:3.0", `FN:${escapeVcardValue(name || organization || phone || email)}`, phone && `TEL:${escapeVcardValue(phone)}`, email && `EMAIL:${escapeVcardValue(email)}`, organization && `ORG:${escapeVcardValue(organization)}`, website && `URL:${website}`, "END:VCARD"].filter(Boolean).join("\r\n");
+    }
+    const value = byId("qrText").value.trim(); if (!value) throw new Error("请输入二维码文本");
+    return value;
+  }
+
   function renderTemporaryQr(tool) {
     byId("toolWorkbenchBody").innerHTML = `<div class="tool-form temporary-tool-form">
       <label><span>二维码类型</span><select id="qrKind" data-config="kind"><option value="text">文本</option><option value="url">URL</option><option value="wifi">Wi-Fi</option><option value="contact">联系信息</option></select></label>
-      <label class="tool-wide"><span>内容</span><textarea id="tempContent" maxlength="3000" placeholder="Wi-Fi 可填写 WIFI:T:WPA;S:名称;P:密码;;"></textarea></label>
+      <div class="tool-wide" id="qrStructuredFields"></div>
       <label class="admin-checkbox"><input id="qrDynamic" data-config="dynamic" type="checkbox" /> 生成会自动失效的临时链接</label>
-      ${temporaryCommonFields(60)}
-      <label><span>最大访问次数</span><input id="tempMaxViews" data-config="maxViews" type="number" min="1" max="1000" value="10" /></label>
+      <div class="tool-wide hidden" id="qrDynamicOptions">${temporaryCommonFields(60)}
+        <label><span>最大访问次数</span><input id="tempMaxViews" data-config="maxViews" type="number" min="1" max="1000" value="10" /></label>
+      </div>
       <div class="tool-command-row"><button class="primary" id="createTempBtn" type="button">生成二维码</button></div>
       <div class="temporary-result" id="temporaryResult"></div>${renderConfigControls(tool.id)}
     </div>`;
+    const updateFields = () => { byId("qrStructuredFields").innerHTML = qrStructuredFields(byId("qrKind").value); };
+    const updateDynamic = () => byId("qrDynamicOptions").classList.toggle("hidden", !byId("qrDynamic").checked);
+    byId("qrKind").addEventListener("change", updateFields);
+    byId("qrDynamic").addEventListener("change", updateDynamic);
+    updateFields();
+    updateDynamic();
     byId("createTempBtn").addEventListener("click", async () => {
       try {
-        const content = byId("tempContent").value.trim(); if (!content) throw new Error("请输入二维码内容");
+        const kind = byId("qrKind").value;
+        const content = temporaryQrContent(kind);
         if (byId("qrDynamic").checked) {
-          const data = await bridge.api("/api/temporary/qr", { content, kind: byId("qrKind").value, password: byId("tempPassword").value, minutes: byId("tempMinutes").value, max_views: byId("tempMaxViews").value, destroy_after_read: byId("tempDestroy").checked });
+          const data = await bridge.api("/api/temporary/qr", { content, kind, password: byId("tempPassword").value, minutes: byId("tempMinutes").value, max_views: byId("tempMaxViews").value, destroy_after_read: byId("tempDestroy").checked });
           const url = shareUrl("qr", data.share.id); renderTemporaryResult(byId("temporaryResult"), "动态二维码链接", url, url); setMessage(`动态内容有效至 ${bridge.formatDate(data.share.expires_at)}`);
         } else {
           renderTemporaryResult(byId("temporaryResult"), "二维码内容", content, content); setMessage("静态二维码只在本机生成");
