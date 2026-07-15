@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-15-ux7";
+const APP_VERSION = "2026-07-15-ux8";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -10,6 +10,7 @@ const MAX_WRONG_BOOK_ITEMS = 250;
 const MAX_ACCEPTED_ANSWERS = 14;
 const MAX_RUBRIC_CACHE_ITEMS = 500;
 const MAX_JAPANESE_READING_CACHE_ITEMS = 2000;
+const MAX_STUDY_RECORDS = 500;
 const MAX_WORD_IMPORT_BYTES = 1024 * 1024;
 const MAX_WORD_INPUT_CHARS = 120000;
 const PROJECT_RUNTIME_MAX_AGE_MS = 100 * 60 * 1000;
@@ -17,6 +18,7 @@ const BACKEND_REFRESH_INTERVAL_MS = 60 * 1000;
 const JAPANESE_READING_CACHE_KEY = "japaneseReadingCache:v1";
 const JAPANESE_WRITTEN_FORM_CACHE_KEY = "japaneseWrittenFormCache:v1";
 const ACCOUNT_DATA_VERSION = 2;
+const STUDY_DATA_VERSION = 1;
 const WRONG_BOOK_EXPORT_TYPE = "vocab-wrong-book";
 const WRONG_BOOK_EXPORT_VERSION = 1;
 const DEFAULT_PROFILE = "我";
@@ -53,15 +55,38 @@ const VOCABULARY_LEVEL_OPTIONS = {
   ],
 };
 const SKIPPED_ANSWER = "（跳过）";
+const ACHIEVEMENT_TIERS = {
+  bronze: { label: "初阶", points: 10 },
+  silver: { label: "进阶", points: 25 },
+  gold: { label: "高阶", points: 50 },
+  platinum: { label: "卓越", points: 100 },
+};
 const ACHIEVEMENTS = [
-  { id: "firstQuiz", title: "开测", desc: "完成一次词表测试。" },
-  { id: "firstDictation", title: "听写启动", desc: "完成一次听写练习。" },
-  { id: "firstCorrect", title: "第一题正确", desc: "答对任意一道题。" },
-  { id: "skipSaved", title: "跳过也记录", desc: "跳过的词已进入错题本。" },
-  { id: "wrongTen", title: "错题收藏家", desc: "历史错题达到 10 个。" },
-  { id: "perfectRound", title: "满分一轮", desc: "整轮测试全部答对。" },
-  { id: "firstPdf", title: "练习册生成", desc: "导出一次 PDF 错题本。" },
-  { id: "longRound", title: "长跑", desc: "完成 20 题以上的一轮测试。" },
+  { id: "firstQuiz", category: "入门", tier: "bronze", title: "开测", desc: "完成一次词表测试。", metric: "rounds", goal: 1 },
+  { id: "firstCorrect", category: "入门", tier: "bronze", title: "第一题正确", desc: "累计答对 1 题。", metric: "correct", goal: 1 },
+  { id: "firstDictation", category: "探索", tier: "bronze", title: "听写启动", desc: "完成一次听写练习。", metric: "dictationRounds", goal: 1 },
+  { id: "skipSaved", category: "入门", tier: "bronze", title: "跳过也记录", desc: "跳过的词已进入错题本。", metric: "skipped", goal: 1 },
+  { id: "wrongTen", category: "工具", tier: "silver", title: "错题收藏家", desc: "历史错题达到 10 个。", metric: "wrongWords", goal: 10 },
+  { id: "perfectRound", category: "能力", tier: "silver", title: "满分一轮", desc: "完成一轮满分测试。", metric: "perfectRounds", goal: 1 },
+  { id: "firstPdf", category: "工具", tier: "silver", title: "练习册生成", desc: "导出一次 PDF 错题本。" },
+  { id: "longRound", category: "坚持", tier: "silver", title: "长跑", desc: "完成一轮 20 题以上的测试。", metric: "longRounds", goal: 1 },
+  { id: "rounds5", category: "坚持", tier: "bronze", title: "渐入佳境", desc: "累计完成 5 轮练习。", metric: "rounds", goal: 5 },
+  { id: "rounds25", category: "坚持", tier: "silver", title: "稳定节奏", desc: "累计完成 25 轮练习。", metric: "rounds", goal: 25 },
+  { id: "rounds100", category: "坚持", tier: "platinum", title: "百炼成章", desc: "累计完成 100 轮练习。", metric: "rounds", goal: 100 },
+  { id: "words50", category: "坚持", tier: "bronze", title: "五十步", desc: "累计完成 50 道题。", metric: "words", goal: 50 },
+  { id: "words500", category: "坚持", tier: "silver", title: "五百题", desc: "累计完成 500 道题。", metric: "words", goal: 500 },
+  { id: "words2000", category: "坚持", tier: "gold", title: "两千里", desc: "累计完成 2000 道题。", metric: "words", goal: 2000 },
+  { id: "correct100", category: "能力", tier: "bronze", title: "百题正确", desc: "累计答对 100 道题。", metric: "correct", goal: 100 },
+  { id: "correct1000", category: "能力", tier: "gold", title: "千题正确", desc: "累计答对 1000 道题。", metric: "correct", goal: 1000 },
+  { id: "streak3", category: "坚持", tier: "bronze", title: "三日不辍", desc: "最长连续学习 3 天。", metric: "longestStreak", goal: 3 },
+  { id: "streak7", category: "坚持", tier: "silver", title: "一周坚持", desc: "最长连续学习 7 天。", metric: "longestStreak", goal: 7 },
+  { id: "streak30", category: "坚持", tier: "gold", title: "月度恒心", desc: "最长连续学习 30 天。", metric: "longestStreak", goal: 30 },
+  { id: "perfect3", category: "能力", tier: "gold", title: "三连满分", desc: "累计完成 3 轮满分练习。", metric: "perfectRounds", goal: 3 },
+  { id: "dictation10", category: "探索", tier: "silver", title: "听辨熟手", desc: "累计完成 10 轮听写。", metric: "dictationRounds", goal: 10 },
+  { id: "review10", category: "探索", tier: "silver", title: "回炉有方", desc: "累计完成 10 轮错题复习。", metric: "reviewRounds", goal: 10 },
+  { id: "bilingual", category: "探索", tier: "silver", title: "双语启程", desc: "英语和日语各完成至少 1 轮。", metric: "bilingualRounds", goal: 1 },
+  { id: "highAccuracy5", category: "能力", tier: "gold", title: "稳定高分", desc: "完成 5 轮至少 10 题且正确率不低于 90% 的练习。", metric: "highAccuracyRounds", goal: 5 },
+  { id: "goalDays3", category: "坚持", tier: "gold", title: "目标常客", desc: "累计 3 天达到当日学习目标。", metric: "goalDays", goal: 3 },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -82,6 +107,9 @@ let projectRuntimeNeedsRestore = false;
 let backendStatusPromise = null;
 let backendRefreshPromise = null;
 let storageWriteFailed = false;
+let achievementFilter = "all";
+let achievementToastTimer = null;
+let achievementToastHideTimer = null;
 const modalReturnFocus = new Map();
 const projectRuntime = {
   english: null,
@@ -293,6 +321,7 @@ const state = {
   busy: false,
   answerLocked: false,
   roundActive: false,
+  roundStartedAt: 0,
   wrongScope: "current",
   rubricCache: loadJson("rubricCache", {}),
   japaneseReadings: sanitizeJapaneseReadings(loadJson(JAPANESE_READING_CACHE_KEY, {})),
@@ -300,6 +329,7 @@ const state = {
   currentWrongBook: {},
   historyWrongBook: {},
   achievements: {},
+  studyRecords: [],
 };
 
 function accountStorageId(account = state.account) {
@@ -320,6 +350,57 @@ function achievementKey(account = state.account, profile = state.profile) {
 
 function projectRuntimeKey(language, account = state.account) {
   return `vocabRuntime:v1:${accountStorageId(account)}:${language}`;
+}
+
+function studyHistoryKey(account = state.account, profile = state.profile) {
+  return `studyHistory:v${STUDY_DATA_VERSION}:${accountStorageId(account)}:${profileStorageName(profile)}`;
+}
+
+function studyGoalKey(language = state.quizLanguage, account = state.account, profile = state.profile) {
+  return `studyGoal:v${STUDY_DATA_VERSION}:${accountStorageId(account)}:${profileStorageName(profile)}:${language}`;
+}
+
+function sanitizeStudyRecords(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-MAX_STUDY_RECORDS).map((record) => {
+    if (!record || typeof record !== "object") return null;
+    const language = normalizeQuizLanguage(record.language);
+    const parsedTotal = Number.parseInt(record.total, 10) || 0;
+    if (parsedTotal < 1) return null;
+    const total = Math.min(500, parsedTotal);
+    const correct = Math.max(0, Math.min(total, Number.parseInt(record.correct, 10) || 0));
+    const skipped = Math.max(0, Math.min(total - correct, Number.parseInt(record.skipped, 10) || 0));
+    const wrong = Math.max(0, total - correct - skipped);
+    const finishedAt = new Date(record.finishedAt || record.finished_at || "");
+    if (!language || !Number.isFinite(finishedAt.getTime())) return null;
+    return {
+      id: limitText(record.id, 100) || `${finishedAt.getTime()}-${language}`,
+      finishedAt: finishedAt.toISOString(),
+      language,
+      practiceMode: normalizePracticeMode(record.practiceMode),
+      mode: ["normal", "review-current", "review-history"].includes(record.mode) ? record.mode : "normal",
+      total,
+      correct,
+      wrong,
+      skipped,
+      accuracy: Math.round((correct / total) * 100),
+      durationSec: Math.max(0, Math.min(24 * 60 * 60, Number.parseInt(record.durationSec, 10) || 0)),
+    };
+  }).filter(Boolean);
+}
+
+function loadStudyRecords() {
+  if (!state.account?.id) {
+    state.studyRecords = [];
+    return;
+  }
+  state.studyRecords = sanitizeStudyRecords(loadJson(studyHistoryKey(), []));
+}
+
+function saveStudyRecords() {
+  if (!state.account?.id) return;
+  state.studyRecords = sanitizeStudyRecords(state.studyRecords);
+  safeStorageSet(localStorage, studyHistoryKey(), JSON.stringify(state.studyRecords));
 }
 
 function migrateLegacyAccountData() {
@@ -368,6 +449,7 @@ function loadAccountLocalState() {
   if ($("profileInput")) $("profileInput").value = state.profile;
   loadWrongBooks();
   loadAchievements();
+  loadStudyRecords();
 }
 
 function resetLocalViewState() {
@@ -375,6 +457,7 @@ function resetLocalViewState() {
   state.currentWrongBook = {};
   state.historyWrongBook = {};
   state.achievements = {};
+  state.studyRecords = [];
   state.words = [];
   state.index = 0;
   state.score = 0;
@@ -383,6 +466,7 @@ function resetLocalViewState() {
   state.quizSession = "";
   state.roundActive = false;
   state.answerLocked = false;
+  state.roundStartedAt = 0;
   if ($("profileInput")) $("profileInput").value = state.profile;
 }
 
@@ -1066,6 +1150,7 @@ function clearSavedWordDrafts(account = state.account) {
   state.quizSession = "";
   state.roundActive = false;
   state.answerLocked = false;
+  state.roundStartedAt = 0;
   if ($("wordInput")) $("wordInput").value = "";
 }
 
@@ -1076,6 +1161,8 @@ function clearAccountLocalData(account = state.account) {
     `vocabWords:${accountId}:`,
     `wrongBook:v${ACCOUNT_DATA_VERSION}:${accountId}:`,
     `achievements:v${ACCOUNT_DATA_VERSION}:${accountId}:`,
+    `studyHistory:v${STUDY_DATA_VERSION}:${accountId}:`,
+    `studyGoal:v${STUDY_DATA_VERSION}:${accountId}:`,
   ];
   const exactLocalKeys = [
     `vocabProfile:v${ACCOUNT_DATA_VERSION}:${accountId}`,
@@ -1122,6 +1209,7 @@ function saveProjectRuntime() {
     quizSession: state.quizSession,
     roundActive: state.roundActive,
     answerLocked: state.answerLocked,
+    roundStartedAt: state.roundStartedAt,
     lastRound: state.lastRound,
     mode: state.mode,
     view: document.querySelector(".view.active")?.id || "setupView",
@@ -1154,10 +1242,13 @@ function loadProjectRuntime(language) {
   runtime.score = Math.max(0, Math.min(Number.parseInt(runtime.score, 10) || 0, runtime.words.length));
   runtime.roundSkipped = Math.max(0, Math.min(Number.parseInt(runtime.roundSkipped, 10) || 0, runtime.words.length));
   runtime.mode = ["normal", "review-current", "review-history"].includes(runtime.mode) ? runtime.mode : "normal";
-  runtime.view = ["setupView", "quizView", "wrongView", "achievementsView"].includes(runtime.view) ? runtime.view : "setupView";
+  runtime.view = ["setupView", "quizView", "wrongView", "achievementsView", "studyView"].includes(runtime.view) ? runtime.view : "setupView";
   runtime.quizSession = limitText(runtime.quizSession, 160);
   runtime.roundActive = Boolean(runtime.roundActive && runtime.words.length);
   runtime.answerLocked = Boolean(runtime.answerLocked && runtime.roundActive);
+  runtime.roundStartedAt = runtime.roundActive && Number.isFinite(Number(runtime.roundStartedAt))
+    ? Math.min(Date.now(), Math.max(0, Number(runtime.roundStartedAt)))
+    : 0;
   projectRuntime[language] = runtime;
   return runtime;
 }
@@ -1181,6 +1272,7 @@ function restoreProjectRuntime() {
     state.lastRound = null;
     state.roundActive = false;
     state.answerLocked = false;
+    state.roundStartedAt = 0;
     state.mode = "normal";
     setView("setupView");
     updateStats();
@@ -1194,6 +1286,7 @@ function restoreProjectRuntime() {
   state.lastRound = runtime.lastRound || null;
   state.roundActive = runtime.roundActive;
   state.answerLocked = runtime.answerLocked;
+  state.roundStartedAt = runtime.roundStartedAt;
   state.mode = runtime.mode;
   const view = runtime.view === "quizView" && !state.roundActive ? "setupView" : runtime.view;
   setView(view);
@@ -1460,32 +1553,390 @@ function unlockAchievement(id) {
   if (!item || state.achievements[id]) return;
   state.achievements[id] = new Date().toLocaleString();
   saveAchievements();
+  showAchievementToast(`解锁成就：${item.title}`);
   renderAchievements();
+}
+
+function showAchievementToast(message) {
+  const toast = $("achievementToast");
+  if (!toast) return;
+  clearTimeout(achievementToastTimer);
+  clearTimeout(achievementToastHideTimer);
+  toast.textContent = message;
+  toast.classList.remove("hidden", "is-leaving");
+  window.requestAnimationFrame(() => toast.classList.add("is-visible"));
+  achievementToastTimer = window.setTimeout(() => {
+    toast.classList.add("is-leaving");
+    toast.classList.remove("is-visible");
+    achievementToastHideTimer = window.setTimeout(() => toast.classList.add("hidden"), 240);
+  }, 3200);
+}
+
+function calculateLongestStudyStreak(records) {
+  const dayNumbers = [...new Set(records.map((record) => localDayKey(record.finishedAt)).filter(Boolean))]
+    .map((key) => {
+      const [year, month, day] = key.split("-").map(Number);
+      return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+    })
+    .sort((left, right) => left - right);
+  let longest = 0;
+  let current = 0;
+  let previous = null;
+  dayNumbers.forEach((day) => {
+    current = previous !== null && day === previous + 1 ? current + 1 : 1;
+    longest = Math.max(longest, current);
+    previous = day;
+  });
+  return longest;
+}
+
+function achievementMetrics() {
+  const records = state.studyRecords;
+  const languageRounds = { english: 0, japanese: 0 };
+  const totals = records.reduce((result, record) => {
+    result.rounds += 1;
+    result.words += record.total;
+    result.correct += record.correct;
+    result.skipped += record.skipped;
+    if (record.correct === record.total) result.perfectRounds += 1;
+    if (record.total >= 20) result.longRounds += 1;
+    if (record.practiceMode === "dictation") result.dictationRounds += 1;
+    if (record.mode.startsWith("review-")) result.reviewRounds += 1;
+    if (record.total >= 10 && record.accuracy >= 90) result.highAccuracyRounds += 1;
+    languageRounds[record.language] += 1;
+    return result;
+  }, {
+    rounds: 0,
+    words: 0,
+    correct: 0,
+    skipped: 0,
+    perfectRounds: 0,
+    longRounds: 0,
+    dictationRounds: 0,
+    reviewRounds: 0,
+    highAccuracyRounds: 0,
+  });
+  totals.wrongWords = Object.keys(state.historyWrongBook).length;
+  totals.longestStreak = calculateLongestStudyStreak(records);
+  totals.bilingualRounds = Math.min(languageRounds.english, languageRounds.japanese);
+
+  const dailyTotals = new Map();
+  records.forEach((record) => {
+    const day = localDayKey(record.finishedAt);
+    const key = `${day}:${record.language}`;
+    dailyTotals.set(key, (dailyTotals.get(key) || 0) + record.total);
+  });
+  const completedGoalDays = new Set();
+  dailyTotals.forEach((total, key) => {
+    const separator = key.lastIndexOf(":");
+    const day = key.slice(0, separator);
+    const language = key.slice(separator + 1);
+    const storedGoal = Number.parseInt(localStorage.getItem(studyGoalKey(language)), 10);
+    const goal = Number.isInteger(storedGoal) && storedGoal >= 1 && storedGoal <= 500 ? storedGoal : 20;
+    if (total >= goal) completedGoalDays.add(day);
+  });
+  totals.goalDays = completedGoalDays.size;
+  return totals;
+}
+
+function evaluateAchievements(notify = false) {
+  const metrics = achievementMetrics();
+  const unlockedNow = [];
+  ACHIEVEMENTS.forEach((item) => {
+    if (!item.metric || state.achievements[item.id]) return;
+    if ((metrics[item.metric] || 0) < item.goal) return;
+    state.achievements[item.id] = new Date().toLocaleString();
+    unlockedNow.push(item);
+  });
+  if (unlockedNow.length) {
+    saveAchievements();
+    if (notify) {
+      showAchievementToast(unlockedNow.length === 1
+        ? `解锁成就：${unlockedNow[0].title}`
+        : `一次解锁 ${unlockedNow.length} 个成就`);
+    }
+  }
+  return metrics;
 }
 
 function renderAchievements() {
   const list = $("achievementList");
   if (!list) return;
   list.innerHTML = "";
+  const metrics = evaluateAchievements(false);
   const unlockedCount = ACHIEVEMENTS.filter((item) => state.achievements[item.id]).length;
-  $("achievementSummary").textContent = `${state.profile} · ${unlockedCount}/${ACHIEVEMENTS.length}`;
+  const points = ACHIEVEMENTS.reduce((sum, item) => (
+    state.achievements[item.id] ? sum + (ACHIEVEMENT_TIERS[item.tier]?.points || 0) : sum
+  ), 0);
+  $("achievementSummary").textContent = `${state.profile} · ${ACHIEVEMENTS.length} 个挑战`;
+  $("achievementPoints").textContent = `${points} 点`;
+  $("achievementUnlockedCount").textContent = unlockedCount;
+  $("achievementInProgressCount").textContent = ACHIEVEMENTS.length - unlockedCount;
+  $("achievementCompletion").textContent = `${Math.round((unlockedCount / ACHIEVEMENTS.length) * 100)}%`;
+  $("achievementTotalProgress").max = ACHIEVEMENTS.length;
+  $("achievementTotalProgress").value = unlockedCount;
 
-  ACHIEVEMENTS.forEach((item) => {
+  document.querySelectorAll("[data-achievement-filter]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.achievementFilter === achievementFilter);
+  });
+
+  const visibleItems = ACHIEVEMENTS.filter((item) => {
+    const unlocked = Boolean(state.achievements[item.id]);
+    if (achievementFilter === "unlocked") return unlocked;
+    if (achievementFilter === "progress") return !unlocked;
+    return true;
+  });
+
+  visibleItems.forEach((item) => {
     const node = document.createElement("article");
     const unlockedAt = state.achievements[item.id];
-    node.className = `achievement-item${unlockedAt ? " unlocked" : ""}`;
+    const tier = ACHIEVEMENT_TIERS[item.tier] || ACHIEVEMENT_TIERS.bronze;
+    const current = item.metric ? Math.max(0, metrics[item.metric] || 0) : unlockedAt ? 1 : 0;
+    const goal = item.goal || 1;
+    node.className = `achievement-item tier-${item.tier || "bronze"}${unlockedAt ? " unlocked" : ""}`;
     const title = document.createElement("h3");
     const name = document.createElement("strong");
     const mark = document.createElement("span");
+    mark.className = "achievement-tier";
     const desc = document.createElement("p");
     name.textContent = item.title;
-    mark.textContent = unlockedAt ? "已获得" : "未获得";
+    mark.textContent = `${item.category} · ${tier.label}`;
     title.appendChild(name);
     title.appendChild(mark);
-    desc.textContent = unlockedAt ? `${item.desc} · ${unlockedAt}` : item.desc;
+    desc.textContent = item.desc;
     node.appendChild(title);
     node.appendChild(desc);
+
+    const progress = document.createElement("div");
+    progress.className = "achievement-card-progress";
+    const bar = document.createElement("progress");
+    bar.max = goal;
+    bar.value = unlockedAt ? goal : Math.min(current, goal);
+    const detail = document.createElement("div");
+    const count = document.createElement("span");
+    count.textContent = item.metric ? `${Math.min(current, goal)} / ${goal}` : unlockedAt ? "已完成" : "等待触发";
+    const reward = document.createElement("span");
+    reward.textContent = `${tier.points} 点`;
+    detail.append(count, reward);
+    progress.append(bar, detail);
+    node.appendChild(progress);
+
+    const status = document.createElement("p");
+    status.className = "achievement-status";
+    status.textContent = unlockedAt ? `已获得 · ${unlockedAt}` : "尚未完成";
+    node.appendChild(status);
     list.appendChild(node);
+  });
+  if (!visibleItems.length) {
+    const empty = document.createElement("p");
+    empty.className = "achievement-empty";
+    empty.textContent = achievementFilter === "unlocked" ? "还没有已获得的成就" : "所有成就都已完成";
+    list.appendChild(empty);
+  }
+}
+
+function localDayKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function studyDaySeries(days = 7) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() - (days - index - 1));
+    return { date, key: localDayKey(date), total: 0, correct: 0, rounds: 0 };
+  });
+}
+
+function currentStudyRecords() {
+  return state.studyRecords
+    .filter((record) => record.language === state.quizLanguage)
+    .sort((left, right) => Date.parse(right.finishedAt) - Date.parse(left.finishedAt));
+}
+
+function studyGoalValue() {
+  const stored = Number.parseInt(localStorage.getItem(studyGoalKey()), 10);
+  return Number.isInteger(stored) && stored >= 1 && stored <= 500 ? stored : 20;
+}
+
+function saveStudyGoal() {
+  const input = $("studyGoalInput");
+  if (!input || !state.account?.id || !state.quizLanguage) return;
+  const goal = Math.max(1, Math.min(500, Number.parseInt(input.value, 10) || 20));
+  input.value = String(goal);
+  safeStorageSet(localStorage, studyGoalKey(), String(goal));
+  renderStudyDashboard();
+}
+
+function formatDuration(seconds) {
+  const value = Math.max(0, Number.parseInt(seconds, 10) || 0);
+  if (value < 60) return `${value}秒`;
+  const minutes = Math.floor(value / 60);
+  const remainder = value % 60;
+  if (minutes < 60) return remainder ? `${minutes}分${remainder}秒` : `${minutes}分钟`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes ? `${hours}小时${restMinutes}分` : `${hours}小时`;
+}
+
+function calculateStudyStreak(records) {
+  const studiedDays = new Set(records.map((record) => localDayKey(record.finishedAt)).filter(Boolean));
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  if (!studiedDays.has(localDayKey(cursor))) cursor.setDate(cursor.getDate() - 1);
+  let streak = 0;
+  while (streak < 3660 && studiedDays.has(localDayKey(cursor))) {
+    streak += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
+
+function recordStudyRound(summary) {
+  if (!state.account?.id || !summary?.total || !normalizeQuizLanguage(summary.language)) return;
+  const finishedAt = new Date().toISOString();
+  state.studyRecords.push({
+    id: `${Date.now()}-${summary.language}-${state.studyRecords.length}`,
+    finishedAt,
+    language: summary.language,
+    practiceMode: normalizePracticeMode(summary.practiceMode),
+    mode: summary.mode,
+    total: summary.total,
+    correct: summary.correct,
+    wrong: summary.wrong,
+    skipped: summary.skipped,
+    accuracy: summary.accuracy,
+    durationSec: summary.durationSec,
+  });
+  saveStudyRecords();
+  evaluateAchievements(true);
+  if ($("studyView")?.classList.contains("active")) renderStudyDashboard();
+}
+
+function renderStudyDashboard() {
+  const history = $("studyHistory");
+  const chart = $("studyWeekChart");
+  if (!history || !chart) return;
+  const records = currentStudyRecords();
+  const days = studyDaySeries(7);
+  const dayByKey = new Map(days.map((day) => [day.key, day]));
+  records.forEach((record) => {
+    const day = dayByKey.get(localDayKey(record.finishedAt));
+    if (!day) return;
+    day.total += record.total;
+    day.correct += record.correct;
+    day.rounds += 1;
+  });
+
+  const totalWords = records.reduce((sum, record) => sum + record.total, 0);
+  const weekWords = days.reduce((sum, day) => sum + day.total, 0);
+  const weekCorrect = days.reduce((sum, day) => sum + day.correct, 0);
+  const today = days[days.length - 1];
+  const goal = studyGoalValue();
+  const recent = records[0];
+
+  $("studyGoalInput").value = String(goal);
+  $("studyGoalProgress").textContent = `${today.total} / ${goal}`;
+  $("studyGoalBar").max = goal;
+  $("studyGoalBar").value = Math.min(today.total, goal);
+  $("studyTotalRounds").textContent = records.length;
+  $("studyTotalWords").textContent = totalWords;
+  $("studyWeekAccuracy").textContent = weekWords ? `${Math.round((weekCorrect / weekWords) * 100)}%` : "--";
+  $("studyStreak").textContent = calculateStudyStreak(records);
+  $("studyWeekTotal").textContent = `${weekWords} 题`;
+  $("studyRecordCount").textContent = `${records.length} 条`;
+  $("studySummary").textContent = recent
+    ? `${state.profile} · ${quizLanguageLabel(state.quizLanguage)} · 最近学习 ${new Date(recent.finishedAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
+    : `${state.profile} · ${quizLanguageLabel(state.quizLanguage)} · 暂无完成记录`;
+
+  chart.innerHTML = "";
+  const maxTotal = Math.max(1, ...days.map((day) => day.total));
+  days.forEach((day) => {
+    const item = document.createElement("div");
+    item.className = `study-day${day.total ? "" : " is-empty"}`;
+    item.title = `${day.date.toLocaleDateString("zh-CN")} · ${day.total} 题${day.total ? ` · 正确率 ${Math.round((day.correct / day.total) * 100)}%` : ""}`;
+    const count = document.createElement("span");
+    count.className = "study-day-count";
+    count.textContent = String(day.total);
+    const track = document.createElement("div");
+    track.className = "study-day-track";
+    const bar = document.createElement("i");
+    bar.className = "study-day-bar";
+    bar.style.height = day.total ? `${Math.max(8, Math.round((day.total / maxTotal) * 100))}%` : "0";
+    track.appendChild(bar);
+    const label = document.createElement("span");
+    label.className = "study-day-label";
+    label.textContent = day.date.toLocaleDateString("zh-CN", { weekday: "short" });
+    item.append(count, track, label);
+    chart.appendChild(item);
+  });
+  chart.setAttribute("aria-label", `最近七天共完成 ${weekWords} 题`);
+
+  history.innerHTML = "";
+  records.slice(0, 20).forEach((record) => {
+    const row = document.createElement("article");
+    row.className = "study-history-row";
+    const time = document.createElement("strong");
+    time.textContent = new Date(record.finishedAt).toLocaleString("zh-CN", {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    });
+    const mode = document.createElement("span");
+    mode.textContent = record.mode.startsWith("review-") ? "错题复习" : practiceModeLabel(record.practiceMode);
+    const total = document.createElement("span");
+    total.textContent = `${record.total} 题`;
+    const accuracy = document.createElement("span");
+    accuracy.className = "study-history-accuracy";
+    accuracy.textContent = `${record.accuracy}%`;
+    const duration = document.createElement("span");
+    duration.textContent = formatDuration(record.durationSec);
+    const main = document.createElement("div");
+    main.className = "study-history-main";
+    main.append(time, mode);
+    const facts = document.createElement("div");
+    facts.className = "study-history-facts";
+    facts.append(total, accuracy, duration);
+    row.append(main, facts);
+    history.appendChild(row);
+  });
+  if (!records.length) {
+    const empty = document.createElement("p");
+    empty.className = "study-empty";
+    empty.textContent = "完成一轮测试或错题复习后，这里会显示学习趋势。";
+    history.appendChild(empty);
+  }
+  $("exportStudyBtn").disabled = !records.length;
+  $("clearStudyBtn").disabled = !records.length;
+}
+
+function exportStudyRecords() {
+  const records = currentStudyRecords();
+  if (!records.length) return;
+  const payload = {
+    type: "wyj-study-history",
+    version: STUDY_DATA_VERSION,
+    exported_at: new Date().toISOString(),
+    profile: state.profile,
+    language: state.quizLanguage,
+    daily_goal: studyGoalValue(),
+    records,
+  };
+  const safeProfile = profileStorageName(state.profile).replace(/[^\w\u4e00-\u9fff-]+/gu, "-");
+  downloadText(`study-${state.quizLanguage}-${safeProfile}-${Date.now()}.json`, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+}
+
+function confirmClearStudyRecords() {
+  const records = currentStudyRecords();
+  if (!records.length) return;
+  askConfirmation(`确认清除${quizLanguageLabel(state.quizLanguage)}的 ${records.length} 条学习统计？错题和成就不会被删除。`, () => {
+    state.studyRecords = state.studyRecords.filter((record) => record.language !== state.quizLanguage);
+    saveStudyRecords();
+    renderStudyDashboard();
   });
 }
 
@@ -1625,6 +2076,7 @@ function setView(id) {
   document.querySelectorAll(".tabs button").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === id));
   if (id === "wrongView") renderWrongBook();
   if (id === "achievementsView") renderAchievements();
+  if (id === "studyView") renderStudyDashboard();
   if (currentProject && state.roundActive) saveProjectRuntime();
 }
 
@@ -2252,6 +2704,7 @@ async function startQuiz(words, mode = "normal", options = {}) {
   state.mode = mode;
   state.roundActive = true;
   state.answerLocked = false;
+  state.roundStartedAt = Date.now();
   updateStats();
   setView("quizView");
   showWord();
@@ -2400,6 +2853,9 @@ function finishRound() {
   const total = state.words.length;
   const skipped = Math.min(state.roundSkipped, total);
   const wrong = Math.max(0, total - state.score - skipped);
+  const durationSec = state.roundStartedAt
+    ? Math.max(1, Math.round((Date.now() - state.roundStartedAt) / 1000))
+    : 0;
   const summary = {
     total,
     correct: state.score,
@@ -2410,6 +2866,7 @@ function finishRound() {
     mode: state.mode,
     language: state.quizLanguage,
     practiceMode: state.practiceMode,
+    durationSec,
   };
   state.lastRound = summary;
   state.roundActive = false;
@@ -2420,6 +2877,8 @@ function finishRound() {
     unlockAchievement("firstQuiz");
     if (state.practiceMode === "dictation") unlockAchievement("firstDictation");
   }
+  recordStudyRound(summary);
+  state.roundStartedAt = 0;
   state.quizSession = "";
   removeProjectRuntime();
   updateQuestionControls();
@@ -2434,6 +2893,7 @@ function showRoundSummary(summary) {
   $("roundCorrectCount").textContent = summary.correct;
   $("roundWrongCount").textContent = summary.wrong;
   $("roundSkippedCount").textContent = summary.skipped;
+  $("roundDuration").textContent = formatDuration(summary.durationSec);
   $("roundAccuracy").textContent = `正确率 ${summary.accuracy}%`;
   $("roundWrongBtn").disabled = summary.wrong + summary.skipped === 0;
   openModal("roundSummaryModal");
@@ -2902,15 +3362,18 @@ function changeProfile(value) {
   saveCurrentWordDraft();
   saveWrongBooks();
   saveAchievements();
+  saveStudyRecords();
   state.profile = sanitizeProfile(value);
   $("profileInput").value = state.profile;
   loadWrongBooks();
   loadAchievements();
+  loadStudyRecords();
   loadCurrentWordDraft();
   saveState();
   updateStats();
   if ($("wrongView").classList.contains("active")) renderWrongBook();
   if ($("achievementsView").classList.contains("active")) renderAchievements();
+  if ($("studyView").classList.contains("active")) renderStudyDashboard();
 }
 
 async function login(event) {
@@ -3108,6 +3571,9 @@ async function boot() {
   $("wrongDataFileInput").addEventListener("change", importWrongData);
   $("clearWrongBtn").addEventListener("click", () => confirmClearWrongBook("current"));
   $("clearHistoryBtn").addEventListener("click", () => confirmClearWrongBook("history"));
+  $("studyGoalInput").addEventListener("change", saveStudyGoal);
+  $("exportStudyBtn").addEventListener("click", exportStudyRecords);
+  $("clearStudyBtn").addEventListener("click", confirmClearStudyRecords);
   $("currentWrongTab").addEventListener("click", () => setWrongScope("current"));
   $("historyWrongTab").addEventListener("click", () => setWrongScope("history"));
   $("wrongSearchInput").addEventListener("input", renderWrongBook);
@@ -3130,6 +3596,14 @@ async function boot() {
     saveState();
   });
   document.querySelectorAll(".tabs button").forEach((tab) => tab.addEventListener("click", () => setView(tab.dataset.view)));
+  document.querySelectorAll("[data-achievement-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      achievementFilter = ["all", "progress", "unlocked"].includes(button.dataset.achievementFilter)
+        ? button.dataset.achievementFilter
+        : "all";
+      renderAchievements();
+    });
+  });
 
   saveState();
   updateStats();

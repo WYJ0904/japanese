@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260715-ux7" />
-    <link rel="stylesheet" href="/styles.css?v=20260715-ux7" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260715-ux8" />
+    <link rel="stylesheet" href="/styles.css?v=20260715-ux8" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -105,6 +105,7 @@
             <button data-view="quizView" disabled title="尚未开始测试">答题</button>
             <button data-view="wrongView">错题</button>
             <button data-view="achievementsView">成就</button>
+            <button data-view="studyView">统计</button>
           </nav>
 
           <section class="view active" id="setupView">
@@ -245,12 +246,60 @@
           </section>
 
           <section class="view" id="achievementsView">
-            <div class="panel">
+            <div class="panel achievement-panel">
               <div class="achievement-head">
-                <h2>成就</h2>
-                <p class="meta-line" id="achievementSummary"></p>
+                <div><h2>成就</h2><p class="meta-line" id="achievementSummary"></p></div>
+                <strong id="achievementPoints">0 点</strong>
+              </div>
+              <div class="achievement-overview">
+                <div><strong id="achievementUnlockedCount">0</strong><span>已获得</span></div>
+                <div><strong id="achievementInProgressCount">0</strong><span>进行中</span></div>
+                <div><strong id="achievementCompletion">0%</strong><span>完成度</span></div>
+              </div>
+              <progress class="achievement-total-progress" id="achievementTotalProgress" max="25" value="0">0 / 25</progress>
+              <div class="achievement-filters" role="group" aria-label="筛选成就">
+                <button class="active" data-achievement-filter="all" type="button">全部</button>
+                <button data-achievement-filter="progress" type="button">进行中</button>
+                <button data-achievement-filter="unlocked" type="button">已获得</button>
               </div>
               <div class="achievement-grid" id="achievementList"></div>
+            </div>
+          </section>
+
+          <section class="view" id="studyView">
+            <div class="panel study-panel">
+              <div class="study-heading">
+                <div>
+                  <h2>学习统计</h2>
+                  <p class="meta-line" id="studySummary">完成一轮测试后开始记录</p>
+                </div>
+                <label class="study-goal-field" for="studyGoalInput">
+                  <span>每日目标</span>
+                  <span><input id="studyGoalInput" type="number" min="1" max="500" value="20" inputmode="numeric" /> 词</span>
+                </label>
+              </div>
+              <div class="study-progress" aria-labelledby="studyTodayLabel">
+                <div><strong id="studyTodayLabel">今日进度</strong><span id="studyGoalProgress">0 / 20</span></div>
+                <progress id="studyGoalBar" max="20" value="0">0 / 20</progress>
+              </div>
+              <div class="study-metrics">
+                <div><strong id="studyTotalRounds">0</strong><span>完成轮次</span></div>
+                <div><strong id="studyTotalWords">0</strong><span>累计题数</span></div>
+                <div><strong id="studyWeekAccuracy">--</strong><span>近 7 天正确率</span></div>
+                <div><strong id="studyStreak">0</strong><span>连续学习天数</span></div>
+              </div>
+              <section class="study-section" aria-labelledby="studyWeekTitle">
+                <div class="study-section-heading"><h3 id="studyWeekTitle">最近 7 天</h3><span id="studyWeekTotal">0 题</span></div>
+                <div class="study-week-chart" id="studyWeekChart" role="img" aria-label="最近七天答题数量"></div>
+              </section>
+              <section class="study-section" aria-labelledby="studyRecentTitle">
+                <div class="study-section-heading"><h3 id="studyRecentTitle">最近记录</h3><span id="studyRecordCount">0 条</span></div>
+                <div class="study-history" id="studyHistory"></div>
+              </section>
+              <div class="action-row secondary-row study-actions">
+                <button id="exportStudyBtn" type="button">导出当前统计</button>
+                <button id="clearStudyBtn" type="button">清除当前统计</button>
+              </div>
             </div>
           </section>
         </section>
@@ -284,6 +333,8 @@
         <p class="error" id="adminError" aria-live="polite"></p>
       </section>
     </main>
+
+    <div class="achievement-toast hidden" id="achievementToast" role="status" aria-live="polite"></div>
 
     <div class="modal-layer hidden" id="membershipModal" aria-hidden="true">
       <section class="modal-panel membership-panel" role="dialog" aria-modal="true" aria-labelledby="membershipTitle">
@@ -378,6 +429,7 @@
           <div><strong id="roundCorrectCount">0</strong><span>正确</span></div>
           <div><strong id="roundWrongCount">0</strong><span>错误</span></div>
           <div><strong id="roundSkippedCount">0</strong><span>跳过</span></div>
+          <div><strong id="roundDuration">0秒</strong><span>用时</span></div>
         </div>
         <p class="round-accuracy" id="roundAccuracy">正确率 0%</p>
         <div class="action-row round-summary-actions">
@@ -405,6 +457,6 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260715-ux7"></script>
+    <script src="/app.js?v=20260715-ux8"></script>
   </body>
 </html>
