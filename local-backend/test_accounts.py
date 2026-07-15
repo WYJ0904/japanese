@@ -17,6 +17,7 @@ from account_store import (
     parse_time,
     utc_now,
 )
+from membership import MEMBERSHIP_PLANS, public_plan_payload
 
 
 class AccountStoreTests(unittest.TestCase):
@@ -122,6 +123,46 @@ class AccountStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.quiz_limit(self.store.get_user(user["id"]), "english"))
         self.assertEqual(self.store.quiz_limit(self.store.get_user(user["id"]), "japanese"), 15)
         self.assertEqual(updated["trial_language"], "english")
+
+    def test_single_language_monthly_plan_costs_eight_cny_and_keeps_languages_separate(self):
+        plan = MEMBERSHIP_PLANS["trial_single_language"]
+        self.assertEqual(plan["price_cents"], 800)
+        self.assertTrue(plan["purchasable"])
+        self.assertNotIn("tools_access", plan["entitlements"])
+        self.assertIn("trial_single_language", {item["code"] for item in public_plan_payload()})
+
+        user = self.register()
+        with self.assertRaises(AccountError) as missing_language:
+            self.store.create_recharge_request(user, "trial_single_language")
+        self.assertEqual(missing_language.exception.code, "trial_language_invalid")
+
+        request, created = self.store.create_recharge_request(
+            user, "trial_single_language", "japanese"
+        )
+        self.assertTrue(created)
+        self.assertEqual(request["amount_cents"], 800)
+        self.assertEqual(request["trial_language"], "japanese")
+        self.assertIn("日语", request["payment_note"])
+        self.assertEqual(self.store.process_recharge_request(self.admin, request["id"], "approve"), "approved")
+        current = self.store.get_user(user["id"])
+        self.assertIsNone(self.store.quiz_limit(current, "japanese"))
+        self.assertEqual(self.store.quiz_limit(current, "english"), 15)
+        self.assertNotIn("tools_access", self.store.entitlements_for(current))
+
+    def test_cancelled_membership_can_be_granted_again_without_duplicate_record(self):
+        user = self.register()
+        self.store.admin_manage_membership(
+            self.admin, user["id"], "grant", "trial_single_language", trial_language="english"
+        )
+        self.store.admin_manage_membership(
+            self.admin, user["id"], "cancel", "trial_single_language"
+        )
+        updated = self.store.admin_manage_membership(
+            self.admin, user["id"], "grant", "trial_single_language", trial_language="japanese"
+        )
+        active = [item for item in updated["memberships"] if item["plan_code"] == "trial_single_language"]
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["metadata"]["language"], "japanese")
 
     def test_monthly_and_lifetime_are_unlimited(self):
         user = self.register()
@@ -301,6 +342,28 @@ class AccountStoreTests(unittest.TestCase):
         AccountStore(database, text_path)
         self.assertEqual(backup.read_bytes(), backup_bytes)
 
+    def test_single_language_order_migration_is_backed_up_once(self):
+        root = Path(self.temporary.name) / "entitlements-v1"
+        database = root / "data" / "users.sqlite3"
+        text_path = root / "users.txt"
+        database.parent.mkdir(parents=True)
+        migrations = Path(__file__).with_name("migrations")
+        with closing(sqlite3.connect(database)) as connection:
+            connection.executescript((migrations / "pre-001-schema.sql").read_text(encoding="utf-8"))
+            connection.executescript((migrations / "001_entitlements_up.sql").read_text(encoding="utf-8"))
+        migrated = AccountStore(database, text_path)
+        backup = database.with_name("users.pre-single-language-002.sqlite3")
+        self.assertTrue(backup.exists())
+        with closing(sqlite3.connect(backup)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")}
+            self.assertNotIn("trial_language", columns)
+        with migrated.connect() as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")}
+            self.assertIn("trial_language", columns)
+        backup_bytes = backup.read_bytes()
+        AccountStore(database, text_path)
+        self.assertEqual(backup.read_bytes(), backup_bytes)
+
     def test_legacy_pending_orders_keep_original_price_and_rights(self):
         user = self.register()
         now = iso_now()
@@ -321,6 +384,26 @@ class AccountStoreTests(unittest.TestCase):
         payload = restarted.user_payload(restarted.get_user(user["id"]))
         self.assertIn("language_all_access", payload["entitlements"])
         self.assertNotIn("tools_access", payload["entitlements"])
+
+    def test_legacy_single_language_order_keeps_old_price_and_language(self):
+        user = self.register()
+        now = iso_now()
+        with self.store.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO recharge_requests (
+                    id, user_id, username, plan, trial_language, status, requested_at, updated_at
+                ) VALUES (?, ?, ?, 'trial_single_language', 'english', 'pending', ?, ?)
+                """,
+                ("legacy-trial-order", user["id"], user["username"], now, now),
+            )
+        restarted = AccountStore(self.store.database_path, self.text_path)
+        request = next(
+            item for item in restarted.list_recharge_requests(self.admin)
+            if item["id"] == "legacy-trial-order"
+        )
+        self.assertEqual(request["amount_cents"], 500)
+        self.assertEqual(request["trial_language"], "english")
 
     def test_expired_all_access_monthly_loses_tools_but_keeps_japanese(self):
         user = self.register()

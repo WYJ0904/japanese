@@ -40,7 +40,7 @@ class StaticSiteTests(unittest.TestCase):
         required = {
             "entryScreen", "authPanel", "modulePicker", "projectPicker",
             "projectApp", "toolsPanel", "membershipModal", "adminPanel",
-            "shareViewer",
+            "shareViewer", "toolWorkbenchDescription", "paymentLanguage",
         }
         self.assertEqual(sorted(required - html_ids), [])
 
@@ -67,11 +67,19 @@ class StaticSiteTests(unittest.TestCase):
         for category, expected_count in expected_counts.items():
             match = re.search(rf"\n    {category}: \[(.*?)\n    \],", source, re.S)
             self.assertIsNotNone(match, category)
-            ids = re.findall(r'\["([a-z0-9-]+)",\s*"[^"]+"\]', match.group(1))
+            rows = re.findall(
+                r'\["([a-z0-9-]+)",\s*"([^"]+)",\s*"([^"]+)"(?:,\s*"([^"]*)")?\]',
+                match.group(1),
+            )
+            ids = [row[0] for row in rows]
             self.assertEqual(len(ids), expected_count, category)
+            self.assertTrue(all(row[1].strip() and row[2].strip() for row in rows), category)
             all_ids.extend(ids)
         self.assertEqual(len(all_ids), 103)
         self.assertEqual(len(set(all_ids)), 103)
+        self.assertIn("function fuzzyToolScore", self.tools)
+        self.assertIn("function boundedEditDistance", self.tools)
+        self.assertIn("searchTools", self.tools)
 
     def test_initial_flow_and_security_headers_are_present(self):
         self.assertRegex(self.html, r'id="entryScreen"[^>]*aria-hidden="false"')
@@ -90,6 +98,8 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("membership.py", launcher)
         self.assertIn("temporary_store.py", launcher)
         self.assertIn("run.ps1", launcher)
+        self.assertIn("002_single_language_orders_up.sql", launcher)
+        self.assertIn('$LauncherVersion = "8.1.0"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
@@ -100,6 +110,8 @@ class StaticSiteTests(unittest.TestCase):
         before = (migrations / "pre-001-schema.sql").read_text(encoding="utf-8")
         upgrade = (migrations / "001_entitlements_up.sql").read_text(encoding="utf-8")
         downgrade = (migrations / "001_entitlements_down.sql").read_text(encoding="utf-8")
+        upgrade_two = (migrations / "002_single_language_orders_up.sql").read_text(encoding="utf-8")
+        downgrade_two = (migrations / "002_single_language_orders_down.sql").read_text(encoding="utf-8")
         connection = sqlite3.connect(":memory:")
         try:
             connection.executescript(before)
@@ -109,6 +121,16 @@ class StaticSiteTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = '001_entitlements'"
             ).fetchone()[0]
             self.assertEqual(applied, 1)
+            connection.executescript(upgrade_two)
+            trial_language_column = {
+                row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")
+            }
+            self.assertIn("trial_language", trial_language_column)
+            connection.executescript(downgrade_two)
+            trial_language_column = {
+                row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")
+            }
+            self.assertNotIn("trial_language", trial_language_column)
             connection.executescript(downgrade)
             tables = {
                 row[0]

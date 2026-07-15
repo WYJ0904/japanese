@@ -32,7 +32,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-15-tools2"
+APP_BUILD = "2026-07-15-tools3"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -2325,6 +2325,7 @@ class VocabHandler(BaseHTTPRequestHandler):
                         payload.get("membership_expires"),
                         payload.get("note"),
                         payload.get("preserve_japanese", False),
+                        payload.get("trial_language"),
                     )
                     json_response(self, HTTPStatus.OK, {"ok": True, "user": user})
                     return

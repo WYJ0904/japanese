@@ -330,7 +330,7 @@
           <div class="action-row compact"><button id="toolsAccountBtn" type="button">账户</button><button id="leaveToolsBtn" type="button">返回功能选择</button></div>
         </header>
         <div class="tools-dashboard" id="toolsDashboard">
-          <label class="tool-search" for="toolSearchInput"><span>搜索工具</span><input id="toolSearchInput" type="search" autocomplete="off" placeholder="输入名称或功能，例如 JSON、压缩、随机密码" /></label>
+          <label class="tool-search" for="toolSearchInput"><span>模糊搜索工具</span><input id="toolSearchInput" type="search" autocomplete="off" placeholder="输入名称、用途或近似关键词，例如 JSON、压图、随机密码" /></label>
           <p class="local-processing-note">文本、图片和普通文件默认只在当前浏览器中处理，不会上传服务器。</p>
           <section class="tool-shelf hidden" id="favoriteToolsSection"><div class="tool-section-title"><h2>收藏与固定</h2></div><div class="tool-chip-list" id="favoriteToolsList"></div></section>
           <section class="tool-shelf hidden" id="recentToolsSection"><div class="tool-section-title"><h2>最近使用</h2><button id="clearToolHistoryBtn" type="button">清除记录</button></div><div class="tool-chip-list" id="recentToolsList"></div></section>
@@ -338,7 +338,7 @@
           <section class="tool-catalog-section"><div class="tool-section-title"><h2 id="toolCatalogTitle">全部工具</h2><span id="toolResultCount">0 项</span></div><div class="tool-catalog" id="toolCatalog"></div></section>
         </div>
         <section class="tool-workbench hidden" id="toolWorkbench" aria-hidden="true">
-          <header><button id="closeToolWorkbenchBtn" type="button">返回工具列表</button><div><p id="toolWorkbenchCategory"></p><h2 id="toolWorkbenchTitle">工具</h2></div><div class="tool-workbench-actions"><button id="favoriteToolBtn" type="button">收藏</button><button id="pinToolBtn" type="button">固定</button></div></header>
+          <header><button id="closeToolWorkbenchBtn" type="button">返回工具列表</button><div><p id="toolWorkbenchCategory"></p><h2 id="toolWorkbenchTitle">工具</h2><p id="toolWorkbenchDescription"></p></div><div class="tool-workbench-actions"><button id="favoriteToolBtn" type="button">收藏</button><button id="pinToolBtn" type="button">固定</button></div></header>
           <div id="toolWorkbenchBody"></div>
           <p class="error" id="toolWorkbenchMessage" aria-live="polite"></p>
         </section>
@@ -397,12 +397,12 @@
         <p class="section-kicker">MEMBERSHIP</p>
         <h2 id="membershipTitle">会员充值</h2>
         <div class="plan-grid" id="membershipPlanList"></div>
-        <label class="field-label hidden" id="trialLanguageField"><span>体验语言</span><select id="trialLanguageSelect"><option value="english">英语</option><option value="japanese">日语</option></select></label>
+        <label class="field-label hidden" id="trialLanguageField"><span>选择单语言</span><select id="trialLanguageSelect"><option value="english">英语</option><option value="japanese">日语</option></select></label>
         <div class="purchase-summary" id="purchaseSummary">请选择套餐</div>
-        <p class="membership-warning">70 CNY 日语永久会员不包含在线工具箱。需要在线工具箱，请购买 30 CNY 全功能月度会员或 100 CNY 全功能永久会员。</p>
+        <p class="membership-warning">8 CNY 单语言包月体验只包含所选英语或日语；70 CNY 日语永久会员只包含日语。两者均不包含在线工具箱。需要工具箱，请购买 30 CNY 全功能月度会员或 100 CNY 全功能永久会员。</p>
         <div class="wechat-row"><span>微信号：<strong id="wechatId">W2009Y94J</strong></span><button id="copyWechatBtn" type="button">复制微信号</button></div>
         <div class="payment-order hidden" id="paymentOrderBox">
-          <dl><dt>用户名</dt><dd id="paymentUsername">-</dd><dt>会员方案</dt><dd id="paymentPlan">-</dd><dt>应付金额</dt><dd id="paymentAmount">-</dd><dt>订单编号</dt><dd><code id="paymentOrderNumber">-</code> <button id="copyOrderBtn" type="button">复制</button></dd><dt>付款备注</dt><dd><span id="paymentNote">-</span> <button id="copyPaymentNoteBtn" type="button">复制</button></dd><dt>订单状态</dt><dd id="paymentStatus">-</dd></dl>
+          <dl><dt>用户名</dt><dd id="paymentUsername">-</dd><dt>会员方案</dt><dd id="paymentPlan">-</dd><dt class="hidden" id="paymentLanguageTerm">所选语言</dt><dd class="hidden" id="paymentLanguage">-</dd><dt>应付金额</dt><dd id="paymentAmount">-</dd><dt>订单编号</dt><dd><code id="paymentOrderNumber">-</code> <button id="copyOrderBtn" type="button">复制</button></dd><dt>付款备注</dt><dd><span id="paymentNote">-</span> <button id="copyPaymentNoteBtn" type="button">复制</button></dd><dt>订单状态</dt><dd id="paymentStatus">-</dd></dl>
         </div>
         <p>选择方案后生成订单，付款时使用页面中的备注；点击“我已付款”只会通知管理员，不会自动开通。</p>
         <p class="danger-note">注销账户后，账户数据、当前会员资格、剩余会员时间以及永久会员资格都将被清除，且无法恢复。</p>
@@ -454,7 +454,7 @@
           <div class="admin-current-memberships" id="adminCurrentMemberships"></div>
           <div class="admin-membership-grid">
             <label class="field-label"><span>操作</span><select id="adminMembershipAction"><option value="grant">开通或覆盖</option><option value="extend">续期一个月</option><option value="cancel">取消所选会员</option><option value="cancel_all">降级为普通用户</option></select></label>
-            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="japanese_lifetime">日语单项永久会员</option><option value="all_access_monthly">全功能月度会员</option><option value="all_access_lifetime">全功能永久会员</option></select></label>
+            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="trial_single_language">单语言包月体验会员</option><option value="japanese_lifetime">日语单项永久会员</option><option value="all_access_monthly">全功能月度会员</option><option value="all_access_lifetime">全功能永久会员</option></select></label>
             <label class="field-label hidden" id="adminTrialLanguageField"><span>体验语言</span><select id="adminTrialLanguageSelect"><option value="">请选择</option><option value="english">英语</option><option value="japanese">日语</option></select></label>
           </div>
           <div class="admin-date-grid">

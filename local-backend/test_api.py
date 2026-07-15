@@ -194,6 +194,31 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(status, 403, data)
         self.assertEqual(data["code"], "membership_required")
 
+    def test_single_language_plan_is_public_and_recharge_requires_a_language(self):
+        status, data = self.request("GET", "/api/membership/plans")
+        self.assertEqual(status, 200, data)
+        plan = next(item for item in data["plans"] if item["code"] == "trial_single_language")
+        self.assertEqual(plan["price_cents"], 800)
+        self.assertEqual(plan["price"], "8")
+        self.assertTrue(plan["purchasable"])
+        self.assertNotIn("tools_access", plan["entitlements"])
+
+        _, _, session = self.new_user()
+        status, invalid = self.request(
+            "POST", "/api/recharge/request", {"plan": "trial_single_language"}, session
+        )
+        self.assertEqual(status, 400, invalid)
+        self.assertEqual(invalid["code"], "trial_language_invalid")
+        status, created = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "trial_single_language", "trial_language": "english"},
+            session,
+        )
+        self.assertEqual(status, 201, created)
+        self.assertEqual(created["request"]["amount_cents"], 800)
+        self.assertEqual(created["request"]["trial_language"], "english")
+
     def test_ai_vocabulary_suggestion_levels_and_membership_limit(self):
         _, _, session = self.new_user()
         with mock.patch("server.search_vocabulary_sources") as search:
@@ -533,10 +558,14 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(status, 200, plans)
         by_code = {item["code"]: item for item in plans["plans"]}
         self.assertEqual(by_code["japanese_lifetime"]["price_cents"], 7000)
+        self.assertEqual(by_code["trial_single_language"]["price_cents"], 800)
         self.assertEqual(by_code["all_access_monthly"]["price_cents"], 3000)
         self.assertEqual(by_code["all_access_lifetime"]["price_cents"], 10000)
         self.assertNotIn("tools_access", by_code["japanese_lifetime"]["entitlements"])
-        self.assertEqual(set(by_code), {"japanese_lifetime", "all_access_monthly", "all_access_lifetime"})
+        self.assertEqual(
+            set(by_code),
+            {"trial_single_language", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"},
+        )
 
         _, _, session = self.new_user()
         status, order = self.request(

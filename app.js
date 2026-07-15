@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-15-tools2";
+const APP_VERSION = "2026-07-15-tools3";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -570,7 +570,7 @@ function clearSession() {
 function membershipLabel(value) {
   return {
     free: "普通用户",
-    trial_single_language: "单语言体验版",
+    trial_single_language: "单语言包月体验会员",
     monthly: "历史双语言包月会员",
     lifetime: "历史双语言永久会员",
     legacy_all_monthly: "历史双语言包月会员",
@@ -823,8 +823,12 @@ async function loadMembershipPlans() {
   const response = await fetchWithTimeout("/api/membership/plans", { cache: "no-store" }, STATUS_TIMEOUT_MS);
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !Array.isArray(data.plans)) throw new Error(data.error || "会员方案加载失败");
-  const order = ["all_access_monthly", "all_access_lifetime", "japanese_lifetime"];
-  membershipPlans = [...data.plans].sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
+  const order = ["trial_single_language", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"];
+  const rank = (code) => {
+    const index = order.indexOf(code);
+    return index < 0 ? order.length : index;
+  };
+  membershipPlans = [...data.plans].sort((left, right) => rank(left.code) - rank(right.code));
   const list = $("membershipPlanList");
   if (list) {
     list.innerHTML = membershipPlans.map((item) => `<button class="plan-option" data-plan="${escapeHtml(item.code)}" type="button">
@@ -841,7 +845,9 @@ function selectRechargePlan(plan) {
   document.querySelectorAll("[data-plan]").forEach((button) => {
     button.classList.toggle("selected", button.dataset.plan === plan);
   });
-  $("trialLanguageField")?.classList.add("hidden");
+  const isSingleLanguage = plan === "trial_single_language";
+  $("trialLanguageField")?.classList.toggle("hidden", !isSingleLanguage);
+  $("trialLanguageSelect").required = isSingleLanguage;
   const [name, price, description] = planDetails(plan);
   $("purchaseSummary").textContent = `${name} · ${price} · ${description}`;
   $("submitRechargeBtn").disabled = !plan;
@@ -896,6 +902,11 @@ function renderPaymentOrder(record) {
   const plan = membershipPlans.find((item) => item.code === record.plan_code);
   $("paymentUsername").textContent = record.username || state.account?.username || "-";
   $("paymentPlan").textContent = plan?.name || membershipLabel(record.plan_code);
+  const languageLabel = { english: "英语", japanese: "日语" }[record.trial_language] || "";
+  $("paymentLanguageTerm").classList.toggle("hidden", !languageLabel);
+  $("paymentLanguage").classList.toggle("hidden", !languageLabel);
+  $("paymentLanguage").textContent = languageLabel || "-";
+  if (languageLabel) $("trialLanguageSelect").value = record.trial_language;
   $("paymentAmount").textContent = `${(Number(record.amount_cents || 0) / 100).toFixed(2)} ${record.currency || "CNY"}`;
   $("paymentOrderNumber").textContent = record.order_number || "-";
   $("paymentNote").textContent = record.payment_note || "-";
@@ -920,6 +931,7 @@ async function submitRechargeRequest() {
   try {
     const data = await api("/api/recharge/request", {
       plan: selectedRechargePlan,
+      trial_language: selectedRechargePlan === "trial_single_language" ? $("trialLanguageSelect").value : "",
     });
     renderPaymentOrder(data.request);
     $("rechargeMessage").textContent = data.created
@@ -1196,8 +1208,10 @@ function updateAdminMembershipFields(fillDefaults = true) {
   const membership = $("adminMembershipSelect").value;
   const cancelling = action === "cancel" || action === "cancel_all";
   const lifetime = ["japanese_lifetime", "all_access_lifetime"].includes(membership);
+  const singleLanguage = membership === "trial_single_language";
   const fieldsDisabled = cancelling;
-  $("adminTrialLanguageField")?.classList.add("hidden");
+  $("adminTrialLanguageField")?.classList.toggle("hidden", cancelling || !singleLanguage);
+  $("adminTrialLanguageSelect").required = !cancelling && singleLanguage;
   $("adminMembershipSelect").disabled = action === "cancel_all";
   $("adminMembershipStart").disabled = fieldsDisabled;
   $("adminMembershipExpires").disabled = fieldsDisabled || lifetime;
@@ -1222,7 +1236,10 @@ function updateAdminMembershipFields(fillDefaults = true) {
 function renderAdminCurrentMemberships(user) {
   const target = $("adminCurrentMemberships");
   const memberships = Array.isArray(user?.memberships) ? user.memberships : [];
-  target.innerHTML = memberships.map((item) => `<article><strong>${escapeHtml(item.plan_name || membershipLabel(item.plan_code))}</strong><span>${item.is_lifetime ? "永久有效" : `到期 ${escapeHtml(formatLocalDateTime(item.expires_at, "未知"))}`}</span><small>${escapeHtml(item.source || "系统")}</small></article>`).join("") || "<p>当前没有有效会员</p>";
+  target.innerHTML = memberships.map((item) => {
+    const language = { english: "英语", japanese: "日语" }[item.metadata?.language] || "";
+    return `<article><strong>${escapeHtml(item.plan_name || membershipLabel(item.plan_code))}</strong><span>${item.is_lifetime ? "永久有效" : `到期 ${escapeHtml(formatLocalDateTime(item.expires_at, "未知"))}`}</span><small>${escapeHtml([language, item.source || "系统"].filter(Boolean).join(" · "))}</small></article>`;
+  }).join("") || "<p>当前没有有效会员</p>";
 }
 
 function openAdminEditor(userId) {
@@ -1230,11 +1247,14 @@ function openAdminEditor(userId) {
   if (!user || user.is_super_admin) return;
   $("adminEditUserId").value = user.id;
   $("adminEditTitle").textContent = `编辑 ${user.username}`;
-  const preferred = (user.memberships || []).find((item) => ["all_access_lifetime", "all_access_monthly", "japanese_lifetime"].includes(item.plan_code));
+  const preferred = (user.memberships || [])
+    .filter((item) => ["all_access_lifetime", "all_access_monthly", "japanese_lifetime", "trial_single_language"].includes(item.plan_code))
+    .sort((left, right) => Number(right.priority || 0) - Number(left.priority || 0))[0];
   $("adminMembershipAction").value = "grant";
   $("adminMembershipSelect").value = preferred?.plan_code || "japanese_lifetime";
   $("adminMembershipStart").value = membershipDateValue(preferred?.starts_at);
   $("adminMembershipExpires").value = membershipDateValue(preferred?.expires_at);
+  $("adminTrialLanguageSelect").value = preferred?.metadata?.language || "";
   $("adminMembershipNote").value = "";
   $("adminPreserveJapanese").checked = false;
   $("adminNewSecretInput").value = "";
@@ -1264,6 +1284,7 @@ async function saveAdminMembership() {
         membership_expires: $("adminMembershipExpires").value.trim(),
         note: $("adminMembershipNote").value.trim(),
         preserve_japanese: $("adminPreserveJapanese").checked,
+        trial_language: planCode === "trial_single_language" ? $("adminTrialLanguageSelect").value : "",
       });
       $("adminEditMessage").textContent = "会员设置已保存并立即生效";
       await loadAdminData();

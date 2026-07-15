@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "8.0.0"
+$LauncherVersion = "8.1.0"
 
 $FrontendRoot = "C:\Users\78252\Documents\Codex\2026-07-05\cloudflare-pages-1-zip-2-html"
 $BackendSourceRoot = Join-Path $FrontendRoot "local-backend"
@@ -368,7 +368,8 @@ try {
         (Join-Path $BackendRoot "account_store.py"),
         (Join-Path $BackendRoot "membership.py"),
         (Join-Path $BackendRoot "temporary_store.py"),
-        (Join-Path $BackendRoot "migrations\001_entitlements_up.sql")
+        (Join-Path $BackendRoot "migrations\001_entitlements_up.sql"),
+        (Join-Path $BackendRoot "migrations\002_single_language_orders_up.sql")
     )) {
         if (-not (Test-Path -LiteralPath $backendPath)) {
             throw "后端同步后仍缺少文件: $backendPath"

@@ -46,6 +46,7 @@
 
 | 方案代码 | 价格 | 权益 |
 | --- | ---: | --- |
+| `trial_single_language` | 8 CNY/月 | 英语或日语任选一种，所选语言会员功能一个月，不包含工具箱 |
 | `japanese_lifetime` | 70 CNY | 仅日语会员功能，永久有效，不包含工具箱 |
 | `all_access_monthly` | 30 CNY/月 | 全部语言会员功能、工具箱、批量处理、临时分享、配置保存 |
 | `all_access_lifetime` | 100 CNY | 全功能永久有效 |
@@ -60,22 +61,22 @@
 - `save_tool_config`
 - `all_features_access`
 
-权限按有效会员记录合并，不使用单一 `isVip`。优先级为全功能永久、全功能月度、日语单项、普通用户。月度会员到期后立即失去全功能权益，但同时存在的日语永久权益仍会保留。超级管理员拥有全部权益。
+权限按有效会员记录合并，不使用单一 `isVip`。优先级为全功能永久、全功能月度、日语单项、单语言包月体验、普通用户。月度会员到期后立即失去对应权益，但同时存在的日语永久权益仍会保留。超级管理员拥有全部权益。
 
 ### 老会员兼容
 
 原有数据不会被覆盖：
 
-- 旧 `trial_single_language` 迁移为隐藏兼容方案，保持原单语言体验权限
+- 旧 `trial_single_language` 保持原语言和剩余时间；新订单按 8 CNY/月销售，旧待处理订单仍保留原 5 CNY 金额
 - 旧 `monthly` 迁移为 `legacy_all_monthly`，保持原双语言包月权限，不新增工具权限
 - 旧 `lifetime` 迁移为 `legacy_all_lifetime`，保持原双语言永久权限，不新增工具权限
 - 旧待处理充值按原价格和原权益迁移，不会被静默改成新方案
 
-隐藏兼容方案不可由新用户购买。旧缓存页面提交 `monthly` 或 `lifetime` 会被服务端拒绝，避免价格或权益误开。
+旧双语言兼容方案不可由新用户购买。旧缓存页面提交 `monthly` 或 `lifetime` 会被服务端拒绝，避免价格或权益误开。
 
 ## 充值与管理员
 
-充值窗口显示用户名、方案、金额、微信号 `W2009Y94J`、订单编号和付款备注。用户点击“我已付款”只会把订单改为待管理员核对，不会自动开通会员。
+充值窗口显示用户名、方案、单语言订单所选语言、金额、微信号 `W2009Y94J`、订单编号和付款备注。用户点击“我已付款”只会把订单改为待管理员核对，不会自动开通会员。
 
 管理员后台支持：
 
@@ -91,7 +92,7 @@
 
 ## 在线工具箱
 
-工具箱共 103 项，目录和实现位于 `tools.js`。原始文本、图片和普通文件默认只在浏览器本地处理，不上传服务器；服务端默认只保存工具 ID、使用时间、收藏和用户主动保存的配置。
+工具箱共 103 项，目录和实现位于 `tools.js`。每项工具都有简短用途说明；搜索会同时匹配名称、说明、分类、别名和工具 ID，并支持部分关键词、顺序字符和少量拼写偏差。原始文本、图片和普通文件默认只在浏览器本地处理，不上传服务器；服务端默认只保存工具 ID、使用时间、收藏和用户主动保存的配置。
 
 ### 文本处理（29）
 
@@ -142,14 +143,17 @@ C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-ope
 - `local-backend/migrations/pre-001-schema.sql`：迁移前结构快照
 - `local-backend/migrations/001_entitlements_up.sql`：新权益、充值、审计、工具与临时数据表
 - `local-backend/migrations/001_entitlements_down.sql`：回滚新表
+- `local-backend/migrations/002_single_language_orders_up.sql`：为支付订单保存英语/日语选择
+- `local-backend/migrations/002_single_language_orders_down.sql`：无损重建支付表并回滚语言列
 
 第一次对老数据库执行迁移前会使用 SQLite backup API 创建一次性备份：
 
 ```text
 data\users.pre-entitlements-001.sqlite3
+data\users.pre-single-language-002.sqlite3
 ```
 
-迁移可重复执行，`schema_migrations` 和来源唯一索引防止重复会员记录。该迁移前备份可能仍含旧版明文密码，必须只保存在本机受保护目录，不能上传或提交。
+迁移由 `schema_migrations` 控制并可安全重启，来源唯一索引防止重复会员记录。每个结构阶段只创建一次迁移前备份；备份可能仍含旧版明文密码，必须只保存在本机受保护目录，不能上传或提交。
 
 新增表包括 `membership_plans`、`user_memberships`、`membership_entitlements`、`user_entitlement_overrides`、`payment_requests`、`admin_audit_logs`、`tool_favorites`、`tool_recent_usage`、`saved_tool_configs` 及五类临时数据表。原 `users`、`sessions` 和 `recharge_requests` 表保留。
 
@@ -248,7 +252,7 @@ node --check sw.js
 node --check "functions/api/[[path]].js"
 ```
 
-测试覆盖注册登录、会话、封禁、老会员迁移、新权益合并、过期降级、充值审批、审计日志、工具权限、收藏/历史/配置、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语读音、PDF 相关旧 API、并发状态请求、HTML ID、PWA 缓存和 103 项工具目录。
+当前自动化套件共 62 项，覆盖注册登录、会话、封禁、老会员迁移、8 CNY 单语言订单、新权益合并、过期降级、充值审批、审计日志、工具权限、收藏/历史/配置、模糊搜索目录、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语读音、PDF 相关旧 API、并发状态请求、HTML ID、PWA 缓存和 103 项工具简介。
 
 ## Cloudflare Pages 配置
 

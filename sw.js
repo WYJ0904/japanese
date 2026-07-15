@@ -1,4 +1,4 @@
-const CACHE = "wyj-shell-20260715-tools2";
+const CACHE = "wyj-shell-20260715-tools3";
 const CORE_SHELL = [
   "/",
   "/index.html",

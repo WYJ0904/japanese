@@ -148,6 +148,7 @@ class AccountStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.text_path.parent.mkdir(parents=True, exist_ok=True)
         self._backup_before_membership_migration()
+        self._backup_before_single_language_migration()
         self.initialize()
 
     def _backup_before_membership_migration(self):
@@ -175,6 +176,39 @@ class AccountStore:
                     ).fetchone()
                     if applied:
                         return
+                with closing(sqlite3.connect(str(backup_path), timeout=15)) as destination:
+                    source.backup(destination)
+        except sqlite3.Error:
+            try:
+                backup_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _backup_before_single_language_migration(self):
+        if not self.database_path.exists() or self.database_path.stat().st_size == 0:
+            return
+        backup_path = self.database_path.with_name(
+            f"{self.database_path.stem}.pre-single-language-002.sqlite3"
+        )
+        if backup_path.exists():
+            return
+        try:
+            with closing(sqlite3.connect(str(self.database_path), timeout=15)) as source:
+                tables = {
+                    row[0]
+                    for row in source.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                if "payment_requests" not in tables or "schema_migrations" not in tables:
+                    return
+                applied = source.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?",
+                    ("002_single_language_orders",),
+                ).fetchone()
+                if applied:
+                    return
                 with closing(sqlite3.connect(str(backup_path), timeout=15)) as destination:
                     source.backup(destination)
         except sqlite3.Error:
@@ -278,12 +312,47 @@ class AccountStore:
                 )
             migration_path = Path(__file__).with_name("migrations") / "001_entitlements_up.sql"
             connection.executescript(migration_path.read_text(encoding="utf-8"))
+            self._apply_migration(
+                connection,
+                "002_single_language_orders",
+                "002_single_language_orders_up.sql",
+            )
             self._seed_membership_plans(connection, now)
             self._migrate_legacy_memberships(connection, now)
             self._migrate_legacy_recharge_requests(connection, now)
             self._hash_plaintext_secrets(connection)
             self._validate_membership_migration(connection)
         self.sync_text()
+
+    @staticmethod
+    def _apply_migration(connection, version, filename):
+        applied = connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+        ).fetchone()
+        if applied:
+            return
+        if version == "002_single_language_orders":
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(payment_requests)").fetchall()
+            }
+            if "trial_language" in columns:
+                connection.execute(
+                    """
+                    UPDATE payment_requests
+                    SET trial_language = COALESCE(
+                        (SELECT legacy.trial_language FROM recharge_requests AS legacy
+                         WHERE legacy.id = payment_requests.id), trial_language, ''
+                    )
+                    WHERE plan_code = 'trial_single_language' AND trial_language = ''
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (version, iso_now()),
+                )
+                return
+        migration_path = Path(__file__).with_name("migrations") / filename
+        connection.executescript(migration_path.read_text(encoding="utf-8"))
 
     @staticmethod
     def _seed_membership_plans(connection, now):
@@ -372,6 +441,11 @@ class AccountStore:
             "monthly": "legacy_all_monthly",
             "lifetime": "legacy_all_lifetime",
         }
+        legacy_prices = {
+            "trial_single_language": 500,
+            "monthly": 1000,
+            "lifetime": 7000,
+        }
         for row in connection.execute("SELECT * FROM recharge_requests").fetchall():
             plan_code = mappings.get(row["plan"])
             if not plan_code:
@@ -383,14 +457,17 @@ class AccountStore:
                 "rejected": "rejected",
             }.get(row["status"], "rejected")
             order_number = f"LEGACY-{row['id'][:12].upper()}"
-            payment_note = f"{row['username']} {order_number} {plan['name']}"
+            trial_language = row["trial_language"] if plan_code == "trial_single_language" else ""
+            language_label = {"english": "英语", "japanese": "日语"}.get(trial_language, "")
+            plan_label = f"{plan['name']}（{language_label}）" if language_label else plan["name"]
+            payment_note = f"{row['username']} {order_number} {plan_label}"
             connection.execute(
                 """
                 INSERT OR IGNORE INTO payment_requests (
                     id, order_number, user_id, username, plan_code, amount_cents, currency,
                     contact, payment_note, status, requested_at, user_confirmed_at,
-                    handled_at, handled_by, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    handled_at, handled_by, updated_at, trial_language
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["id"],
@@ -398,7 +475,7 @@ class AccountStore:
                     row["user_id"],
                     row["username"],
                     plan_code,
-                    plan["price_cents"],
+                    legacy_prices[row["plan"]],
                     plan["currency"],
                     WECHAT_CONTACT,
                     payment_note,
@@ -408,6 +485,7 @@ class AccountStore:
                     row["handled_at"],
                     row["handled_by"],
                     row["updated_at"] or now,
+                    trial_language,
                 ),
             )
 
@@ -967,6 +1045,7 @@ class AccountStore:
         expires="",
         note="",
         preserve_japanese=False,
+        trial_language="",
     ):
         if not self.is_super_admin(actor):
             raise AccountError("无管理员权限", 403, "forbidden")
@@ -977,6 +1056,7 @@ class AccountStore:
             raise AccountError("不能修改固定管理员的等级", 403, "admin_protected")
         action = str(action or "").strip().lower()
         plan_code = str(plan_code or "").strip()
+        language_value = str(trial_language or "").strip().lower()
         if action in {"grant", "extend", "cancel"} and plan_code not in MEMBERSHIP_PLANS:
             raise AccountError("会员方案无效", 400, "plan_invalid")
         before = self._public_snapshot(self.user_payload(target))
@@ -992,13 +1072,26 @@ class AccountStore:
                 existing = connection.execute(
                     """
                     SELECT * FROM user_memberships
-                    WHERE user_id = ? AND plan_code = ? AND status = 'active'
+                    WHERE user_id = ? AND plan_code = ?
                     ORDER BY expires_at DESC, created_at DESC LIMIT 1
                     """,
                     (user_id, plan_code),
                 ).fetchone()
+                if plan_code == "trial_single_language":
+                    if not language_value and existing:
+                        try:
+                            language_value = json.loads(existing["metadata_json"] or "{}").get("language", "")
+                        except (json.JSONDecodeError, TypeError):
+                            language_value = ""
+                    if language_value not in LANGUAGES:
+                        raise AccountError("单语言包月体验必须选择英语或日语", 400, "trial_language_invalid")
+                    metadata_json = json.dumps(
+                        {"language": language_value}, ensure_ascii=False, separators=(",", ":")
+                    )
+                else:
+                    metadata_json = "{}"
                 if action == "extend" and not plan["lifetime"]:
-                    current_expiry = parse_time(existing["expires_at"]) if existing else None
+                    current_expiry = parse_time(existing["expires_at"]) if existing and existing["status"] == "active" else None
                     base = current_expiry if current_expiry and current_expiry > utc_now() else utc_now()
                     expires_value = membership_time_value(raw_expires, end_of_day=True) if raw_expires else default_plan_expiry(plan_code, base)
                     start_value = existing["starts_at"] if existing else start_value
@@ -1012,10 +1105,18 @@ class AccountStore:
                     connection.execute(
                         """
                         UPDATE user_memberships SET starts_at = ?, expires_at = ?, is_lifetime = ?,
-                            status = 'active', source = 'admin', created_by = ?, updated_at = ?
+                            status = 'active', source = 'admin', created_by = ?, metadata_json = ?, updated_at = ?
                         WHERE id = ?
                         """,
-                        (start_value, expires_value, int(plan["lifetime"]), actor["username"], now, existing["id"]),
+                        (
+                            start_value,
+                            expires_value,
+                            int(plan["lifetime"]),
+                            actor["username"],
+                            metadata_json,
+                            now,
+                            existing["id"],
+                        ),
                     )
                 else:
                     connection.execute(
@@ -1023,7 +1124,7 @@ class AccountStore:
                         INSERT INTO user_memberships (
                             id, user_id, plan_code, starts_at, expires_at, is_lifetime,
                             status, source, source_ref, created_by, metadata_json, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, 'active', 'admin', ?, ?, '{}', ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, 'active', 'admin', ?, ?, ?, ?, ?)
                         """,
                         (
                             str(uuid.uuid4()),
@@ -1034,6 +1135,7 @@ class AccountStore:
                             int(plan["lifetime"]),
                             f"admin:{plan_code}",
                             actor["username"],
+                            metadata_json,
                             now,
                             now,
                         ),
@@ -1349,10 +1451,18 @@ class AccountStore:
         if plan_code not in PURCHASABLE_PLAN_CODES:
             raise AccountError("充值套餐无效", 400, "plan_invalid")
         plan_data = MEMBERSHIP_PLANS[plan_code]
+        language_value = str(trial_language or "").strip().lower()
+        if plan_code == "trial_single_language":
+            if language_value not in LANGUAGES:
+                raise AccountError("单语言包月体验必须选择英语或日语", 400, "trial_language_invalid")
+        else:
+            language_value = ""
         now = iso_now()
         request_id = str(uuid.uuid4())
         order_number = f"WYJ-{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
-        payment_note = f"{user['username']} {order_number} {plan_data['name']}"
+        language_label = {"english": "英语", "japanese": "日语"}.get(language_value, "")
+        plan_label = f"{plan_data['name']}（{language_label}）" if language_label else plan_data["name"]
+        payment_note = f"{user['username']} {order_number} {plan_label}"
         with self.lock, self.connect() as connection:
             existing = connection.execute(
                 """
@@ -1367,8 +1477,8 @@ class AccountStore:
                 """
                 INSERT INTO payment_requests (
                     id, order_number, user_id, username, plan_code, amount_cents, currency,
-                    contact, payment_note, status, requested_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?)
+                    contact, payment_note, status, requested_at, updated_at, trial_language
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -1382,6 +1492,7 @@ class AccountStore:
                     payment_note,
                     now,
                     now,
+                    language_value,
                 ),
             )
             record = connection.execute("SELECT * FROM payment_requests WHERE id = ?", (request_id,)).fetchone()
@@ -1449,6 +1560,7 @@ class AccountStore:
                     "grant",
                     request["plan_code"],
                     note=f"确认订单 {request['order_number']}",
+                    trial_language=request["trial_language"],
                 )
             status = "approved" if action == "approve" else "rejected"
             now = iso_now()
