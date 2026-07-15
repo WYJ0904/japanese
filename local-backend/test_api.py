@@ -223,6 +223,7 @@ class AccountApiTests(unittest.TestCase):
             "online": True,
             "candidates": ["学校", "食べる"],
             "readings": {"学校": "がっこう", "食べる": "たべる"},
+            "written_forms": {"学校": "学校", "食べる": "食べる"},
             "snippets": [],
             "sources": [{"title": "Jisho JLPT N5", "url": "https://jisho.org/search/%23jlpt-n5"}],
         }
@@ -237,23 +238,30 @@ class AccountApiTests(unittest.TestCase):
             )
         self.assertEqual(status, 200, data)
         self.assertEqual(data["readings"], {"学校": "がっこう", "食べる": "たべる"})
+        self.assertEqual(data["written_forms"], {"学校": "学校", "食べる": "食べる"})
 
         status, started = self.request(
             "POST",
             "/api/quiz/start",
-            {"language": "japanese", "words": ["学校", "先生"]},
+            {"language": "japanese", "words": ["学校", "がっこう", "コーヒー"]},
             self.admin_session,
         )
         self.assertEqual(status, 200, started)
-        with mock.patch("server.resolve_japanese_readings", return_value={"学校": "がっこう", "先生": "せんせい"}):
+        resolved = (
+            {"学校": "がっこう", "がっこう": "がっこう", "コーヒー": "コーヒー"},
+            {"学校": "学校", "がっこう": "学校", "コーヒー": "コーヒー"},
+        )
+        with mock.patch("server.resolve_japanese_forms", return_value=resolved):
             status, readings = self.request(
                 "POST",
                 "/api/japanese/readings",
-                {"words": ["学校", "先生"], "quiz_session": started["quiz_session"]},
+                {"words": ["学校", "がっこう", "コーヒー"], "quiz_session": started["quiz_session"]},
                 self.admin_session,
             )
         self.assertEqual(status, 200, readings)
-        self.assertEqual(readings["readings"]["先生"], "せんせい")
+        self.assertEqual(readings["readings"]["がっこう"], "がっこう")
+        self.assertEqual(readings["written_forms"]["がっこう"], "学校")
+        self.assertEqual(readings["written_forms"]["コーヒー"], "コーヒー")
 
         status, denied = self.request(
             "POST",
@@ -263,6 +271,44 @@ class AccountApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 403, denied)
         self.assertEqual(denied["code"], "word_not_authorized")
+
+    def test_jisho_keeps_common_katakana_without_forcing_rare_kanji(self):
+        payload = {
+            "data": [
+                {
+                    "jlpt": ["jlpt-n5"],
+                    "japanese": [{"word": "珈琲", "reading": "コーヒー"}],
+                },
+                {
+                    "jlpt": ["jlpt-n5"],
+                    "japanese": [{"word": "学校", "reading": "がっこう"}],
+                },
+            ]
+        }
+        with mock.patch("server.web_get", return_value=json.dumps(payload).encode("utf-8")):
+            candidates, readings, written_forms = server.jisho_level_candidates("n5", 2)
+        self.assertEqual(set(candidates), {"コーヒー", "学校"})
+        self.assertEqual(readings["コーヒー"], "コーヒー")
+        self.assertEqual(written_forms["コーヒー"], "コーヒー")
+
+    def test_ai_resolves_kanji_and_kana_inputs_without_manual_pairs(self):
+        response = {
+            "readings": {
+                "学校": "がっこう",
+                "がっこう": "がっこう",
+                "テレビ": "テレビ",
+            },
+            "written_forms": {
+                "学校": "学校",
+                "がっこう": "学校",
+                "テレビ": "テレビ",
+            },
+        }
+        with mock.patch("server.call_ollama", return_value=json.dumps(response, ensure_ascii=False)):
+            readings, written_forms = server.ai_japanese_form_batch(["学校", "がっこう", "テレビ"])
+        self.assertEqual(readings["学校"], "がっこう")
+        self.assertEqual(written_forms["がっこう"], "学校")
+        self.assertEqual(written_forms["テレビ"], "テレビ")
 
     def test_vocabulary_source_cache_refetches_for_larger_japanese_request(self):
         first = ["一", "二", "三", "四", "五"]

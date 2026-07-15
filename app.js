@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-14-ux5";
+const APP_VERSION = "2026-07-14-ux6";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -11,6 +11,7 @@ const MAX_ACCEPTED_ANSWERS = 14;
 const MAX_RUBRIC_CACHE_ITEMS = 500;
 const MAX_JAPANESE_READING_CACHE_ITEMS = 2000;
 const JAPANESE_READING_CACHE_KEY = "japaneseReadingCache:v1";
+const JAPANESE_WRITTEN_FORM_CACHE_KEY = "japaneseWrittenFormCache:v1";
 const WRONG_BOOK_EXPORT_TYPE = "vocab-wrong-book";
 const WRONG_BOOK_EXPORT_VERSION = 1;
 const DEFAULT_PROFILE = "我";
@@ -192,6 +193,22 @@ function sanitizeJapaneseReadings(value) {
   return Object.fromEntries(Object.entries(cleaned).slice(-MAX_JAPANESE_READING_CACHE_ITEMS));
 }
 
+function sanitizeJapaneseWrittenForms(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const cleaned = {};
+  Object.entries(value).forEach(([word, written]) => {
+    const cleanWord = limitText(word, 64);
+    const cleanWritten = limitText(written, 64);
+    if (
+      cleanWord
+      && cleanWritten
+      && /^[\u3040-\u30ff\u31f0-\u31ff\u3400-\u9fff々〆ヶー・]+$/u.test(cleanWord)
+      && /^[\u3040-\u30ff\u31f0-\u31ff\u3400-\u9fff々〆ヶー・]+$/u.test(cleanWritten)
+    ) cleaned[cleanWord] = cleanWritten;
+  });
+  return Object.fromEntries(Object.entries(cleaned).slice(-MAX_JAPANESE_READING_CACHE_ITEMS));
+}
+
 function sanitizeProfile(value) {
   const cleaned = String(value || "").trim().slice(0, 30);
   return cleaned || DEFAULT_PROFILE;
@@ -258,6 +275,7 @@ const state = {
   wrongScope: "current",
   rubricCache: loadJson("rubricCache", {}),
   japaneseReadings: sanitizeJapaneseReadings(loadJson(JAPANESE_READING_CACHE_KEY, {})),
+  japaneseWrittenForms: sanitizeJapaneseWrittenForms(loadJson(JAPANESE_WRITTEN_FORM_CACHE_KEY, {})),
   currentWrongBook: {},
   historyWrongBook: {},
   achievements: {},
@@ -326,6 +344,8 @@ function saveState() {
   localStorage.setItem("rubricCache", JSON.stringify(state.rubricCache));
   state.japaneseReadings = sanitizeJapaneseReadings(state.japaneseReadings);
   localStorage.setItem(JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
+  state.japaneseWrittenForms = sanitizeJapaneseWrittenForms(state.japaneseWrittenForms);
+  localStorage.setItem(JAPANESE_WRITTEN_FORM_CACHE_KEY, JSON.stringify(state.japaneseWrittenForms));
   saveWrongBooks();
   saveAchievements();
 }
@@ -939,7 +959,15 @@ function saveCurrentWordDraft() {
 function loadCurrentWordDraft() {
   const input = $("wordInput");
   if (!input || !currentProject || !state.account) return;
-  input.value = localStorage.getItem(wordDraftKey(currentProject)) || "";
+  const key = wordDraftKey(currentProject);
+  const saved = localStorage.getItem(key) || "";
+  if (currentProject === "japanese" && /[|｜=＝]/u.test(saved)) {
+    const normalized = formatWordsForInput(parseWordText(saved));
+    input.value = normalized;
+    localStorage.setItem(key, normalized);
+    return;
+  }
+  input.value = saved;
 }
 
 function saveProjectRuntime() {
@@ -1138,7 +1166,7 @@ function updateLanguageUi() {
   if (projectLabel) projectLabel.textContent = language ? `${quizLanguageLabel(language)}测试` : "";
   const input = $("wordInput");
   if (input) input.placeholder = language === "japanese"
-    ? "输入日语词表，每行一个词；可写 学校｜がっこう"
+    ? "输入日语词表，每行一个词；汉字或假名都可以"
     : "输入英语词表，每行一个词";
   updateAiSuggestionControls();
 }
@@ -1506,26 +1534,55 @@ function normalizeKana(value) {
   }).join("");
 }
 
+function rememberJapaneseVocabularyData(readings, writtenForms = {}, persist = true) {
+  const cleanReadings = sanitizeJapaneseReadings(readings);
+  const cleanWrittenForms = sanitizeJapaneseWrittenForms(writtenForms);
+  if (Object.keys(cleanReadings).length) {
+    state.japaneseReadings = sanitizeJapaneseReadings({ ...state.japaneseReadings, ...cleanReadings });
+  }
+  if (Object.keys(cleanWrittenForms).length) {
+    state.japaneseWrittenForms = sanitizeJapaneseWrittenForms({
+      ...state.japaneseWrittenForms,
+      ...cleanWrittenForms,
+    });
+  }
+  if (persist) {
+    localStorage.setItem(JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
+    localStorage.setItem(JAPANESE_WRITTEN_FORM_CACHE_KEY, JSON.stringify(state.japaneseWrittenForms));
+  }
+}
+
 function rememberJapaneseReadings(readings, persist = true) {
-  const clean = sanitizeJapaneseReadings(readings);
-  if (!Object.keys(clean).length) return;
-  state.japaneseReadings = sanitizeJapaneseReadings({ ...state.japaneseReadings, ...clean });
-  if (persist) localStorage.setItem(JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
+  rememberJapaneseVocabularyData(readings, {}, persist);
 }
 
 function japaneseReadingFor(word) {
-  return state.japaneseReadings[String(word || "").trim()] || "";
+  const cleanWord = String(word || "").trim();
+  if (state.japaneseReadings[cleanWord]) return state.japaneseReadings[cleanWord];
+  return isJapaneseReading(cleanWord) ? normalizeJapaneseReading(cleanWord) : "";
+}
+
+function japaneseWrittenFormFor(word) {
+  const cleanWord = String(word || "").trim();
+  return state.japaneseWrittenForms[cleanWord] || cleanWord;
+}
+
+function japaneseDictationRequiresBoth(word) {
+  const written = japaneseWrittenFormFor(word);
+  const reading = japaneseReadingFor(word);
+  return Boolean(hasJapaneseKanji(written) && reading && normalizeKana(written) !== normalizeKana(reading));
 }
 
 function formatJapaneseDictationAnswer(word) {
+  const written = japaneseWrittenFormFor(word);
   const reading = japaneseReadingFor(word);
-  return hasJapaneseKanji(word) && reading ? `${word} / ${reading}` : word;
+  return japaneseDictationRequiresBoth(word) ? `${written} / ${reading}` : (written || reading || word);
 }
 
 function dictationEvaluation(word, answer) {
   const expectedWord = normalizeDictationAnswer(word);
   const student = normalizeDictationAnswer(answer);
-  if (state.quizLanguage !== "japanese" || !hasJapaneseKanji(word)) {
+  if (state.quizLanguage !== "japanese") {
     return {
       correct: expectedWord === student,
       expected: word,
@@ -1533,28 +1590,32 @@ function dictationEvaluation(word, answer) {
     };
   }
 
+  const written = japaneseWrittenFormFor(word);
   const reading = japaneseReadingFor(word);
-  if (!reading) {
+  if (!reading || !written) {
     return {
       correct: false,
       expected: word,
-      guidance: "未能取得该词的假名读音，请返回词表后重试",
+      guidance: "未能取得该词的完整写法，请返回词表后重试",
     };
   }
 
   const compact = student.replace(/[\/、，,；;：:|｜=＝·・]/g, "");
-  const hasWrittenForm = compact.includes(expectedWord);
-  const hasReading = normalizeKana(compact).includes(normalizeKana(reading));
   const normalizedCompact = normalizeKana(compact);
-  const normalizedWord = normalizeKana(expectedWord);
+  const normalizedWritten = normalizeKana(normalizeDictationAnswer(written));
   const normalizedReading = normalizeKana(reading);
-  const correct = normalizedCompact === `${normalizedWord}${normalizedReading}`
-    || normalizedCompact === `${normalizedReading}${normalizedWord}`;
-  let guidance = "";
-  if (!hasWrittenForm && hasReading) guidance = "还需要填写汉字词形";
-  else if (hasWrittenForm && !hasReading) guidance = "还需要填写假名读音";
-  else if (!hasWrittenForm || !hasReading) guidance = "汉字词形或假名读音不正确";
-  else if (!correct) guidance = "请只填写汉字词形和假名读音";
+  const requiresBoth = japaneseDictationRequiresBoth(word);
+  const correct = requiresBoth
+    ? normalizedCompact === `${normalizedWritten}${normalizedReading}`
+      || normalizedCompact === `${normalizedReading}${normalizedWritten}`
+    : [expectedWord, normalizedWritten, normalizedReading]
+      .map((item) => normalizeKana(item))
+      .includes(normalizedCompact);
+  const guidance = correct
+    ? ""
+    : requiresBoth
+      ? `请同时填写汉字“${written}”和假名“${reading}”`
+      : `正确写法是“${written || reading || word}”`;
 
   return {
     correct,
@@ -1675,6 +1736,7 @@ function localReviewResult(word, answer, info) {
 function parseWordText(value, captureReadings = true) {
   const words = [];
   const readings = {};
+  const writtenForms = {};
   String(value || "").split(/\r?\n/).forEach((rawLine) => {
     const line = rawLine.trim();
     if (!line) return;
@@ -1687,12 +1749,13 @@ function parseWordText(value, captureReadings = true) {
       if (wordMatchesLanguage(word, "japanese") && isJapaneseReading(reading)) {
         words.push(word);
         readings[word] = reading;
+        writtenForms[word] = word;
         return;
       }
     }
     line.split(/[\s,，、;；]+/).map((word) => word.trim()).filter(Boolean).forEach((word) => words.push(word));
   });
-  if (captureReadings) rememberJapaneseReadings(readings);
+  if (captureReadings) rememberJapaneseVocabularyData(readings, writtenForms);
   return words;
 }
 
@@ -1701,9 +1764,7 @@ function parseWords() {
 }
 
 function formatWordInputEntry(word) {
-  if (state.quizLanguage !== "japanese") return word;
-  const reading = japaneseReadingFor(word);
-  return hasJapaneseKanji(word) && reading ? `${word}｜${reading}` : word;
+  return word;
 }
 
 function formatWordsForInput(words) {
@@ -1765,7 +1826,7 @@ async function generateAiVocabulary() {
       { language, level, count, exclude: existingLanguageWords },
       { timeoutMs: 240000 },
     );
-    rememberJapaneseReadings(data.readings || {});
+    rememberJapaneseVocabularyData(data.readings || {}, data.written_forms || {});
     const generated = filterWordsByLanguage(data.words || [], language);
     if (!generated.length) throw new Error("没有生成可用词汇，请重试");
     const existingKeys = new Set(baseWords.map((word) => word.toLocaleLowerCase()));
@@ -1802,11 +1863,16 @@ function shuffle(items) {
 
 async function ensureJapaneseDictationReadings(words) {
   if (state.quizLanguage !== "japanese" || state.practiceMode !== "dictation") return true;
-  const required = words.filter(hasJapaneseKanji);
-  const missing = required.filter((word) => !japaneseReadingFor(word));
+  const required = words.filter((word) => wordMatchesLanguage(word, "japanese"));
+  const missing = required.filter((word) => {
+    const hasReading = Boolean(japaneseReadingFor(word));
+    const hasWrittenResolution = hasJapaneseKanji(word)
+      || Object.prototype.hasOwnProperty.call(state.japaneseWrittenForms, word);
+    return !hasReading || !hasWrittenResolution;
+  });
   if (!missing.length) return true;
   if (!backendAvailable || !state.session || !aiAvailable) {
-    alert("这些汉字词还缺少假名读音。请启动本地 AI 后重试，或在词表中写成“学校｜がっこう”。");
+    alert("这些日语词还缺少完整的汉字或假名写法，请启动本地 AI 后重试。");
     return false;
   }
 
@@ -1816,16 +1882,21 @@ async function ensureJapaneseDictationReadings(words) {
       { words: missing, quiz_session: state.quizSession },
       { timeoutMs: 180000 },
     );
-    rememberJapaneseReadings(data.readings || {});
+    rememberJapaneseVocabularyData(data.readings || {}, data.written_forms || {});
   } catch (error) {
-    alert(`获取日语假名读音失败：${error.message}`);
+    alert(`获取日语完整写法失败：${error.message}`);
     return false;
   }
 
-  const unresolved = required.filter((word) => !japaneseReadingFor(word));
+  const unresolved = required.filter((word) => {
+    const hasReading = Boolean(japaneseReadingFor(word));
+    const hasWrittenResolution = hasJapaneseKanji(word)
+      || Object.prototype.hasOwnProperty.call(state.japaneseWrittenForms, word);
+    return !hasReading || !hasWrittenResolution;
+  });
   if (unresolved.length) {
     const preview = unresolved.slice(0, 5).join("、");
-    alert(`以下词暂时无法取得假名读音：${preview}${unresolved.length > 5 ? "等" : ""}。请在词表中用“汉字｜假名”补充后再开始。`);
+    alert(`AI 暂时未找到这些词的完整写法：${preview}${unresolved.length > 5 ? "等" : ""}。请稍后重试。`);
     return false;
   }
   return true;
@@ -1917,7 +1988,9 @@ function showWord() {
   $("answerInput").value = "";
   $("answerInput").placeholder = dictation
     ? state.quizLanguage === "japanese"
-      ? "输入日语；汉字词需写成 学校 / がっこう"
+      ? japaneseDictationRequiresBoth(word)
+        ? "输入汉字和假名，例如 学校 / がっこう"
+        : "输入听到的假名"
       : "输入听到的单词"
     : "中文意思";
   clearAnswerValidation();
@@ -1998,10 +2071,13 @@ function clearAnswerValidation() {
 
 function showAnswerValidation() {
   const dictation = isDictationMode();
+  const currentWord = state.words[state.index];
   const text = !dictation
     ? "请输入中文意思"
     : state.quizLanguage === "japanese"
-      ? "请输入日语单词；汉字词还需填写假名读音"
+      ? japaneseDictationRequiresBoth(currentWord)
+        ? "请输入汉字和假名，答案仍停留在本题"
+        : "请输入听到的假名，答案仍停留在本题"
       : "请输入听到的英语单词";
   const input = $("answerInput");
   const message = $("answerValidation");
@@ -2474,7 +2550,7 @@ function parseImportedWords(text) {
     const data = JSON.parse(trimmed);
     if (Array.isArray(data)) return parseWordText(data.map(String).join("\n"));
     if (Array.isArray(data.words)) {
-      rememberJapaneseReadings(data.readings || {});
+      rememberJapaneseVocabularyData(data.readings || {}, data.written_forms || {});
       return parseWordText(data.words.map(String).join("\n"));
     }
   } catch (_) {
