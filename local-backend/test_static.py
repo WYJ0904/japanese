@@ -60,14 +60,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260715-tools8"
+        release_token = "20260715-tools9"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-15-tools8"', self.app)
+        self.assertIn('const APP_VERSION = "2026-07-15-tools9"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-15-tools8"', server)
+        self.assertIn('APP_BUILD = "2026-07-15-tools9"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -141,11 +141,23 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("temporary_store.py", launcher)
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.1.5"', launcher)
+        self.assertIn('$LauncherVersion = "8.1.6"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
         self.assertIn("Disable-LegacyAutoStart", launcher)
+
+    def test_remote_data_loading_has_retry_and_partial_recovery(self):
+        self.assertIn('id="membershipPlanRecovery"', self.html)
+        self.assertIn('id="retryMembershipPlansBtn"', self.html)
+        self.assertIn("GET_RETRYABLE_STATUS", self.app)
+        self.assertIn("requestJsonGet", self.app)
+        self.assertIn("Promise.allSettled(requests.map", self.app)
+        self.assertIn("已加载的内容会保留，请点击刷新重试", self.app)
+        launcher = (ROOT / "desktop-tools" / "start-wyj.ps1").read_text(encoding="utf-8-sig")
+        startup = launcher[launcher.index("    Sync-BackendSource"):]
+        self.assertLess(startup.index("    Ensure-Backend"), startup.index("    Ensure-Tunnel"))
+        self.assertLess(startup.index("    Ensure-Tunnel"), startup.index("        Ensure-Ollama"))
 
     def test_migration_is_idempotent_and_rollback_preserves_legacy_tables(self):
         migrations = ROOT / "local-backend" / "migrations"

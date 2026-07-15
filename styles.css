@@ -2034,9 +2034,25 @@ textarea {
 
 .plan-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin: 20px 0;
+}
+
+.plan-loading,
+.load-recovery {
+  grid-column: 1 / -1;
+  margin: 20px 0;
+  padding: 18px;
+  border: 1px dashed rgba(95, 199, 250, 0.32);
+  border-radius: 7px;
+  color: var(--muted);
+  text-align: center;
+  background: rgba(4, 17, 29, 0.66);
+}
+
+.load-recovery p {
+  margin: 0 0 12px;
 }
 
 .plan-option {

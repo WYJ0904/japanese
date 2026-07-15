@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "8.1.5"
+$LauncherVersion = "8.1.6"
 
 $FrontendRoot = "C:\Users\78252\Documents\Codex\2026-07-05\cloudflare-pages-1-zip-2-html"
 $BackendSourceRoot = Join-Path $FrontendRoot "local-backend"
@@ -375,15 +375,15 @@ try {
             throw "后端同步后仍缺少文件: $backendPath"
         }
     }
+    Ensure-Backend
+    Ensure-Tunnel
     $aiReady = $true
     try {
         Ensure-Ollama
     } catch {
         $aiReady = $false
-        Write-LaunchLog ("本地 AI 暂未就绪，网站和账户服务仍会继续启动: " + $_.Exception.Message) "Yellow"
+        Write-LaunchLog ("本地 AI 暂未就绪，网站和账户服务已经可用: " + $_.Exception.Message) "Yellow"
     }
-    Ensure-Backend
-    Ensure-Tunnel
     if (-not (Test-HttpOk -Url $SiteUrl -TimeoutSec 12)) {
         throw "正式网站暂时无法访问: $SiteUrl"
     }

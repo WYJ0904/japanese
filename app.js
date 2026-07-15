@@ -1,10 +1,12 @@
-const APP_VERSION = "2026-07-15-tools8";
+const APP_VERSION = "2026-07-15-tools9";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
 const API_TIMEOUT_MS = 100000;
 const STATUS_TIMEOUT_MS = 8000;
 const STATUS_RETRY_DELAYS_MS = [0, 800, 2000];
+const API_GET_TIMEOUT_MS = 10000;
+const GET_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 530]);
 const PDF_TIMEOUT_MS = 120000;
 const MAX_WRONG_BOOK_ITEMS = 250;
 const MAX_ACCEPTED_ANSWERS = 14;
@@ -102,9 +104,11 @@ let currentProject = "";
 let selectedRechargePlan = "";
 let currentPaymentOrder = null;
 let membershipPlans = [];
+let membershipPlansPromise = null;
 let toolsInitialized = false;
 let routeBusy = false;
 let adminUsers = [];
+let adminLoadSequence = 0;
 let confirmAction = null;
 let lastLimitPromptKey = "";
 let projectRuntimeNeedsRestore = false;
@@ -700,24 +704,60 @@ function renderAccountDetails() {
   $("openDeleteAccountBtn")?.closest(".danger-zone")?.classList.toggle("hidden", isSuperAdmin(account));
 }
 
-async function apiGet(path) {
-  const response = await fetchWithTimeout(path, {
-    method: "GET",
-    cache: "no-store",
-    headers: { "X-Session-Token": state.session },
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    if (response.status === 401) {
+async function requestJsonGet(path, options = {}) {
+  const authenticated = options.authenticated === true;
+  let lastError = new Error(BACKEND_NETWORK_MESSAGE);
+  for (let attempt = 0; attempt < STATUS_RETRY_DELAYS_MS.length; attempt += 1) {
+    const delay = STATUS_RETRY_DELAYS_MS[attempt];
+    if (delay) await waitForDelay(delay);
+    let response;
+    try {
+      response = await fetchWithTimeout(path, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: authenticated ? { "X-Session-Token": state.session } : {},
+      }, options.timeoutMs || API_GET_TIMEOUT_MS);
+    } catch (networkError) {
+      backendAvailable = false;
+      backendFailureMessage = backendErrorMessage(networkError);
+      lastError = new Error(backendFailureMessage);
+      if (attempt < STATUS_RETRY_DELAYS_MS.length - 1) continue;
+      throw lastError;
+    }
+
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) {
+      backendAvailable = true;
+      return data;
+    }
+    if (authenticated && response.status === 401) {
       clearSession();
       showAuth("登录已失效，请重新登录", { replace: true });
-      throw new Error("登录已失效，请重新登录");
+      const error = new Error("登录已失效，请重新登录");
+      error.code = "session_expired";
+      throw error;
     }
-    const error = new Error(data.error || "请求失败");
+    if (GET_RETRYABLE_STATUS.has(response.status) && attempt < STATUS_RETRY_DELAYS_MS.length - 1) {
+      lastError = new Error("服务器正在恢复，请稍候…");
+      continue;
+    }
+    const configuredWrong = String(data.error || "").includes("LOCAL_API_BASE");
+    const message = configuredWrong
+      ? BACKEND_CONFIG_MESSAGE
+      : GET_RETRYABLE_STATUS.has(response.status)
+        ? "服务器暂时不可用，请稍后重新加载。"
+        : data.error || `请求失败（HTTP ${response.status}）`;
+    const error = new Error(message);
     error.code = data.code || "request_failed";
+    error.status = response.status;
     throw error;
   }
-  return data;
+  throw lastError;
+}
+
+async function apiGet(path, options = {}) {
+  return requestJsonGet(path, { ...options, authenticated: true });
 }
 
 function openModal(id) {
@@ -818,23 +858,105 @@ function planDetails(plan) {
     : ["请选择套餐", "", ""];
 }
 
-async function loadMembershipPlans() {
-  if (membershipPlans.length) return membershipPlans;
-  const response = await fetchWithTimeout("/api/membership/plans", { cache: "no-store" }, STATUS_TIMEOUT_MS);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !Array.isArray(data.plans)) throw new Error(data.error || "会员方案加载失败");
-  const order = ["trial_single_language", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"];
-  const rank = (code) => {
-    const index = order.indexOf(code);
-    return index < 0 ? order.length : index;
-  };
-  membershipPlans = [...data.plans].sort((left, right) => rank(left.code) - rank(right.code));
+function renderMembershipPlans() {
   const list = $("membershipPlanList");
   if (list) {
     list.innerHTML = membershipPlans.map((item) => `<button class="plan-option" data-plan="${escapeHtml(item.code)}" type="button">
       <strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.price)} ${escapeHtml(item.currency)}${item.duration_months ? "/月" : ""}</span><small>${escapeHtml(item.description)}</small>
     </button>`).join("");
     list.querySelectorAll("[data-plan]").forEach((button) => button.addEventListener("click", () => selectRechargePlan(button.dataset.plan)));
+  }
+  $("membershipPlanRecovery")?.classList.add("hidden");
+}
+
+function showMembershipPlanRecovery(message) {
+  if (!membershipPlans.length) $("membershipPlanList").innerHTML = "";
+  $("membershipPlanError").textContent = message || "会员方案暂时无法加载。";
+  $("membershipPlanRecovery").classList.remove("hidden");
+}
+
+async function loadMembershipPlans(force = false) {
+  if (membershipPlans.length && !force) {
+    renderMembershipPlans();
+    return membershipPlans;
+  }
+  if (membershipPlansPromise) return membershipPlansPromise;
+  const list = $("membershipPlanList");
+  list?.setAttribute("aria-busy", "true");
+  if (!membershipPlans.length && list) list.innerHTML = '<p class="plan-loading">正在连接服务器并加载会员方案…</p>';
+  $("membershipPlanRecovery")?.classList.add("hidden");
+
+  membershipPlansPromise = (async () => {
+    const data = await requestJsonGet("/api/membership/plans", { timeoutMs: STATUS_TIMEOUT_MS });
+    if (!Array.isArray(data.plans) || !data.plans.length) throw new Error("服务器没有返回可购买的会员方案");
+    const order = ["trial_single_language", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"];
+    const rank = (code) => {
+      const index = order.indexOf(code);
+      return index < 0 ? order.length : index;
+    };
+    membershipPlans = [...data.plans].sort((left, right) => rank(left.code) - rank(right.code));
+    renderMembershipPlans();
+    return membershipPlans;
+  })().catch((error) => {
+    showMembershipPlanRecovery(`${error.message} 请点击下方按钮重试。`);
+    throw error;
+  }).finally(() => {
+    list?.setAttribute("aria-busy", "false");
+    membershipPlansPromise = null;
+  });
+  return membershipPlansPromise;
+}
+
+async function reloadMembershipPlans() {
+  const button = $("retryMembershipPlansBtn");
+  button.disabled = true;
+  $("rechargeMessage").textContent = "正在重新连接并加载套餐…";
+  try {
+    await loadMembershipPlans(true);
+    selectRechargePlan("");
+    $("rechargeMessage").textContent = "套餐已重新加载，请选择方案。";
+  } catch (error) {
+    $("rechargeMessage").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function openMembershipModal(options = {}) {
+  if (!state.session || !state.account) {
+    showAuth("请先登录后查看会员方案", { path: "/login" });
+    return;
+  }
+  $("copyWechatBtn").textContent = "复制微信号";
+  selectRechargePlan("");
+  $("rechargeMessage").textContent = "正在加载套餐与订单状态…";
+  openModal("membershipModal");
+  let openOrder = null;
+  let loadError = "";
+  try {
+    await loadMembershipPlans(options.forcePlans === true);
+    const orders = await apiGet("/api/recharge/mine");
+    openOrder = (orders.requests || []).find((item) => ["pending_payment", "user_paid"].includes(item.status)) || null;
+  } catch (error) {
+    loadError = error.message;
+  }
+  if (!state.session || !state.account) {
+    closeModal("membershipModal", true);
+    return;
+  }
+  const planCode = openOrder?.plan_code || (selectedRechargePlan && membershipPlans.some((item) => item.code === selectedRechargePlan)
+    ? selectedRechargePlan
+    : "");
+  selectRechargePlan(planCode);
+  if (openOrder) {
+    renderPaymentOrder(openOrder);
+    $("rechargeMessage").textContent = openOrder.status === "user_paid"
+      ? "已通知管理员，正在等待人工核对付款。"
+      : "你有一个尚未付款的订单。请按订单备注付款后点击“我已付款”。";
+  } else if (loadError) {
+    $("rechargeMessage").textContent = loadError;
+  } else {
+    $("rechargeMessage").textContent = "请选择会员方案。";
   }
   return membershipPlans;
 }
@@ -855,36 +977,6 @@ function selectRechargePlan(plan) {
   $("confirmPaymentBtn").classList.add("hidden");
   $("paymentOrderBox").classList.add("hidden");
   $("rechargeMessage").textContent = "";
-}
-
-async function openMembershipModal() {
-  if (!state.session || !state.account) {
-    showAuth("请先登录后查看会员方案", { path: "/login" });
-    return;
-  }
-  $("copyWechatBtn").textContent = "复制微信号";
-  let openOrder = null;
-  let loadError = "";
-  try {
-    await loadMembershipPlans();
-    const orders = await apiGet("/api/recharge/mine");
-    openOrder = (orders.requests || []).find((item) => ["pending_payment", "user_paid"].includes(item.status)) || null;
-  } catch (error) {
-    loadError = error.message;
-  }
-  const planCode = openOrder?.plan_code || (selectedRechargePlan && membershipPlans.some((item) => item.code === selectedRechargePlan)
-    ? selectedRechargePlan
-    : "");
-  selectRechargePlan(planCode);
-  if (openOrder) {
-    renderPaymentOrder(openOrder);
-    $("rechargeMessage").textContent = openOrder.status === "user_paid"
-      ? "已通知管理员，正在等待人工核对付款。"
-      : "你有一个尚未付款的订单。请按订单备注付款后点击“我已付款”。";
-  } else if (loadError) {
-    $("rechargeMessage").textContent = loadError;
-  }
-  openModal("membershipModal");
 }
 
 function paymentStatusLabel(status) {
@@ -1147,20 +1239,51 @@ function renderAdminToolStats(tools) {
 
 async function loadAdminData() {
   if (!isSuperAdmin()) return;
+  const sequence = ++adminLoadSequence;
+  const refreshButton = $("refreshAdminBtn");
+  refreshButton.disabled = true;
+  refreshButton.textContent = "刷新中…";
+  $("adminPanel").setAttribute("aria-busy", "true");
   $("adminError").textContent = "";
+  if (!adminUsers.length) {
+    $("adminUserCount").textContent = "正在加载用户…";
+    if (!$("adminUserList").children.length) $("adminUserList").innerHTML = '<p class="admin-empty-state">正在连接服务器…</p>';
+  }
+  const requests = [
+    { label: "用户", path: "/api/admin/users", target: "adminUserList", apply: (data) => renderAdminUsers(data.users) },
+    { label: "充值申请", path: "/api/admin/recharge", target: "adminRechargeList", apply: (data) => renderAdminRecharge(data.requests) },
+    { label: "审计日志", path: "/api/admin/audit", target: "adminAuditList", apply: (data) => renderAdminAudit(data.logs) },
+    { label: "工具统计", path: "/api/admin/tool-stats", target: "adminToolStatsList", apply: (data) => renderAdminToolStats(data.tools) },
+  ];
   try {
-    const [users, recharge, audit, toolStats] = await Promise.all([
-      apiGet("/api/admin/users"),
-      apiGet("/api/admin/recharge"),
-      apiGet("/api/admin/audit"),
-      apiGet("/api/admin/tool-stats"),
-    ]);
-    renderAdminUsers(users.users);
-    renderAdminRecharge(recharge.requests);
-    renderAdminAudit(audit.logs);
-    renderAdminToolStats(toolStats.tools);
-  } catch (error) {
-    $("adminError").textContent = error.message;
+    const results = await Promise.allSettled(requests.map((request) => apiGet(request.path)));
+    if (sequence !== adminLoadSequence || !state.session || !isSuperAdmin()) return;
+    const failures = [];
+    results.forEach((result, index) => {
+      const request = requests[index];
+      if (result.status === "fulfilled") {
+        try {
+          request.apply(result.value);
+        } catch (_error) {
+          failures.push(`${request.label}返回格式异常`);
+        }
+        return;
+      }
+      failures.push(`${request.label}：${result.reason?.message || "加载失败"}`);
+      const target = $(request.target);
+      const missingUsers = request.label === "用户" && !adminUsers.length;
+      if (target && (!target.children.length || missingUsers)) target.innerHTML = `<p class="admin-empty-state">${request.label}尚未加载，请点击刷新重试。</p>`;
+      if (missingUsers) $("adminUserCount").textContent = "用户尚未加载";
+    });
+    $("adminError").textContent = failures.length
+      ? `${failures.join("；")}。已加载的内容会保留，请点击刷新重试。`
+      : "";
+  } finally {
+    if (sequence === adminLoadSequence) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = "刷新";
+      $("adminPanel").setAttribute("aria-busy", "false");
+    }
   }
 }
 
@@ -3909,6 +4032,7 @@ async function boot() {
   $("logoutBtn").addEventListener("click", logoutAccount);
   $("submitRechargeBtn").addEventListener("click", submitRechargeRequest);
   $("confirmPaymentBtn").addEventListener("click", confirmRechargePayment);
+  $("retryMembershipPlansBtn").addEventListener("click", reloadMembershipPlans);
   $("copyWechatBtn").addEventListener("click", () => copyTextWithFeedback("W2009Y94J", $("copyWechatBtn")));
   $("copyOrderBtn").addEventListener("click", () => copyTextWithFeedback(currentPaymentOrder?.order_number || "", $("copyOrderBtn")));
   $("copyPaymentNoteBtn").addEventListener("click", () => copyTextWithFeedback(currentPaymentOrder?.payment_note || "", $("copyPaymentNoteBtn")));

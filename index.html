@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260715-tools8" />
-    <link rel="stylesheet" href="/styles.css?v=20260715-tools8" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260715-tools9" />
+    <link rel="stylesheet" href="/styles.css?v=20260715-tools9" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -376,7 +376,7 @@
         <section class="admin-view active" id="adminUsersView">
           <div class="admin-toolbar">
             <label class="admin-search" for="adminUserSearch"><span>搜索用户</span><input id="adminUserSearch" type="search" autocomplete="off" placeholder="输入用户名或用户 ID" /></label>
-            <p id="adminUserCount" aria-live="polite">共 0 个用户</p>
+            <p id="adminUserCount" aria-live="polite">用户尚未加载</p>
           </div>
           <div class="admin-user-list" id="adminUserList"></div>
         </section>
@@ -396,7 +396,11 @@
         <button class="modal-close" data-close-modal="membershipModal" type="button" aria-label="关闭">×</button>
         <p class="section-kicker">MEMBERSHIP</p>
         <h2 id="membershipTitle">会员充值</h2>
-        <div class="plan-grid" id="membershipPlanList"></div>
+        <div class="plan-grid" id="membershipPlanList" aria-live="polite"></div>
+        <div class="load-recovery hidden" id="membershipPlanRecovery">
+          <p id="membershipPlanError">会员方案暂时无法加载。</p>
+          <button id="retryMembershipPlansBtn" type="button">重新加载套餐</button>
+        </div>
         <label class="field-label hidden" id="trialLanguageField"><span>选择单语言</span><select id="trialLanguageSelect"><option value="english">英语</option><option value="japanese">日语</option></select></label>
         <div class="purchase-summary" id="purchaseSummary">请选择套餐</div>
         <p class="membership-warning">8 CNY 单语言包月体验只包含所选英语或日语；70 CNY 日语永久会员只包含日语。两者均不包含在线工具箱。需要工具箱，请购买 30 CNY 全功能月度会员或 100 CNY 全功能永久会员。</p>
@@ -519,7 +523,7 @@
     </template>
 
     <script src="/vendor/qrcode.js?v=2.0.4"></script>
-    <script src="/tools.js?v=20260715-tools8"></script>
-    <script src="/app.js?v=20260715-tools8"></script>
+    <script src="/tools.js?v=20260715-tools9"></script>
+    <script src="/app.js?v=20260715-tools9"></script>
   </body>
 </html>

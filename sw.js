@@ -1,14 +1,14 @@
-const CACHE = "wyj-shell-20260715-tools8";
+const CACHE = "wyj-shell-20260715-tools9";
 const CORE_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260715-tools8",
-  "/app.js?v=20260715-tools8",
-  "/tools.js?v=20260715-tools8",
+  "/styles.css?v=20260715-tools9",
+  "/app.js?v=20260715-tools9",
+  "/tools.js?v=20260715-tools9",
   "/vendor/qrcode.js?v=2.0.4",
   "/vendor/opencc-st-characters.txt",
   "/vendor/opencc-ts-characters.txt",
-  "/manifest.webmanifest?v=20260715-tools8",
+  "/manifest.webmanifest?v=20260715-tools9",
   "/icon-192.png",
   "/icon-512.png",
 ];
