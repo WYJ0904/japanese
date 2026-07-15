@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-14-ux6";
+const APP_VERSION = "2026-07-15-ux7";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -10,8 +10,13 @@ const MAX_WRONG_BOOK_ITEMS = 250;
 const MAX_ACCEPTED_ANSWERS = 14;
 const MAX_RUBRIC_CACHE_ITEMS = 500;
 const MAX_JAPANESE_READING_CACHE_ITEMS = 2000;
+const MAX_WORD_IMPORT_BYTES = 1024 * 1024;
+const MAX_WORD_INPUT_CHARS = 120000;
+const PROJECT_RUNTIME_MAX_AGE_MS = 100 * 60 * 1000;
+const BACKEND_REFRESH_INTERVAL_MS = 60 * 1000;
 const JAPANESE_READING_CACHE_KEY = "japaneseReadingCache:v1";
 const JAPANESE_WRITTEN_FORM_CACHE_KEY = "japaneseWrittenFormCache:v1";
+const ACCOUNT_DATA_VERSION = 2;
 const WRONG_BOOK_EXPORT_TYPE = "vocab-wrong-book";
 const WRONG_BOOK_EXPORT_VERSION = 1;
 const DEFAULT_PROFILE = "我";
@@ -75,6 +80,9 @@ let confirmAction = null;
 let lastLimitPromptKey = "";
 let projectRuntimeNeedsRestore = false;
 let backendStatusPromise = null;
+let backendRefreshPromise = null;
+let storageWriteFailed = false;
+const modalReturnFocus = new Map();
 const projectRuntime = {
   english: null,
   japanese: null,
@@ -84,7 +92,7 @@ const BACKEND_NETWORK_MESSAGE = "暂时无法连接服务器，请检查网络�
 let backendFailureMessage = BACKEND_NETWORK_MESSAGE;
 
 const restoredSession = localStorage.getItem("wyjAccountSession") || sessionStorage.getItem("vocabSession") || "";
-if (restoredSession) localStorage.setItem("wyjAccountSession", restoredSession);
+if (restoredSession) safeStorageSet(localStorage, "wyjAccountSession", restoredSession);
 sessionStorage.removeItem("vocabSession");
 localStorage.removeItem("vocabSession");
 
@@ -96,6 +104,16 @@ function loadJson(key, fallback) {
   }
 }
 
+function safeStorageSet(storage, key, value) {
+  try {
+    storage.setItem(key, String(value));
+    return true;
+  } catch (_) {
+    storageWriteFailed = true;
+    return false;
+  }
+}
+
 function migrateProjectPreferences() {
   const legacyGrading = ["strict", "normal", "lenient"].includes(localStorage.getItem("gradingMode"))
     ? localStorage.getItem("gradingMode")
@@ -103,10 +121,10 @@ function migrateProjectPreferences() {
   const legacyPractice = normalizePracticeMode(localStorage.getItem("practiceMode"));
   Object.keys(LANGUAGE_LABELS).forEach((language) => {
     if (localStorage.getItem(`gradingMode:${language}`) === null) {
-      localStorage.setItem(`gradingMode:${language}`, legacyGrading);
+      safeStorageSet(localStorage, `gradingMode:${language}`, legacyGrading);
     }
     if (localStorage.getItem(`practiceMode:${language}`) === null) {
-      localStorage.setItem(`practiceMode:${language}`, legacyPractice);
+      safeStorageSet(localStorage, `practiceMode:${language}`, legacyPractice);
     }
   });
 }
@@ -136,7 +154,7 @@ function sanitizeWrongBook(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const cleaned = {};
   Object.entries(value)
-    .slice(0, MAX_WRONG_BOOK_ITEMS)
+    .slice(-MAX_WRONG_BOOK_ITEMS)
     .forEach(([word, info]) => {
       if (!info || typeof info !== "object" || Array.isArray(info)) return;
       const key = limitText(word, 240);
@@ -158,6 +176,7 @@ function mergeWrongBooks(current, incoming) {
   const merged = { ...sanitizeWrongBook(current) };
   Object.entries(sanitizeWrongBook(incoming)).forEach(([word, info]) => {
     const previous = merged[word] || {};
+    delete merged[word];
     merged[word] = {
       ...previous,
       ...info,
@@ -272,6 +291,8 @@ const state = {
   lastRound: null,
   mode: "normal",
   busy: false,
+  answerLocked: false,
+  roundActive: false,
   wrongScope: "current",
   rubricCache: loadJson("rubricCache", {}),
   japaneseReadings: sanitizeJapaneseReadings(loadJson(JAPANESE_READING_CACHE_KEY, {})),
@@ -281,41 +302,118 @@ const state = {
   achievements: {},
 };
 
-function wrongBookKey(scope) {
-  return `wrongBook:${scope}:${profileStorageName(state.profile)}`;
+function accountStorageId(account = state.account) {
+  return encodeURIComponent(String(account?.id || "guest"));
 }
 
-function achievementKey() {
-  return `achievements:${profileStorageName(state.profile)}`;
+function accountProfileKey(account = state.account) {
+  return `vocabProfile:v${ACCOUNT_DATA_VERSION}:${accountStorageId(account)}`;
+}
+
+function wrongBookKey(scope, account = state.account, profile = state.profile) {
+  return `wrongBook:v${ACCOUNT_DATA_VERSION}:${accountStorageId(account)}:${scope}:${profileStorageName(profile)}`;
+}
+
+function achievementKey(account = state.account, profile = state.profile) {
+  return `achievements:v${ACCOUNT_DATA_VERSION}:${accountStorageId(account)}:${profileStorageName(profile)}`;
+}
+
+function projectRuntimeKey(language, account = state.account) {
+  return `vocabRuntime:v1:${accountStorageId(account)}:${language}`;
+}
+
+function migrateLegacyAccountData() {
+  if (!state.account?.id) return;
+  const accountId = accountStorageId();
+  const migratedKey = `accountLocalDataMigrated:v${ACCOUNT_DATA_VERSION}:${accountId}`;
+  if (localStorage.getItem(migratedKey)) return;
+  const claimedKey = `accountLocalDataLegacyOwner:v${ACCOUNT_DATA_VERSION}`;
+  const claimedBy = localStorage.getItem(claimedKey);
+  if (!claimedBy || claimedBy === accountId) {
+    const legacyProfile = sanitizeProfile(localStorage.getItem("vocabProfile") || DEFAULT_PROFILE);
+    if (localStorage.getItem(accountProfileKey()) === null) {
+      safeStorageSet(localStorage, accountProfileKey(), legacyProfile);
+    }
+    ["current", "history"].forEach((scope) => {
+      const legacy = loadJson(`wrongBook:${scope}:${profileStorageName(legacyProfile)}`, {});
+      const target = wrongBookKey(scope, state.account, legacyProfile);
+      if (localStorage.getItem(target) === null && Object.keys(legacy).length) {
+        safeStorageSet(localStorage, target, JSON.stringify(sanitizeWrongBook(legacy)));
+      }
+    });
+    const legacyAchievements = loadJson(`achievements:${profileStorageName(legacyProfile)}`, {});
+    const targetAchievements = achievementKey(state.account, legacyProfile);
+    if (localStorage.getItem(targetAchievements) === null && Object.keys(legacyAchievements).length) {
+      safeStorageSet(localStorage, targetAchievements, JSON.stringify(legacyAchievements));
+    }
+    safeStorageSet(localStorage, claimedKey, accountId);
+  }
+  safeStorageSet(localStorage, migratedKey, "1");
 }
 
 function migrateLegacyWrongBook() {
-  const flag = `wrongBookMigrated:${profileStorageName(state.profile)}`;
+  const flag = `wrongBookMigrated:v${ACCOUNT_DATA_VERSION}:${accountStorageId()}:${profileStorageName(state.profile)}`;
   const legacy = loadJson("wrongBook", {});
   if (localStorage.getItem(flag) || !Object.keys(legacy).length) return;
 
   state.historyWrongBook = { ...legacy, ...state.historyWrongBook };
-  localStorage.setItem(flag, "1");
+  safeStorageSet(localStorage, flag, "1");
   localStorage.removeItem("wrongBook");
 }
 
+function loadAccountLocalState() {
+  if (!state.account?.id) return;
+  migrateLegacyAccountData();
+  state.profile = sanitizeProfile(localStorage.getItem(accountProfileKey()) || DEFAULT_PROFILE);
+  if ($("profileInput")) $("profileInput").value = state.profile;
+  loadWrongBooks();
+  loadAchievements();
+}
+
+function resetLocalViewState() {
+  state.profile = DEFAULT_PROFILE;
+  state.currentWrongBook = {};
+  state.historyWrongBook = {};
+  state.achievements = {};
+  state.words = [];
+  state.index = 0;
+  state.score = 0;
+  state.roundSkipped = 0;
+  state.lastRound = null;
+  state.quizSession = "";
+  state.roundActive = false;
+  state.answerLocked = false;
+  if ($("profileInput")) $("profileInput").value = state.profile;
+}
+
 function loadWrongBooks() {
+  if (!state.account?.id) {
+    state.currentWrongBook = {};
+    state.historyWrongBook = {};
+    return;
+  }
   state.currentWrongBook = sanitizeWrongBook(loadJson(wrongBookKey("current"), {}));
   state.historyWrongBook = sanitizeWrongBook(loadJson(wrongBookKey("history"), {}));
   migrateLegacyWrongBook();
 }
 
 function saveWrongBooks() {
-  localStorage.setItem(wrongBookKey("current"), JSON.stringify(state.currentWrongBook));
-  localStorage.setItem(wrongBookKey("history"), JSON.stringify(state.historyWrongBook));
+  if (!state.account?.id) return;
+  safeStorageSet(localStorage, wrongBookKey("current"), JSON.stringify(state.currentWrongBook));
+  safeStorageSet(localStorage, wrongBookKey("history"), JSON.stringify(state.historyWrongBook));
 }
 
 function loadAchievements() {
+  if (!state.account?.id) {
+    state.achievements = {};
+    return;
+  }
   state.achievements = loadJson(achievementKey(), {});
 }
 
 function saveAchievements() {
-  localStorage.setItem(achievementKey(), JSON.stringify(state.achievements));
+  if (!state.account?.id) return;
+  safeStorageSet(localStorage, achievementKey(), JSON.stringify(state.achievements));
 }
 
 function loadProjectPreferences(language) {
@@ -329,23 +427,24 @@ function loadProjectPreferences(language) {
 
 function saveProjectPreferences() {
   if (!LANGUAGE_LABELS[state.quizLanguage]) return;
-  localStorage.setItem(`gradingMode:${state.quizLanguage}`, state.gradingMode);
-  localStorage.setItem(`practiceMode:${state.quizLanguage}`, state.practiceMode);
+  safeStorageSet(localStorage, `gradingMode:${state.quizLanguage}`, state.gradingMode);
+  safeStorageSet(localStorage, `practiceMode:${state.quizLanguage}`, state.practiceMode);
 }
 
 function saveState() {
-  localStorage.setItem("vocabAppVersion", APP_VERSION);
-  localStorage.setItem("vocabProfile", state.profile);
-  localStorage.setItem("gradingMode", state.gradingMode);
-  localStorage.setItem("practiceMode", state.practiceMode);
-  localStorage.setItem("quizLanguage", state.quizLanguage);
+  safeStorageSet(localStorage, "vocabAppVersion", APP_VERSION);
+  safeStorageSet(localStorage, "vocabProfile", state.profile);
+  if (state.account?.id) safeStorageSet(localStorage, accountProfileKey(), state.profile);
+  safeStorageSet(localStorage, "gradingMode", state.gradingMode);
+  safeStorageSet(localStorage, "practiceMode", state.practiceMode);
+  safeStorageSet(localStorage, "quizLanguage", state.quizLanguage);
   saveProjectPreferences();
   state.rubricCache = trimRubricCache(state.rubricCache);
-  localStorage.setItem("rubricCache", JSON.stringify(state.rubricCache));
+  safeStorageSet(localStorage, "rubricCache", JSON.stringify(state.rubricCache));
   state.japaneseReadings = sanitizeJapaneseReadings(state.japaneseReadings);
-  localStorage.setItem(JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
+  safeStorageSet(localStorage, JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
   state.japaneseWrittenForms = sanitizeJapaneseWrittenForms(state.japaneseWrittenForms);
-  localStorage.setItem(JAPANESE_WRITTEN_FORM_CACHE_KEY, JSON.stringify(state.japaneseWrittenForms));
+  safeStorageSet(localStorage, JAPANESE_WRITTEN_FORM_CACHE_KEY, JSON.stringify(state.japaneseWrittenForms));
   saveWrongBooks();
   saveAchievements();
 }
@@ -376,6 +475,7 @@ function clearSession() {
     const input = $(id);
     if (input) input.value = "";
   });
+  resetLocalViewState();
   renderAccountUi();
 }
 
@@ -395,9 +495,13 @@ function isSuperAdmin(account = state.account) {
 }
 
 function applyAccount(account) {
+  const previousAccountId = String(state.account?.id || "");
+  const nextAccountId = String(account?.id || "");
   state.account = account || null;
-  if (state.account) localStorage.setItem("wyjAccountCache", JSON.stringify(state.account));
+  if (state.account) safeStorageSet(localStorage, "wyjAccountCache", JSON.stringify(state.account));
   else localStorage.removeItem("wyjAccountCache");
+  if (state.account && previousAccountId !== nextAccountId) loadAccountLocalState();
+  if (!state.account && previousAccountId) resetLocalViewState();
   renderAccountUi();
   updateStats();
   updateAiSuggestionControls();
@@ -471,9 +575,13 @@ async function apiGet(path) {
 function openModal(id) {
   const modal = $(id);
   if (!modal) return;
+  if (!modalReturnFocus.has(id) && document.activeElement instanceof HTMLElement) {
+    modalReturnFocus.set(id, document.activeElement);
+  }
   modal.classList.remove("hidden", "is-closing");
   modal.setAttribute("aria-hidden", "false");
   document.body.classList.add("modal-open");
+  if ($("appShell")) $("appShell").inert = true;
   modal.querySelector("button, input, select")?.focus();
 }
 
@@ -484,7 +592,13 @@ function closeModal(id, immediate = false) {
     modal.classList.add("hidden");
     modal.classList.remove("is-closing");
     modal.setAttribute("aria-hidden", "true");
-    if (!document.querySelector(".modal-layer:not(.hidden)")) document.body.classList.remove("modal-open");
+    if (!document.querySelector(".modal-layer:not(.hidden)")) {
+      document.body.classList.remove("modal-open");
+      if ($("appShell")) $("appShell").inert = false;
+    }
+    const returnFocus = modalReturnFocus.get(id);
+    modalReturnFocus.delete(id);
+    if (returnFocus?.isConnected && !returnFocus.closest(".modal-layer.hidden")) returnFocus.focus();
   };
   if (immediate || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) finish();
   else {
@@ -616,10 +730,11 @@ async function deleteOwnAccount(event) {
   const button = $("confirmDeleteAccountBtn");
   button.disabled = true;
   try {
+    const deletedAccount = state.account;
     await api("/api/account/delete", { secret: $("deleteSecretInput").value });
     closeModal("deleteAccountModal", true);
     closeModal("accountModal", true);
-    clearSavedWordDrafts(state.account);
+    clearAccountLocalData(deletedAccount);
     clearSession();
     showProjectPicker();
     alert("账户已永久注销");
@@ -940,20 +1055,46 @@ function clearSavedWordDrafts(account = state.account) {
     if (legacySharedKey || (accountPrefix && key.startsWith(accountPrefix))) keysToRemove.push(key);
   }
   keysToRemove.forEach((key) => localStorage.removeItem(key));
+  ["english", "japanese"].forEach((language) => sessionStorage.removeItem(projectRuntimeKey(language, account)));
   projectRuntime.english = null;
   projectRuntime.japanese = null;
   projectRuntimeNeedsRestore = false;
   state.words = [];
   state.index = 0;
   state.score = 0;
+  state.roundSkipped = 0;
   state.quizSession = "";
+  state.roundActive = false;
+  state.answerLocked = false;
   if ($("wordInput")) $("wordInput").value = "";
+}
+
+function clearAccountLocalData(account = state.account) {
+  if (!account?.id) return;
+  const accountId = accountStorageId(account);
+  const localPrefixes = [
+    `vocabWords:${accountId}:`,
+    `wrongBook:v${ACCOUNT_DATA_VERSION}:${accountId}:`,
+    `achievements:v${ACCOUNT_DATA_VERSION}:${accountId}:`,
+  ];
+  const exactLocalKeys = [
+    `vocabProfile:v${ACCOUNT_DATA_VERSION}:${accountId}`,
+    `accountLocalDataMigrated:v${ACCOUNT_DATA_VERSION}:${accountId}`,
+  ];
+  const localKeys = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index) || "";
+    if (exactLocalKeys.includes(key) || localPrefixes.some((prefix) => key.startsWith(prefix))) localKeys.push(key);
+  }
+  localKeys.forEach((key) => localStorage.removeItem(key));
+  ["english", "japanese"].forEach((language) => sessionStorage.removeItem(projectRuntimeKey(language, account)));
+  clearSavedWordDrafts(account);
 }
 
 function saveCurrentWordDraft() {
   const input = $("wordInput");
   if (!input || !currentProject || !state.account) return;
-  localStorage.setItem(wordDraftKey(currentProject), input.value);
+  safeStorageSet(localStorage, wordDraftKey(currentProject), input.value);
 }
 
 function loadCurrentWordDraft() {
@@ -964,31 +1105,82 @@ function loadCurrentWordDraft() {
   if (currentProject === "japanese" && /[|｜=＝]/u.test(saved)) {
     const normalized = formatWordsForInput(parseWordText(saved));
     input.value = normalized;
-    localStorage.setItem(key, normalized);
+    safeStorageSet(localStorage, key, normalized);
     return;
   }
   input.value = saved;
 }
 
 function saveProjectRuntime() {
-  if (!currentProject) return;
-  projectRuntime[currentProject] = {
+  if (!currentProject || !state.account?.id) return;
+  const runtime = {
+    language: currentProject,
     words: [...state.words],
     index: state.index,
     score: state.score,
+    roundSkipped: state.roundSkipped,
+    quizSession: state.quizSession,
+    roundActive: state.roundActive,
+    answerLocked: state.answerLocked,
+    lastRound: state.lastRound,
     mode: state.mode,
     view: document.querySelector(".view.active")?.id || "setupView",
+    savedAt: Date.now(),
   };
+  projectRuntime[currentProject] = runtime;
+  safeStorageSet(sessionStorage, projectRuntimeKey(currentProject), JSON.stringify(runtime));
+}
+
+function loadProjectRuntime(language) {
+  if (projectRuntime[language]) return projectRuntime[language];
+  const key = projectRuntimeKey(language);
+  let runtime = null;
+  try {
+    runtime = JSON.parse(sessionStorage.getItem(key) || "null");
+  } catch (_) {
+    runtime = null;
+  }
+  const valid = runtime
+    && runtime.language === language
+    && Array.isArray(runtime.words)
+    && Number.isFinite(Number(runtime.savedAt))
+    && Date.now() - Number(runtime.savedAt) <= PROJECT_RUNTIME_MAX_AGE_MS;
+  if (!valid) {
+    sessionStorage.removeItem(key);
+    return null;
+  }
+  runtime.words = filterWordsByLanguage(runtime.words.map((word) => limitText(word, 240)), language).slice(0, 500);
+  runtime.index = Math.max(0, Math.min(Number.parseInt(runtime.index, 10) || 0, Math.max(0, runtime.words.length - 1)));
+  runtime.score = Math.max(0, Math.min(Number.parseInt(runtime.score, 10) || 0, runtime.words.length));
+  runtime.roundSkipped = Math.max(0, Math.min(Number.parseInt(runtime.roundSkipped, 10) || 0, runtime.words.length));
+  runtime.mode = ["normal", "review-current", "review-history"].includes(runtime.mode) ? runtime.mode : "normal";
+  runtime.view = ["setupView", "quizView", "wrongView", "achievementsView"].includes(runtime.view) ? runtime.view : "setupView";
+  runtime.quizSession = limitText(runtime.quizSession, 160);
+  runtime.roundActive = Boolean(runtime.roundActive && runtime.words.length);
+  runtime.answerLocked = Boolean(runtime.answerLocked && runtime.roundActive);
+  projectRuntime[language] = runtime;
+  return runtime;
+}
+
+function removeProjectRuntime(language = currentProject) {
+  if (!language) return;
+  projectRuntime[language] = null;
+  sessionStorage.removeItem(projectRuntimeKey(language));
 }
 
 function restoreProjectRuntime() {
   if (!currentProject || !projectRuntimeNeedsRestore) return;
   projectRuntimeNeedsRestore = false;
-  const runtime = projectRuntime[currentProject];
+  const runtime = loadProjectRuntime(currentProject);
   if (!runtime) {
     state.words = [];
     state.index = 0;
     state.score = 0;
+    state.roundSkipped = 0;
+    state.quizSession = "";
+    state.lastRound = null;
+    state.roundActive = false;
+    state.answerLocked = false;
     state.mode = "normal";
     setView("setupView");
     updateStats();
@@ -997,10 +1189,27 @@ function restoreProjectRuntime() {
   state.words = [...runtime.words];
   state.index = Math.min(runtime.index, Math.max(0, state.words.length - 1));
   state.score = runtime.score;
+  state.roundSkipped = runtime.roundSkipped;
+  state.quizSession = runtime.quizSession;
+  state.lastRound = runtime.lastRound || null;
+  state.roundActive = runtime.roundActive;
+  state.answerLocked = runtime.answerLocked;
   state.mode = runtime.mode;
-  const view = runtime.view === "quizView" && !state.words.length ? "setupView" : runtime.view;
+  const view = runtime.view === "quizView" && !state.roundActive ? "setupView" : runtime.view;
   setView(view);
-  if (view === "quizView" && state.words.length) showWord();
+  if (view === "quizView" && state.roundActive) {
+    if (state.answerLocked && state.index < state.words.length - 1) state.index += 1;
+    if (state.answerLocked && state.index >= state.words.length - 1 && runtime.index === state.words.length - 1) {
+      state.answerLocked = false;
+      const summary = finishRound();
+      setView(Object.keys(activeWrongBook("current")).length ? "wrongView" : "setupView");
+      showRoundSummary(summary);
+    } else {
+      state.answerLocked = false;
+      showWord();
+      saveProjectRuntime();
+    }
+  }
   updateStats();
 }
 
@@ -1102,6 +1311,7 @@ function enterProject(value) {
     saveProjectRuntime();
   }
   currentProject = language;
+  if ($("wrongSearchInput")) $("wrongSearchInput").value = "";
   state.quizLanguage = language;
   loadProjectPreferences(language);
   projectRuntimeNeedsRestore = true;
@@ -1180,7 +1390,7 @@ function saveAiSuggestionSettings() {
   const level = $("aiLevelSelect")?.value || "";
   const count = Number($("aiSuggestCount")?.value);
   const mode = $("aiSuggestMode")?.value === "append" ? "append" : "replace";
-  localStorage.setItem(aiSuggestionSettingsKey(), JSON.stringify({ level, count, mode }));
+  safeStorageSet(localStorage, aiSuggestionSettingsKey(), JSON.stringify({ level, count, mode }));
 }
 
 function updateAiSuggestionControls() {
@@ -1403,6 +1613,7 @@ async function api(path, body = {}, options = {}) {
 }
 
 function setView(id) {
+  if (id === "quizView" && !state.roundActive) id = "setupView";
   const leavingQuiz = id !== "quizView" && $("quizView")?.classList.contains("active");
   if (leavingQuiz) {
     if (judgeController) judgeController.abort();
@@ -1414,14 +1625,16 @@ function setView(id) {
   document.querySelectorAll(".tabs button").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === id));
   if (id === "wrongView") renderWrongBook();
   if (id === "achievementsView") renderAchievements();
+  if (currentProject && state.roundActive) saveProjectRuntime();
 }
 
 function updateStats() {
-  const parsedWords = parseWords();
-  const eligibleWords = state.quizLanguage ? filterWordsByLanguage(parsedWords, state.quizLanguage) : parsedWords;
+  const analysis = analyzeWordList(parseWords(), state.quizLanguage);
+  const eligibleWords = analysis.valid;
   $("statWords").textContent = eligibleWords.length || state.words.length;
   $("statWrong").textContent = Object.keys(activeWrongBook("current")).length;
   $("statScore").textContent = state.score;
+  if ($("scoreLabel") && state.roundActive) $("scoreLabel").textContent = `得分 ${state.score}`;
   const limit = accountWordLimit(state.quizLanguage);
   const exceeded = Number.isFinite(limit) && eligibleWords.length > limit;
   $("wordInput")?.classList.toggle("limit-exceeded", exceeded);
@@ -1429,6 +1642,22 @@ function updateStats() {
     $("wordLimitHint").textContent = Number.isFinite(limit)
       ? `当前账户每次最多测试 ${limit} 个单词${exceeded ? "，请开通会员后继续" : ""}`
       : "当前语言不限单次测试数量";
+  }
+  if ($("wordQualityHint")) {
+    const ignored = [];
+    if (analysis.duplicates) ignored.push(`${analysis.duplicates} 个重复词`);
+    if (analysis.invalid.length) ignored.push(`${analysis.invalid.length} 个其他语言或无效词`);
+    $("wordQualityHint").textContent = storageWriteFailed
+      ? "浏览器存储空间不足，本次更改可能无法在刷新后保留"
+      : ignored.length
+        ? `可测试 ${eligibleWords.length} 个，开始时将忽略${ignored.join("、")}`
+        : eligibleWords.length ? `已识别 ${eligibleWords.length} 个可测试词` : "";
+    $("wordQualityHint").classList.toggle("has-warning", storageWriteFailed || ignored.length > 0);
+  }
+  const quizTab = document.querySelector('[data-view="quizView"]');
+  if (quizTab) {
+    quizTab.disabled = !state.roundActive;
+    quizTab.title = state.roundActive ? "继续当前测试" : "尚未开始测试";
   }
   updateSetupActionState();
   const promptKey = `${state.quizLanguage}:${eligibleWords.length}`;
@@ -1440,15 +1669,29 @@ function updateStats() {
 
 function setBusy(busy) {
   state.busy = busy;
-  ["submitBtn", "skipBtn", "reviewBtn", "reviewHistoryBtn", "speakBtn"].forEach((id) => {
+  ["reviewBtn", "reviewHistoryBtn"].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = busy;
   });
+  updateQuestionControls();
   updateSetupActionState();
 }
 
+function updateQuestionControls() {
+  const disabled = state.busy || state.answerLocked || !state.roundActive;
+  ["submitBtn", "skipBtn", "speakBtn", "answerInput"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = disabled;
+  });
+}
+
+function setAnswerLocked(locked) {
+  state.answerLocked = Boolean(locked);
+  updateQuestionControls();
+}
+
 function updateSetupActionState() {
-  const wordCount = parseWords().length;
+  const wordCount = analyzeWordList(parseWords(), state.quizLanguage).valid.length;
   if ($("startBtn")) $("startBtn").disabled = state.busy || wordCount === 0;
   if ($("shuffleBtn")) $("shuffleBtn").disabled = state.busy || wordCount < 2;
   if ($("clearBtn")) $("clearBtn").disabled = state.busy || wordCount === 0;
@@ -1547,8 +1790,8 @@ function rememberJapaneseVocabularyData(readings, writtenForms = {}, persist = t
     });
   }
   if (persist) {
-    localStorage.setItem(JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
-    localStorage.setItem(JAPANESE_WRITTEN_FORM_CACHE_KEY, JSON.stringify(state.japaneseWrittenForms));
+    safeStorageSet(localStorage, JAPANESE_READING_CACHE_KEY, JSON.stringify(state.japaneseReadings));
+    safeStorageSet(localStorage, JAPANESE_WRITTEN_FORM_CACHE_KEY, JSON.stringify(state.japaneseWrittenForms));
   }
 }
 
@@ -1763,6 +2006,34 @@ function parseWords() {
   return parseWordText($("wordInput").value);
 }
 
+function wordIdentity(word, language = state.quizLanguage) {
+  const normalized = String(word || "").normalize("NFKC").trim();
+  return language === "english" ? normalized.toLocaleLowerCase("en") : normalized;
+}
+
+function analyzeWordList(words, language = state.quizLanguage) {
+  const valid = [];
+  const invalid = [];
+  const seen = new Set();
+  let duplicates = 0;
+  (Array.isArray(words) ? words : []).forEach((item) => {
+    const word = limitText(item, 240);
+    if (!word) return;
+    if (language && !wordMatchesLanguage(word, language)) {
+      invalid.push(word);
+      return;
+    }
+    const key = wordIdentity(word, language);
+    if (seen.has(key)) {
+      duplicates += 1;
+      return;
+    }
+    seen.add(key);
+    valid.push(word);
+  });
+  return { valid, invalid, duplicates };
+}
+
 function formatWordInputEntry(word) {
   return word;
 }
@@ -1798,8 +2069,8 @@ async function generateAiVocabulary() {
   const count = Number($("aiSuggestCount").value);
   const mode = $("aiSuggestMode").value;
   const maxCount = Number($("aiSuggestCount").max || 200);
-  const baseWords = mode === "append" ? parseWords() : [];
-  const existingLanguageWords = filterWordsByLanguage(baseWords, language);
+  const baseWords = mode === "append" ? analyzeWordList(parseWords(), language).valid : [];
+  const existingLanguageWords = baseWords;
   if (!Number.isInteger(count) || count < 1 || count > maxCount) {
     message.textContent = `请输入 1 至 ${maxCount} 之间的整数`;
     message.classList.add("error");
@@ -1829,9 +2100,9 @@ async function generateAiVocabulary() {
     rememberJapaneseVocabularyData(data.readings || {}, data.written_forms || {});
     const generated = filterWordsByLanguage(data.words || [], language);
     if (!generated.length) throw new Error("没有生成可用词汇，请重试");
-    const existingKeys = new Set(baseWords.map((word) => word.toLocaleLowerCase()));
+    const existingKeys = new Set(baseWords.map((word) => wordIdentity(word, language)));
     const added = generated.filter((word) => {
-      const key = word.toLocaleLowerCase();
+      const key = wordIdentity(word, language);
       if (existingKeys.has(key)) return false;
       existingKeys.add(key);
       return true;
@@ -1902,9 +2173,16 @@ async function ensureJapaneseDictationReadings(words) {
   return true;
 }
 
-async function startQuiz(words, mode = "normal") {
+async function startQuiz(words, mode = "normal", options = {}) {
   const language = ensureQuizLanguage();
   if (!language) return;
+
+  if (state.roundActive && !options.replaceActive) {
+    askConfirmation("当前测试尚未完成，确认放弃当前进度并开始新一轮？", () => (
+      startQuiz(words, mode, { replaceActive: true })
+    ));
+    return;
+  }
 
   if (mode === "normal" && (!backendAvailable || !state.session)) {
     if (backendAvailable) {
@@ -1924,17 +2202,18 @@ async function startQuiz(words, mode = "normal") {
     return;
   }
 
-  const uniqueWords = [...new Set(words.map((word) => String(word).trim()).filter(Boolean))];
-  if (!uniqueWords.length) return;
-
-  const quizWords = filterWordsByLanguage(uniqueWords, language);
-  const excludedCount = uniqueWords.length - quizWords.length;
+  const analysis = analyzeWordList(words, language);
+  const quizWords = analysis.valid;
+  const excludedCount = analysis.invalid.length;
   if (!quizWords.length) {
     alert(`当前选择的是${quizLanguageLabel(language)}，词表里没有可测试的${quizLanguageLabel(language)}词。`);
     return;
   }
-  if (excludedCount > 0) {
-    alert(`已按${quizLanguageLabel(language)}模式排除 ${excludedCount} 个其他语言的词。`);
+  if (excludedCount > 0 || analysis.duplicates > 0) {
+    const ignored = [];
+    if (excludedCount) ignored.push(`${excludedCount} 个其他语言或无效词`);
+    if (analysis.duplicates) ignored.push(`${analysis.duplicates} 个重复词`);
+    alert(`已按${quizLanguageLabel(language)}模式忽略${ignored.join("、")}。`);
   }
 
   state.quizSession = "";
@@ -1971,12 +2250,16 @@ async function startQuiz(words, mode = "normal") {
   state.roundSkipped = 0;
   state.lastRound = null;
   state.mode = mode;
+  state.roundActive = true;
+  state.answerLocked = false;
   updateStats();
   setView("quizView");
   showWord();
+  saveProjectRuntime();
 }
 
 function showWord() {
+  if (!state.roundActive) return;
   const word = state.words[state.index] || "-";
   const dictation = isDictationMode();
   $("wordLabel").textContent = dictation ? "听写" : word;
@@ -1994,6 +2277,7 @@ function showWord() {
       : "输入听到的单词"
     : "中文意思";
   clearAnswerValidation();
+  setAnswerLocked(false);
   $("speakBtn").classList.toggle("hidden", !dictation);
   hideResultPanel();
   clearNextTimer();
@@ -2005,6 +2289,7 @@ function showWord() {
 
 function updateWrongEntry(book, word, answer, gloss, accepted) {
   const current = book[word] || { wrong_count: 0 };
+  delete book[word];
   book[word] = {
     wrong_count: (current.wrong_count || 0) + 1,
     last_answer: answer,
@@ -2094,11 +2379,14 @@ function showAnswerValidation() {
 }
 
 function nextWord() {
+  if (!state.roundActive) return;
   clearNextTimer();
+  setAnswerLocked(false);
   setNextNowEnabled(false);
   if (state.index < state.words.length - 1) {
     state.index += 1;
     showWord();
+    saveProjectRuntime();
   } else {
     const summary = finishRound();
     const hasWrong = Object.keys(activeWrongBook("current")).length > 0;
@@ -2124,6 +2412,8 @@ function finishRound() {
     practiceMode: state.practiceMode,
   };
   state.lastRound = summary;
+  state.roundActive = false;
+  state.answerLocked = false;
   if (state.score === state.words.length) unlockAchievement("perfectRound");
   if (state.words.length >= 20) unlockAchievement("longRound");
   if (state.mode === "normal") {
@@ -2131,6 +2421,8 @@ function finishRound() {
     if (state.practiceMode === "dictation") unlockAchievement("firstDictation");
   }
   state.quizSession = "";
+  removeProjectRuntime();
+  updateQuestionControls();
   return summary;
 }
 
@@ -2155,25 +2447,23 @@ async function retryLastRound() {
 }
 
 function skipWord() {
-  if (state.busy) return;
-  if (nextTimer) {
-    nextWord();
-    return;
-  }
+  if (state.busy || state.answerLocked || !state.roundActive) return;
 
   const word = state.words[state.index];
   if (!word) return;
   state.roundSkipped += 1;
   const rubric = cachedRubric(word);
   markWrong(word, SKIPPED_ANSWER, rubric && rubric.gloss ? rubric.gloss : "跳过：未作答", rubric && rubric.accepted ? rubric.accepted : []);
+  setAnswerLocked(true);
   renderSkipResult();
   updateStats();
+  saveProjectRuntime();
   scheduleNext(SKIP_RESULT_VISIBLE_MS);
 }
 
 async function submitAnswer(event) {
   event.preventDefault();
-  if (state.busy) return;
+  if (state.busy || state.answerLocked || !state.roundActive) return;
   const word = state.words[state.index];
   const answer = $("answerInput").value.trim();
   if (!word) return;
@@ -2196,6 +2486,7 @@ async function submitAnswer(event) {
       markWrong(word, answer, evaluation.expected, [evaluation.expected]);
     }
     saveState();
+    setAnswerLocked(true);
     renderResult({
       correct: evaluation.correct,
       gloss: evaluation.expected,
@@ -2203,6 +2494,7 @@ async function submitAnswer(event) {
       kind: "dictation",
     });
     updateStats();
+    saveProjectRuntime();
     scheduleNext(NORMAL_RESULT_VISIBLE_MS);
     return;
   }
@@ -2244,8 +2536,10 @@ async function submitAnswer(event) {
         markWrong(word, answer, result.gloss, result.accepted);
       }
       saveState();
+      setAnswerLocked(true);
       renderResult(result);
       updateStats();
+      saveProjectRuntime();
       scheduleNext(NORMAL_RESULT_VISIBLE_MS);
     } catch (error) {
       $("resultPanel").classList.remove("grading", "ai-review", "hidden");
@@ -2293,15 +2587,21 @@ async function submitAnswer(event) {
     }
 
     saveState();
+    setAnswerLocked(true);
     renderResult(result);
     updateStats();
+    saveProjectRuntime();
     scheduleNext(resultVisibleMs(result));
   } catch (error) {
-    $("resultPanel").classList.remove("grading", "ai-review");
-    $("resultTitle").className = "result-title bad";
-    $("resultTitle").textContent = "判卷失败";
-    $("resultGloss").textContent = error.message;
-    scheduleResultHide();
+    if (error.name === "AbortError") {
+      hideResultPanel();
+    } else {
+      $("resultPanel").classList.remove("grading", "ai-review");
+      $("resultTitle").className = "result-title bad";
+      $("resultTitle").textContent = "判卷失败";
+      $("resultGloss").textContent = error.message;
+      scheduleResultHide();
+    }
   } finally {
     judgeController = null;
     $("cancelJudgeBtn").classList.add("hidden");
@@ -2330,13 +2630,18 @@ function renderWrongBook() {
   });
   const scope = state.wrongScope;
   const book = activeWrongBook(scope);
-  const entries = Object.entries(book).sort((a, b) => (b[1].wrong_count || 0) - (a[1].wrong_count || 0));
-  $("wrongScopeLabel").textContent = `${state.profile} · ${scope === "history" ? "历史错题" : "本轮错题"} · ${entries.length} 个`;
+  const query = normalizeMeaning($("wrongSearchInput")?.value || "");
+  const allEntries = Object.entries(book).sort((a, b) => (b[1].wrong_count || 0) - (a[1].wrong_count || 0));
+  const entries = query ? allEntries.filter(([word, info]) => (
+    [word, info.last_answer, info.correct_answer, ...(info.accepted || [])]
+      .some((value) => normalizeMeaning(value).includes(query))
+  )) : allEntries;
+  $("wrongScopeLabel").textContent = `${state.profile} · ${scope === "history" ? "历史错题" : "本轮错题"} · ${allEntries.length} 个${query ? ` · 显示 ${entries.length} 个` : ""}`;
 
   if (!entries.length) {
     const empty = document.createElement("p");
     empty.className = "error";
-    empty.textContent = scope === "history" ? "历史错题为空" : "本轮还没有错题";
+    empty.textContent = query ? "没有匹配的错题" : scope === "history" ? "历史错题为空" : "本轮还没有错题";
     list.appendChild(empty);
     updateStats();
     return;
@@ -2350,6 +2655,14 @@ function renderWrongBook() {
       ? `跳过 · ${info.correct_answer || "未作答"}`
       : `你答：${info.last_answer || ""} · 标准：${info.correct_answer || ""}`;
     node.querySelector("strong").textContent = `${info.wrong_count || 0}次`;
+    node.querySelector("button").addEventListener("click", () => {
+      askConfirmation(`确认从${scope === "history" ? "历史" : "本轮"}错题中移除“${word}”？`, () => {
+        const target = scope === "history" ? state.historyWrongBook : state.currentWrongBook;
+        delete target[word];
+        saveState();
+        renderWrongBook();
+      });
+    });
     list.appendChild(node);
   });
   updateStats();
@@ -2515,7 +2828,7 @@ function downloadText(filename, text, type = "text/plain;charset=utf-8") {
 }
 
 function exportWords() {
-  const words = parseWords();
+  const words = analyzeWordList(parseWords(), state.quizLanguage).valid;
   if (!words.length) return;
   downloadText(`vocab-words-${Date.now()}.txt`, formatWordsForInput(words));
 }
@@ -2563,16 +2876,26 @@ function parseImportedWords(text) {
 async function importWords(event) {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
-  const text = await file.text();
-  const words = parseImportedWords(text);
-  if (words.length) {
-    $("wordInput").value = formatWordsForInput([...new Set(words)]);
-    saveCurrentWordDraft();
-    updateStats();
-  } else {
-    alert("没有识别到词表");
+  try {
+    if (file.size > MAX_WORD_IMPORT_BYTES) throw new Error("词表文件不能超过 1 MB");
+    const text = await file.text();
+    if (text.length > MAX_WORD_INPUT_CHARS) throw new Error("词表内容过长，请分成多个文件导入");
+    const analysis = analyzeWordList(parseImportedWords(text), state.quizLanguage);
+    if (analysis.valid.length) {
+      $("wordInput").value = formatWordsForInput(analysis.valid);
+      saveCurrentWordDraft();
+      updateStats();
+      if (analysis.invalid.length || analysis.duplicates) {
+        alert(`词表已导入，并忽略 ${analysis.invalid.length} 个无效词、${analysis.duplicates} 个重复词。`);
+      }
+    } else {
+      throw new Error(`没有识别到可用于${quizLanguageLabel(state.quizLanguage)}测试的词`);
+    }
+  } catch (error) {
+    alert(`词表导入失败：${error.message}`);
+  } finally {
+    event.target.value = "";
   }
-  event.target.value = "";
 }
 
 function changeProfile(value) {
@@ -2606,7 +2929,7 @@ async function login(event) {
       secret: $("secretInput").value,
     });
     state.session = data.session;
-    localStorage.setItem("wyjAccountSession", state.session);
+    safeStorageSet(localStorage, "wyjAccountSession", state.session);
     applyAccount(data.account);
     $("secretInput").value = "";
     clearSavedWordDrafts(data.account);
@@ -2623,7 +2946,7 @@ async function login(event) {
   }
 }
 
-async function refreshBackendState() {
+async function performBackendRefresh() {
   try {
     const data = await checkBackendStatus();
     applyBackendStatus(data);
@@ -2671,9 +2994,18 @@ async function refreshBackendState() {
   applyPendingScreen();
 }
 
+function refreshBackendState() {
+  if (!backendRefreshPromise) {
+    backendRefreshPromise = performBackendRefresh().finally(() => {
+      backendRefreshPromise = null;
+    });
+  }
+  return backendRefreshPromise;
+}
+
 async function boot() {
-  loadWrongBooks();
-  loadAchievements();
+  if (state.account?.id) loadAccountLocalState();
+  else resetLocalViewState();
   state.quizLanguage = "";
 
   $("profileInput").value = state.profile;
@@ -2752,7 +3084,7 @@ async function boot() {
     $(id).addEventListener("change", saveAiSuggestionSettings);
   });
   $("shuffleBtn").addEventListener("click", () => {
-    $("wordInput").value = formatWordsForInput(shuffle(parseWords()));
+    $("wordInput").value = formatWordsForInput(shuffle(analyzeWordList(parseWords(), state.quizLanguage).valid));
     saveCurrentWordDraft();
     updateStats();
   });
@@ -2778,6 +3110,7 @@ async function boot() {
   $("clearHistoryBtn").addEventListener("click", () => confirmClearWrongBook("history"));
   $("currentWrongTab").addEventListener("click", () => setWrongScope("current"));
   $("historyWrongTab").addEventListener("click", () => setWrongScope("history"));
+  $("wrongSearchInput").addEventListener("input", renderWrongBook);
   $("wordInput").addEventListener("input", () => {
     saveCurrentWordDraft();
     updateStats();
@@ -2808,8 +3141,11 @@ async function boot() {
   }
   window.addEventListener("online", () => refreshBackendState());
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && !backendAvailable) refreshBackendState();
+    if (document.visibilityState === "visible" && (state.session || !backendAvailable)) refreshBackendState();
   });
+  window.setInterval(() => {
+    if (document.visibilityState === "visible" && navigator.onLine !== false) refreshBackendState();
+  }, BACKEND_REFRESH_INTERVAL_MS);
 
   const backendPromise = refreshBackendState();
   if (state.session && state.account) showProjectPicker();

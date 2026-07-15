@@ -15,6 +15,7 @@ MEMBERSHIPS = {"free", "trial_single_language", "monthly", "lifetime"}
 LANGUAGES = {"english", "japanese"}
 RECHARGE_PLANS = {"trial_single_language", "monthly", "lifetime"}
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+MAX_SESSIONS_PER_USER = 12
 
 
 def utc_now():
@@ -389,11 +390,22 @@ class AccountStore:
         now = iso_now()
         token = secrets.token_urlsafe(32)
         with self.lock, self.connect() as connection:
+            cutoff = (utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)).isoformat().replace("+00:00", "Z")
+            connection.execute("DELETE FROM sessions WHERE last_seen_at < ?", (cutoff,))
             connection.execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now, now, row["id"]))
             current = connection.execute("SELECT session_version FROM users WHERE id = ?", (row["id"],)).fetchone()
             connection.execute(
                 "INSERT INTO sessions (token, user_id, session_version, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
                 (token, row["id"], current["session_version"], now, now),
+            )
+            connection.execute(
+                """
+                DELETE FROM sessions WHERE token IN (
+                    SELECT token FROM sessions WHERE user_id = ?
+                    ORDER BY rowid DESC LIMIT -1 OFFSET ?
+                )
+                """,
+                (row["id"], MAX_SESSIONS_PER_USER),
             )
         self._sync_after_write()
         return token, self.get_user(row["id"])

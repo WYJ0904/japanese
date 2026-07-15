@@ -36,7 +36,7 @@
 - `registered_at` / `last_login_at` / `created_at` / `updated_at`
 - `banned` / `permanent_ban` / `deleted` / `ban_reason`
 
-`sessions` 表保存 7 天有效的持久登录会话；改密钥、封禁、强制退出或删除账户会立即删除相应会话。
+`sessions` 表保存 7 天有效的持久登录会话；每个账户最多保留最近 12 个有效会话，登录时会清理过期和超额记录。改密钥、封禁、强制退出或删除账户会立即删除相应会话。
 
 `recharge_requests` 表保存套餐、体验语言、申请时间、处理状态和管理员处理记录。同一用户同时只能有一条待处理申请，选择套餐不会自动开通会员。
 
@@ -49,6 +49,10 @@
 管理员编辑会员时，开始和截止日期可按 `年/月/日` 输入，分隔符支持 `/`、`.`、`。` 和空格。开始日期会采用管理员点击保存时的本地时、分、秒；截止日期固定保存为所选日期当天 `23:59:59`。数据库中仍统一存储为 UTC ISO 时间，旧数据格式保持兼容。
 
 每轮练习结束后会显示总题数、正确、错误、跳过和正确率，用户可直接再练一轮、查看错题或返回词表；完成类成就只在整轮真正结束后解锁。管理员用户页支持按用户名或用户 ID 即时搜索，并显示当前匹配数量，用户较多时无需逐张卡片查找。
+
+答题提交后会立即锁定本题，避免双击、回车连按或慢网络造成重复计分。刷新页面可在 100 分钟内恢复当前账户、当前语言尚未完成的测试；已经判完的题会安全前进，不会重复写入分数或错题。若用户尝试在上一轮未完成时开始新测试，界面会先确认是否放弃当前进度。
+
+词表开始、打乱、导入、导出和 AI 追加都会统一过滤空行、重复词及不属于当前语言的词，并在词表下方显示可测试数量和忽略原因。单个导入文件最大 1 MB，文本长度最多 120,000 个字符。错题页支持按单词、用户答案或标准释义搜索和逐条移除；每个错题范围保留最近 250 条，防止浏览器和同步数据无限增长。
 
 ## 数据文件
 
@@ -67,7 +71,9 @@ users.txt
 
 `users.txt` 先写临时文件，再使用 `os.replace` 原子替换。数据库提交成功但 TXT 同步失败时，API 会明确返回“数据库已保存但 TXT 同步失败”，不会向界面伪报成功。以上文件不在 `static` 中，也已被 `.gitignore` 排除，不能通过网站 URL 下载。
 
-浏览器中的错题、成就、设置和会话继续保存在原有 `localStorage` / `sessionStorage` 键中。待测试词表使用账户 ID、语言和使用者名称隔离；每次重新登录、退出或注销账户时会清除待测试词表以及旧版共享词表键，避免上一次登录留下的单词再次出现。错题、成就和设置不会随之清除。
+浏览器中的错题、成就、设置和会话继续使用 `localStorage` / `sessionStorage`。待测试词表使用账户 ID、语言和使用者名称隔离；每次重新登录、退出或注销账户时会清除待测试词表以及旧版共享词表键，避免上一次登录留下的单词再次出现。错题、成就和设置不会随之清除。
+
+错题、成就和当前使用者现在也按账户隔离，主要键为 `vocabProfile:v2:<accountId>`、`wrongBook:v2:<accountId>:<scope>:<profile>` 和 `achievements:v2:<accountId>:<profile>`。未完成测试保存在会话级键 `vocabRuntime:v1:<accountId>:<language>` 中。首次升级时，旧版共享数据只会由第一个实际登录的账户认领并迁移一次，其他账户不会看到它；旧数据结构本身不作改写。
 
 英语和日语的判卷方式、练习方式与 AI 选词选项分别保存在新增的 `gradingMode:english|japanese`、`practiceMode:english|japanese` 和 `aiSuggestSettings:english|japanese` 键中。日语读音和常用汉字词形分别保存在 `japaneseReadingCache:v1` 与 `japaneseWrittenFormCache:v1` 中；它们是独立的可再生成缓存，不改变旧词表或错题结构。首次升级会从旧版共享设置迁移一份初始值，之后两个项目互不串台；原有键仍保留用于向旧版本兼容。登录成功和退出登录都会清空页面中的明文密钥输入框。
 
@@ -109,7 +115,7 @@ users.txt
 C:\Users\78252\Desktop\编程\背单词网站\启动WYJ网站.cmd
 ```
 
-启动器会同步仓库中的 `local-backend/server.py` 和 `account_store.py`，检查并启动 Ollama、本地后端和 Cloudflare Tunnel，最后打开 `https://thewyj.uk`。它不会创建 Windows 启动文件夹快捷方式。
+启动器会同步仓库中的 `local-backend/server.py` 和 `account_store.py`，检查并启动 Ollama、本地后端和 Cloudflare Tunnel，最后打开 `https://thewyj.uk`。Ollama 暂时启动失败时会显示警告，但不会阻止登录、词表、错题等非 AI 功能和公网 Tunnel 上线。它不会创建 Windows 启动文件夹快捷方式。
 
 桌面目录只保留这个手动启动入口；不创建开机自启动项，也不再放置测试或排错程序。
 
@@ -146,6 +152,8 @@ cd local-backend
 python -m py_compile account_store.py server.py test_accounts.py test_api.py
 python -m unittest -v test_accounts.py test_api.py
 ```
+
+当前自动化共包含 38 个后端测试，覆盖账户、会员、会话裁剪、注册限流、错题保留、Ollama 状态缓存、并发状态请求和主要 API。浏览器自动化另行覆盖启动动画、登录注册、管理员、英语/日语、释义/听写、错题导入导出、PDF、PWA 离线和手机窄屏。
 
 前端语法检查：
 

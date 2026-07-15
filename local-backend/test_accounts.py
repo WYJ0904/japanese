@@ -6,6 +6,7 @@ from pathlib import Path
 
 from account_store import (
     ADMIN_SECRET,
+    MAX_SESSIONS_PER_USER,
     AccountError,
     AccountStore,
     iso_now,
@@ -88,6 +89,15 @@ class AccountStoreTests(unittest.TestCase):
         self.assertIsNotNone(self.store.resolve_session(token))
         with self.assertRaises(AccountError):
             self.store.login("user001", "WRONG")
+
+    def test_login_prunes_old_and_excess_sessions(self):
+        user = self.register()
+        tokens = [self.store.login("user001", "ABC123")[0] for _ in range(MAX_SESSIONS_PER_USER + 4)]
+        with self.store.connect() as connection:
+            count = connection.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (user["id"],)).fetchone()[0]
+        self.assertEqual(count, MAX_SESSIONS_PER_USER)
+        self.assertIsNone(self.store.resolve_session(tokens[0]))
+        self.assertIsNotNone(self.store.resolve_session(tokens[-1]))
 
     def test_free_limit_allows_15_and_blocks_16(self):
         user = self.register()

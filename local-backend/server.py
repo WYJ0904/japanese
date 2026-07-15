@@ -30,7 +30,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-14-vocab2"
+APP_BUILD = "2026-07-15-quality1"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -38,6 +38,8 @@ MAX_RUBRIC_TEXT_LEN = 500
 MAX_WRONG_BOOK_ITEMS = 250
 LOGIN_WINDOW_SEC = 300
 LOGIN_MAX_FAILURES = 8
+REGISTER_WINDOW_SEC = 10 * 60
+REGISTER_MAX_ATTEMPTS = 20
 SESSION_TTL_SEC = int(os.environ.get("VOCAB_SESSION_TTL_SEC", str(12 * 60 * 60)))
 SESSION_MAX_ITEMS = max(10, int(os.environ.get("VOCAB_SESSION_MAX_ITEMS", "100")))
 
@@ -55,10 +57,14 @@ OLLAMA_OPTIONS = {
 
 SESSIONS = {}
 LOGIN_FAILURES = {}
+REGISTER_ATTEMPTS = {}
 QUIZ_RUNS = {}
 VOCABULARY_SOURCE_CACHE = {}
 STATE_LOCK = threading.RLock()
 AI_SEMAPHORE = threading.BoundedSemaphore(AI_MAX_CONCURRENCY)
+OLLAMA_READY_LOCK = threading.Lock()
+OLLAMA_READY_CACHE = {"checked_at": 0.0, "value": False}
+OLLAMA_READY_CACHE_TTL_SEC = 3.0
 QUIZ_RUN_TTL_SEC = 2 * 60 * 60
 MAX_QUIZ_WORDS = 500
 MAX_SUGGESTED_WORDS = 200
@@ -283,6 +289,20 @@ def clear_login_failures(handler):
         LOGIN_FAILURES.pop(request_client_key(handler), None)
 
 
+def register_limited(handler, record=False):
+    key = request_client_key(handler)
+    now = time.time()
+    with STATE_LOCK:
+        active = [item for item in REGISTER_ATTEMPTS.get(key, []) if now - item < REGISTER_WINDOW_SEC]
+        if record:
+            active.append(now)
+        if active:
+            REGISTER_ATTEMPTS[key] = active
+        else:
+            REGISTER_ATTEMPTS.pop(key, None)
+        return len(active) >= REGISTER_MAX_ATTEMPTS
+
+
 def normalize_cn(value):
     if not value:
         return ""
@@ -361,7 +381,7 @@ def sanitize_wrong_book(value):
     if not isinstance(value, dict):
         return {}
     cleaned = {}
-    for word, info in list(value.items())[:MAX_WRONG_BOOK_ITEMS]:
+    for word, info in list(value.items())[-MAX_WRONG_BOOK_ITEMS:]:
         if not isinstance(info, dict):
             continue
         key = limit_text(word, MAX_TEXT_LEN)
@@ -651,14 +671,23 @@ def decode_http_body(raw):
     return raw.decode("utf-8", errors="replace")
 
 
-def ollama_is_ready():
-    request = urllib.request.Request(f"{OLLAMA_HOST}/api/tags", method="GET")
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=2) as response:
-            return 200 <= response.status < 300
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
+def ollama_is_ready(force=False):
+    now = time.monotonic()
+    if not force and now - OLLAMA_READY_CACHE["checked_at"] < OLLAMA_READY_CACHE_TTL_SEC:
+        return OLLAMA_READY_CACHE["value"]
+    with OLLAMA_READY_LOCK:
+        now = time.monotonic()
+        if not force and now - OLLAMA_READY_CACHE["checked_at"] < OLLAMA_READY_CACHE_TTL_SEC:
+            return OLLAMA_READY_CACHE["value"]
+        request = urllib.request.Request(f"{OLLAMA_HOST}/api/tags", method="GET")
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=2) as response:
+                value = 200 <= response.status < 300
+        except (urllib.error.URLError, TimeoutError, OSError):
+            value = False
+        OLLAMA_READY_CACHE.update({"checked_at": time.monotonic(), "value": value})
+        return value
 
 
 def log_error(exc):
@@ -1824,6 +1853,14 @@ class VocabHandler(BaseHTTPRequestHandler):
             request_path = urllib.parse.urlsplit(self.path).path
 
             if request_path == "/api/register":
+                if register_limited(self):
+                    json_response(
+                        self,
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        {"error": "注册请求过于频繁，请稍后再试", "code": "register_rate_limited"},
+                    )
+                    return
+                register_limited(self, record=True)
                 payload = self.read_json()
                 if str(payload.get("secret", "")) != str(payload.get("confirm_secret", "")):
                     raise AccountError("两次输入的登录密钥不一致", 400, "secret_mismatch")
@@ -1837,7 +1874,11 @@ class VocabHandler(BaseHTTPRequestHandler):
 
             if request_path == "/api/login":
                 if login_limited(self):
-                    json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {"error": "too many login attempts; try later"})
+                    json_response(
+                        self,
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        {"error": "登录失败次数过多，请稍后再试", "code": "login_rate_limited"},
+                    )
                     return
                 payload = self.read_json()
                 try:

@@ -1,10 +1,10 @@
-const CACHE = "wyj-shell-20260714-ux6";
+const CACHE = "wyj-shell-20260715-ux7";
 const CORE_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260714-ux6",
-  "/app.js?v=20260714-ux6",
-  "/manifest.webmanifest?v=20260714-ux6",
+  "/styles.css?v=20260715-ux7",
+  "/app.js?v=20260715-ux7",
+  "/manifest.webmanifest?v=20260715-ux7",
   "/icon-192.png",
   "/icon-512.png",
 ];

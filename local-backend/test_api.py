@@ -6,6 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -61,6 +62,45 @@ class AccountApiTests(unittest.TestCase):
         status, login = self.request("POST", "/api/login", {"username": username, "secret": "ABC123"})
         self.assertEqual(status, 200, login)
         return username, login["account"], login["session"]
+
+    def test_wrong_book_sanitizer_keeps_newest_entries(self):
+        source = {
+            f"word-{index}": {"wrong_count": index, "correct_answer": f"meaning-{index}"}
+            for index in range(server.MAX_WRONG_BOOK_ITEMS + 10)
+        }
+        cleaned = server.sanitize_wrong_book(source)
+        self.assertEqual(len(cleaned), server.MAX_WRONG_BOOK_ITEMS)
+        self.assertNotIn("word-0", cleaned)
+        self.assertIn(f"word-{server.MAX_WRONG_BOOK_ITEMS + 9}", cleaned)
+
+    def test_ollama_ready_result_is_briefly_cached(self):
+        response = mock.MagicMock()
+        response.status = 200
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+        server.OLLAMA_READY_CACHE.update({"checked_at": 0.0, "value": False})
+        with mock.patch("server.urllib.request.build_opener", return_value=opener):
+            self.assertTrue(server.ollama_is_ready())
+            self.assertTrue(server.ollama_is_ready())
+        self.assertEqual(opener.open.call_count, 1)
+
+    def test_registration_rate_limiter_uses_client_address(self):
+        handler = mock.MagicMock()
+        handler.headers = {}
+        handler.client_address = ("203.0.113.7", 12345)
+        server.REGISTER_ATTEMPTS.clear()
+        with mock.patch.object(server, "REGISTER_MAX_ATTEMPTS", 2):
+            self.assertFalse(server.register_limited(handler, record=True))
+            self.assertTrue(server.register_limited(handler, record=True))
+            self.assertTrue(server.register_limited(handler))
+        server.REGISTER_ATTEMPTS.clear()
+
+    def test_status_endpoint_handles_concurrent_burst(self):
+        with mock.patch("server.ollama_is_ready", return_value=True):
+            with ThreadPoolExecutor(max_workers=24) as pool:
+                results = list(pool.map(lambda _: self.request("GET", "/api/status"), range(120)))
+        self.assertTrue(all(status == 200 and data.get("ok") for status, data in results))
+        self.assertTrue(all(data.get("build") == server.APP_BUILD for _, data in results))
 
     def test_admin_login_is_strict_and_admin_api_is_protected(self):
         status, _ = self.request("POST", "/api/login", {"username": "WYJ", "secret": ADMIN_SECRET})

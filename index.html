@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
-    <link rel="manifest" href="/manifest.webmanifest?v=20260714-ux6" />
-    <link rel="stylesheet" href="/styles.css?v=20260714-ux6" />
+    <link rel="icon" href="/icon-192.png" type="image/png" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260715-ux7" />
+    <link rel="stylesheet" href="/styles.css?v=20260715-ux7" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -84,14 +85,14 @@
             <button id="showRegisterBtn" type="button" role="tab">注册</button>
           </div>
           <form id="loginForm" class="login-form">
-            <input id="usernameInput" autocomplete="username" placeholder="用户名" required />
-            <input id="secretInput" type="password" autocomplete="current-password" placeholder="登录密钥" required />
+            <input id="usernameInput" autocomplete="username" maxlength="40" placeholder="用户名" required />
+            <input id="secretInput" type="password" autocomplete="current-password" maxlength="128" placeholder="登录密钥" required />
             <button class="primary" id="loginSubmitBtn" type="submit">登录</button>
           </form>
           <form id="registerForm" class="login-form hidden">
-            <input id="registerUsernameInput" autocomplete="username" placeholder="用户名" required />
-            <input id="registerSecretInput" type="password" autocomplete="new-password" placeholder="登录密钥" required />
-            <input id="registerConfirmInput" type="password" autocomplete="new-password" placeholder="确认登录密钥" required />
+            <input id="registerUsernameInput" autocomplete="username" maxlength="40" placeholder="用户名" required />
+            <input id="registerSecretInput" type="password" autocomplete="new-password" maxlength="128" placeholder="登录密钥" required />
+            <input id="registerConfirmInput" type="password" autocomplete="new-password" maxlength="128" placeholder="确认登录密钥" required />
             <button class="primary" id="registerSubmitBtn" type="submit">创建账户</button>
           </form>
           <button class="hidden" id="offlineReviewBtn" type="button">进入本地复习</button>
@@ -101,7 +102,7 @@
         <section class="workspace hidden" id="workspace">
           <nav class="tabs" aria-label="视图">
             <button class="active" data-view="setupView">词表</button>
-            <button data-view="quizView">答题</button>
+            <button data-view="quizView" disabled title="尚未开始测试">答题</button>
             <button data-view="wrongView">错题</button>
             <button data-view="achievementsView">成就</button>
           </nav>
@@ -111,7 +112,7 @@
               <div class="settings-grid">
                 <label class="field-label">
                   <span>使用者</span>
-                  <input id="profileInput" autocomplete="nickname" placeholder="我" />
+                  <input id="profileInput" autocomplete="nickname" maxlength="30" placeholder="我" />
                 </label>
                 <label class="field-label">
                   <span>判卷</span>
@@ -164,12 +165,13 @@
                 <p class="meta-line ai-suggest-message" id="aiSuggestMessage" aria-live="polite"></p>
               </section>
 
-              <textarea id="wordInput" placeholder="输入词表，每行一个词"></textarea>
+              <textarea id="wordInput" maxlength="120000" placeholder="输入词表，每行一个词"></textarea>
               <p class="meta-line" id="wordLimitHint" aria-live="polite"></p>
+              <p class="meta-line word-quality-hint" id="wordQualityHint" aria-live="polite"></p>
               <div class="action-row">
-                <button class="primary" id="startBtn">开始</button>
-                <button id="shuffleBtn" title="打乱">↕</button>
-                <button id="clearBtn" title="清空">×</button>
+                <button class="primary" id="startBtn" type="button">开始</button>
+                <button id="shuffleBtn" type="button" title="打乱">↕</button>
+                <button id="clearBtn" type="button" title="清空">×</button>
               </div>
               <div class="action-row secondary-row">
                 <button id="importWordsBtn">导入词表</button>
@@ -194,7 +196,7 @@
               </div>
               <div class="word-display" id="wordLabel">-</div>
               <form id="answerForm" class="answer-form">
-                <input id="answerInput" autocomplete="off" placeholder="中文意思" aria-describedby="answerValidation" />
+                <input id="answerInput" autocomplete="off" maxlength="240" placeholder="中文意思" aria-describedby="answerValidation" />
                 <button class="primary" id="submitBtn" type="submit">提交</button>
               </form>
               <p class="answer-validation hidden" id="answerValidation" role="alert"></p>
@@ -220,6 +222,7 @@
                 <button id="historyWrongTab" type="button">历史</button>
               </div>
               <p class="meta-line" id="wrongScopeLabel"></p>
+              <label class="wrong-search" for="wrongSearchInput"><span class="visually-hidden">搜索错题</span><input id="wrongSearchInput" type="search" maxlength="120" autocomplete="off" placeholder="搜索单词、答案或释义" /></label>
               <div class="action-row">
                 <button class="primary" id="reviewBtn">复习本轮</button>
                 <button id="reviewHistoryBtn">复习历史</button>
@@ -310,8 +313,8 @@
         <dl class="account-details" id="accountDetails"></dl>
         <form id="changeSecretForm" class="stack-form">
           <h3>修改登录密钥</h3>
-          <input id="currentSecretInput" type="password" autocomplete="current-password" placeholder="当前登录密钥" required />
-          <input id="newSecretInput" type="password" autocomplete="new-password" placeholder="新登录密钥" required />
+          <input id="currentSecretInput" type="password" autocomplete="current-password" maxlength="128" placeholder="当前登录密钥" required />
+          <input id="newSecretInput" type="password" autocomplete="new-password" maxlength="128" placeholder="新登录密钥" required />
           <button type="submit">保存并退出其他会话</button>
         </form>
         <div class="danger-zone">
@@ -328,7 +331,7 @@
         <h2 id="deleteAccountTitle">确认永久注销账户</h2>
         <p class="danger-note">此操作会清除账户、会员资格、剩余时间、充值申请和全部登录会话，无法恢复。</p>
         <form id="deleteAccountForm" class="stack-form">
-          <input id="deleteSecretInput" type="password" autocomplete="current-password" placeholder="重新输入当前登录密钥" required />
+          <input id="deleteSecretInput" type="password" autocomplete="current-password" maxlength="128" placeholder="重新输入当前登录密钥" required />
           <div class="action-row"><button data-close-modal="deleteAccountModal" type="button">取消</button><button class="danger-button" id="confirmDeleteAccountBtn" type="submit">永久注销</button></div>
         </form>
       </section>
@@ -355,7 +358,7 @@
         </section>
         <section class="admin-editor-section">
           <h3>登录密钥</h3>
-          <div class="admin-secret-row"><input id="adminNewSecretInput" type="text" autocomplete="off" placeholder="输入新的明文登录密钥" /><button id="saveAdminSecretBtn" type="button">修改并退出该用户</button></div>
+          <div class="admin-secret-row"><input id="adminNewSecretInput" type="text" autocomplete="off" maxlength="128" placeholder="输入新的明文登录密钥" /><button id="saveAdminSecretBtn" type="button">修改并退出该用户</button></div>
         </section>
         <section class="admin-editor-section admin-danger-section">
           <h3>账户操作</h3>
@@ -398,10 +401,10 @@
           <h3></h3>
           <p></p>
         </div>
-        <strong></strong>
+        <div class="wrong-item-actions"><strong></strong><button type="button">移除</button></div>
       </article>
     </template>
 
-    <script src="/app.js?v=20260714-ux6"></script>
+    <script src="/app.js?v=20260715-ux7"></script>
   </body>
 </html>

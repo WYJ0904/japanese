@@ -728,6 +728,67 @@ textarea {
   }
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.word-quality-hint {
+  min-height: 20px;
+  color: #91d8fa;
+}
+
+.word-quality-hint.has-warning {
+  color: #ffd08a;
+}
+
+.wrong-search {
+  display: block;
+  margin: 10px 0 12px;
+}
+
+.wrong-search input {
+  width: 100%;
+  min-height: 44px;
+}
+
+.wrong-item > div:first-child {
+  min-width: 0;
+}
+
+.wrong-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.wrong-item-actions button {
+  min-height: 36px;
+  padding: 6px 12px;
+}
+
+@media (max-width: 640px) {
+  .wrong-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .wrong-item-actions {
+    align-items: center;
+    flex-direction: row;
+  }
+}
+
 /* Account, membership and administration */
 .account-bar {
   position: fixed;
