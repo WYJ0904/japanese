@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 import tempfile
 import threading
@@ -39,10 +40,12 @@ class AccountApiTests(unittest.TestCase):
         TEMPORARY.cleanup()
 
     @classmethod
-    def request(cls, method, path, payload=None, session=""):
+    def request(cls, method, path, payload=None, session="", extra_headers=None):
         headers = {"Content-Type": "application/json"}
         if session:
             headers["X-Session-Token"] = session
+        if extra_headers:
+            headers.update(extra_headers)
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(cls.base + path, data=data, headers=headers, method=method)
         try:
@@ -50,6 +53,19 @@ class AccountApiTests(unittest.TestCase):
                 return response.status, json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read().decode("utf-8"))
+
+    @classmethod
+    def request_raw(cls, method, path, payload=None, session=""):
+        headers = {"Content-Type": "application/json"}
+        if session:
+            headers["X-Session-Token"] = session
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(cls.base + path, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status, dict(response.headers.items()), response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, dict(error.headers.items()), error.read()
 
     def new_user(self):
         username = "u" + uuid.uuid4().hex[:10]
@@ -101,6 +117,43 @@ class AccountApiTests(unittest.TestCase):
                 results = list(pool.map(lambda _: self.request("GET", "/api/status"), range(120)))
         self.assertTrue(all(status == 200 and data.get("ok") for status, data in results))
         self.assertTrue(all(data.get("build") == server.APP_BUILD for _, data in results))
+
+    def test_pdf_export_returns_structurally_valid_multilingual_document(self):
+        _, _, session = self.new_user()
+        wrong_book = {
+            f"word-{index}-\u5b66\u6821": {
+                "wrong_count": (index % 4) + 1,
+                "last_answer": "\u5b66\u6821 / \u304c\u3063\u3053\u3046",
+                "correct_answer": "school; \u5b66\u6821",
+                "accepted": ["school", "\u5b66\u6821"],
+                "last_time": "2026-07-15 17:00:00",
+            }
+            for index in range(36)
+        }
+        status, headers, content = self.request_raw(
+            "POST",
+            "/api/export-pdf",
+            {
+                "wrongBook": wrong_book,
+                "title": "WYJ\u7684\u7f51\u7ad9\u591a\u8bed\u8a00\u9519\u9898\u672c",
+                "meta": {
+                    "profile": "PDF \u6d4b\u8bd5",
+                    "scope": "\u5386\u53f2\u9519\u9898",
+                    "language": "japanese",
+                    "practice_mode": "dictation",
+                    "grading_mode": "strict",
+                },
+            },
+            session,
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("application/pdf", headers.get("Content-Type", ""))
+        self.assertIn("attachment;", headers.get("Content-Disposition", ""))
+        self.assertTrue(content.startswith(b"%PDF-1.4"))
+        self.assertTrue(content.rstrip().endswith(b"%%EOF"))
+        self.assertGreater(len(content), 1000)
+        xref_offset = int(content.rsplit(b"startxref\n", 1)[1].splitlines()[0])
+        self.assertEqual(content[xref_offset:xref_offset + 5], b"xref\n")
 
     def test_admin_login_is_strict_and_admin_api_is_protected(self):
         status, _ = self.request("POST", "/api/login", {"username": "WYJ", "secret": ADMIN_SECRET})
@@ -441,7 +494,7 @@ class AccountApiTests(unittest.TestCase):
 
     def test_recharge_requires_manual_admin_processing_and_deduplicates(self):
         _, account, session = self.new_user()
-        payload = {"plan": "monthly", "trial_language": ""}
+        payload = {"plan": "all_access_monthly"}
         status, first = self.request("POST", "/api/recharge/request", payload, session)
         self.assertEqual(status, 201, first)
         status, second = self.request("POST", "/api/recharge/request", payload, session)
@@ -458,6 +511,9 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(status, 200, processed)
         status, me = self.request("GET", "/api/me", session=session)
         self.assertEqual(me["account"]["membership"], "monthly")
+        status, tools = self.request("GET", "/api/tools/access", session=session)
+        self.assertEqual(status, 200, tools)
+        self.assertTrue(tools["account"]["tools_access"])
 
     def test_admin_self_protection(self):
         status, admin = self.request("GET", "/api/me", session=self.admin_session)
@@ -471,6 +527,194 @@ class AccountApiTests(unittest.TestCase):
         for path, payload in paths:
             status, data = self.request("POST", path, payload, self.admin_session)
             self.assertEqual(status, 403, data)
+
+    def test_membership_catalog_prices_and_order_confirmation(self):
+        status, plans = self.request("GET", "/api/membership/plans")
+        self.assertEqual(status, 200, plans)
+        by_code = {item["code"]: item for item in plans["plans"]}
+        self.assertEqual(by_code["japanese_lifetime"]["price_cents"], 7000)
+        self.assertEqual(by_code["all_access_monthly"]["price_cents"], 3000)
+        self.assertEqual(by_code["all_access_lifetime"]["price_cents"], 10000)
+        self.assertNotIn("tools_access", by_code["japanese_lifetime"]["entitlements"])
+        self.assertEqual(set(by_code), {"japanese_lifetime", "all_access_monthly", "all_access_lifetime"})
+
+        _, _, session = self.new_user()
+        status, order = self.request(
+            "POST", "/api/recharge/request", {"plan": "all_access_lifetime"}, session
+        )
+        self.assertEqual(status, 201, order)
+        self.assertEqual(order["request"]["amount_cents"], 10000)
+        self.assertRegex(order["request"]["order_number"], r"^WYJ-\d{8}-[A-F0-9]{8}$")
+        status, confirmed = self.request(
+            "POST", "/api/recharge/confirm", {"request_id": order["request"]["id"]}, session
+        )
+        self.assertEqual(status, 200, confirmed)
+        self.assertEqual(confirmed["request"]["status"], "user_paid")
+        status, legacy = self.request("POST", "/api/recharge/request", {"plan": "monthly"}, session)
+        self.assertEqual(status, 400, legacy)
+        self.assertEqual(legacy["code"], "plan_invalid")
+
+    def test_tools_access_uses_merged_server_entitlements(self):
+        _, account, session = self.new_user()
+        status, denied = self.request("GET", "/api/tools/access", session=session)
+        self.assertEqual(status, 403, denied)
+
+        status, _ = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "japanese_lifetime"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200)
+        status, _ = self.request("GET", "/api/tools/access", session=session)
+        self.assertEqual(status, 403)
+
+        status, granted = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "all_access_monthly"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200, granted)
+        status, access = self.request("GET", "/api/tools/access", session=session)
+        self.assertEqual(status, 200, access)
+        self.assertTrue(access["account"]["tools_access"])
+
+        status, _ = self.request(
+            "POST", "/api/tools/favorite", {"tool_id": "json-format", "favorite": True, "pinned": True}, session
+        )
+        self.assertEqual(status, 200)
+        status, _ = self.request("POST", "/api/tools/recent", {"tool_id": "json-format"}, session)
+        self.assertEqual(status, 200)
+        status, preferences = self.request("GET", "/api/tools/preferences", session=session)
+        self.assertEqual(status, 200, preferences)
+        self.assertEqual(preferences["favorites"][0]["tool_id"], "json-format")
+        self.assertEqual(preferences["recent"][0]["tool_id"], "json-format")
+
+        status, _ = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "cancel", "plan_code": "all_access_monthly"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200)
+        status, me = self.request("GET", "/api/me", session=session)
+        self.assertIn("language_japanese_access", me["account"]["entitlements"])
+        self.assertNotIn("tools_access", me["account"]["entitlements"])
+        status, _ = self.request("GET", "/api/tools/access", session=session)
+        self.assertEqual(status, 403)
+
+    def test_tool_history_handles_concurrent_writes(self):
+        _, account, session = self.new_user()
+        status, _ = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "all_access_lifetime"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200)
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results = list(
+                pool.map(
+                    lambda index: self.request(
+                        "POST", "/api/tools/recent", {"tool_id": f"stress-tool-{index}"}, session
+                    ),
+                    range(40),
+                )
+            )
+
+        self.assertTrue(all(status == 200 for status, _data in results), results)
+        status, preferences = self.request("GET", "/api/tools/preferences", session=session)
+        self.assertEqual(status, 200, preferences)
+        self.assertEqual(len(preferences["recent"]), 30)
+
+    def test_temporary_text_file_clipboard_and_room_lifecycle(self):
+        _, account, session = self.new_user()
+        status, _ = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "all_access_lifetime"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200)
+
+        status, created = self.request(
+            "POST",
+            "/api/temporary/text",
+            {"content": "临时内容", "password": "secret", "minutes": 5, "max_views": 2, "destroy_after_read": True},
+            session,
+        )
+        self.assertEqual(status, 201, created)
+        share_id = created["share"]["id"]
+        status, _ = self.request("POST", "/api/share/text/read", {"id": share_id, "password": "wrong"})
+        self.assertEqual(status, 403)
+        status, opened = self.request("POST", "/api/share/text/read", {"id": share_id, "password": "secret"})
+        self.assertEqual(status, 200, opened)
+        self.assertEqual(opened["share"]["content"], "临时内容")
+        status, _ = self.request("POST", "/api/share/text/read", {"id": share_id, "password": "secret"})
+        self.assertEqual(status, 404)
+
+        encoded = base64.b64encode(b"safe file").decode("ascii")
+        status, file_created = self.request(
+            "POST",
+            "/api/temporary/file",
+            {"file_name": "../../safe.txt", "mime_type": "text/plain", "base64": encoded, "minutes": 5, "max_downloads": 1},
+            session,
+        )
+        self.assertEqual(status, 201, file_created)
+        status, file_opened = self.request(
+            "POST", "/api/share/file/read", {"id": file_created["file"]["id"]}
+        )
+        self.assertEqual(status, 200, file_opened)
+        self.assertEqual(file_opened["file"]["file_name"], "safe.txt")
+        self.assertEqual(base64.b64decode(file_opened["file"]["base64"]), b"safe file")
+
+        status, rejected_file = self.request(
+            "POST",
+            "/api/temporary/file",
+            {
+                "file_name": "fake.png",
+                "mime_type": "image/png",
+                "base64": base64.b64encode(b"not a png").decode("ascii"),
+                "minutes": 5,
+            },
+            session,
+        )
+        self.assertEqual(status, 400, rejected_file)
+        self.assertEqual(rejected_file["code"], "file_signature_invalid")
+
+        status, clipboard = self.request(
+            "POST", "/api/temporary/clipboard", {"content": "跨设备", "minutes": 5, "destroy_after_read": True}, session
+        )
+        self.assertEqual(status, 201, clipboard)
+        self.assertRegex(clipboard["clipboard"]["code"], r"^\d{6}$")
+        status, clip_read = self.request(
+            "POST", "/api/share/clipboard/read", {"code": clipboard["clipboard"]["code"]}
+        )
+        self.assertEqual(status, 200, clip_read)
+        self.assertEqual(clip_read["clipboard"]["content"], "跨设备")
+
+        status, room = self.request(
+            "POST", "/api/temporary/room", {"password": "room-pass", "minutes": 5, "max_messages": 3}, session
+        )
+        self.assertEqual(status, 201, room)
+        room_id = room["room"]["id"]
+        status, posted = self.request(
+            "POST", "/api/share/room/post", {"id": room_id, "password": "room-pass", "author": "访客", "message": "你好"}
+        )
+        self.assertEqual(status, 201, posted)
+        self.assertEqual(posted["room"]["messages"][0]["message"], "你好")
+
+    def test_cross_origin_post_is_rejected(self):
+        status, data = self.request(
+            "POST",
+            "/api/login",
+            {"username": "nobody", "secret": "bad"},
+            extra_headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(status, 403, data)
+        self.assertEqual(data["code"], "origin_forbidden")
 
 
 if __name__ == "__main__":

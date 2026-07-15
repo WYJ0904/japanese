@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260715-ux8" />
-    <link rel="stylesheet" href="/styles.css?v=20260715-ux8" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260715-tools2" />
+    <link rel="stylesheet" href="/styles.css?v=20260715-tools2" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -29,15 +29,33 @@
     <main class="app-shell app-shell-pending" id="appShell" aria-hidden="true">
       <nav class="account-bar" id="accountBar" aria-label="账户操作">
         <span class="account-badge" id="accountBadge">未登录</span>
+        <button class="hidden" id="homeBtn" type="button">功能选择</button>
         <button id="membershipBtn" type="button">会员充值</button>
         <button class="hidden" id="accountBtn" type="button">账户设置</button>
         <button class="hidden" id="adminBtn" type="button">管理后台</button>
         <button class="hidden" id="logoutBtn" type="button">退出</button>
       </nav>
+      <section class="module-picker hidden" id="modulePicker" aria-labelledby="modulePickerTitle" aria-hidden="true">
+        <header class="project-brand">
+          <img src="/assets/logo.png" alt="WYJ的网站 Logo" />
+          <div><p class="section-kicker">WORKSPACE</p><h1 id="modulePickerTitle">选择功能</h1><p id="moduleMembershipStatus">普通注册用户</p></div>
+        </header>
+        <div class="module-grid" aria-label="选择网站功能">
+          <button class="module-card" type="button" data-module="language">
+            <span class="module-icon" aria-hidden="true">文</span>
+            <span><strong>语言测试</strong><small>英语、日语、错题、成就与学习统计</small></span>
+          </button>
+          <button class="module-card" type="button" data-module="tools">
+            <span class="module-icon" aria-hidden="true">+</span>
+            <span><strong>在线工具箱</strong><small>文本、文件、图片、随机与临时分享</small></span>
+            <em id="toolsMemberBadge">会员功能</em>
+          </button>
+        </div>
+      </section>
       <section class="project-picker hidden" id="projectPicker" aria-labelledby="projectPickerTitle">
         <header class="project-brand">
           <img src="/assets/logo.png" alt="WYJ的网站 Logo" />
-          <h1 id="projectPickerTitle">WYJ的网站</h1>
+          <div><p class="section-kicker">LANGUAGE</p><h1 id="projectPickerTitle">选择语言测试</h1></div>
         </header>
         <div class="project-grid" aria-label="选择项目">
           <button class="project-card" type="button" data-project="english">
@@ -49,6 +67,7 @@
             <strong>日语测试</strong>
           </button>
         </div>
+        <button class="picker-back" id="languageBackBtn" type="button">返回功能选择</button>
       </section>
 
       <section class="project-app hidden" id="projectApp" aria-hidden="true">
@@ -305,6 +324,38 @@
         </section>
       </section>
 
+      <section class="tools-panel hidden" id="toolsPanel" aria-hidden="true">
+        <header class="tools-header">
+          <div><p class="section-kicker">ONLINE TOOLBOX</p><h1>在线工具箱</h1><p id="toolsMembershipStatus">正在验证会员权限</p></div>
+          <div class="action-row compact"><button id="toolsAccountBtn" type="button">账户</button><button id="leaveToolsBtn" type="button">返回功能选择</button></div>
+        </header>
+        <div class="tools-dashboard" id="toolsDashboard">
+          <label class="tool-search" for="toolSearchInput"><span>搜索工具</span><input id="toolSearchInput" type="search" autocomplete="off" placeholder="输入名称或功能，例如 JSON、压缩、随机密码" /></label>
+          <p class="local-processing-note">文本、图片和普通文件默认只在当前浏览器中处理，不会上传服务器。</p>
+          <section class="tool-shelf hidden" id="favoriteToolsSection"><div class="tool-section-title"><h2>收藏与固定</h2></div><div class="tool-chip-list" id="favoriteToolsList"></div></section>
+          <section class="tool-shelf hidden" id="recentToolsSection"><div class="tool-section-title"><h2>最近使用</h2><button id="clearToolHistoryBtn" type="button">清除记录</button></div><div class="tool-chip-list" id="recentToolsList"></div></section>
+          <section class="tool-category-grid" id="toolCategoryList" aria-label="工具分类"></section>
+          <section class="tool-catalog-section"><div class="tool-section-title"><h2 id="toolCatalogTitle">全部工具</h2><span id="toolResultCount">0 项</span></div><div class="tool-catalog" id="toolCatalog"></div></section>
+        </div>
+        <section class="tool-workbench hidden" id="toolWorkbench" aria-hidden="true">
+          <header><button id="closeToolWorkbenchBtn" type="button">返回工具列表</button><div><p id="toolWorkbenchCategory"></p><h2 id="toolWorkbenchTitle">工具</h2></div><div class="tool-workbench-actions"><button id="favoriteToolBtn" type="button">收藏</button><button id="pinToolBtn" type="button">固定</button></div></header>
+          <div id="toolWorkbenchBody"></div>
+          <p class="error" id="toolWorkbenchMessage" aria-live="polite"></p>
+        </section>
+      </section>
+
+      <section class="share-viewer hidden" id="shareViewer" aria-hidden="true">
+        <div class="share-viewer-panel">
+          <p class="section-kicker">TEMPORARY SHARE</p><h1 id="shareViewerTitle">打开临时分享</h1>
+          <p id="shareViewerMeta"></p>
+          <label class="field-label" id="sharePasswordField"><span>访问密码（如有）</span><input id="sharePasswordInput" type="password" autocomplete="off" maxlength="128" /></label>
+          <div id="shareViewerExtra"></div>
+          <div class="action-row"><button class="primary" id="openShareBtn" type="button">打开</button><button id="shareLoginBtn" type="button">返回网站</button></div>
+          <pre class="share-output hidden" id="shareViewerOutput"></pre>
+          <p class="error" id="shareViewerMessage" aria-live="polite"></p>
+        </div>
+      </section>
+
       <section class="admin-panel hidden" id="adminPanel" aria-hidden="true">
         <header class="admin-header">
           <div>
@@ -319,6 +370,8 @@
         <div class="admin-tabs" role="tablist">
           <button class="active" data-admin-view="adminUsersView" type="button">用户</button>
           <button data-admin-view="adminRechargeView" type="button">充值申请</button>
+          <button data-admin-view="adminAuditView" type="button">审计日志</button>
+          <button data-admin-view="adminToolStatsView" type="button">工具统计</button>
         </div>
         <section class="admin-view active" id="adminUsersView">
           <div class="admin-toolbar">
@@ -330,6 +383,8 @@
         <section class="admin-view" id="adminRechargeView">
           <div class="admin-user-list" id="adminRechargeList"></div>
         </section>
+        <section class="admin-view" id="adminAuditView"><div class="admin-user-list" id="adminAuditList"></div></section>
+        <section class="admin-view" id="adminToolStatsView"><div class="admin-user-list" id="adminToolStatsList"></div></section>
         <p class="error" id="adminError" aria-live="polite"></p>
       </section>
     </main>
@@ -341,17 +396,17 @@
         <button class="modal-close" data-close-modal="membershipModal" type="button" aria-label="关闭">×</button>
         <p class="section-kicker">MEMBERSHIP</p>
         <h2 id="membershipTitle">会员充值</h2>
-        <div class="plan-grid">
-          <button class="plan-option" data-plan="trial_single_language" type="button"><strong>单语言体验版</strong><span>5 CNY · 30 天</span><small>选择一门语言无限使用</small></button>
-          <button class="plan-option" data-plan="monthly" type="button"><strong>包月会员</strong><span>10 CNY · 30 天</span><small>英语和日语均无限使用</small></button>
-          <button class="plan-option" data-plan="lifetime" type="button"><strong>永久会员</strong><span>70 CNY · 永久</span><small>两种语言永久无限使用</small></button>
-        </div>
+        <div class="plan-grid" id="membershipPlanList"></div>
         <label class="field-label hidden" id="trialLanguageField"><span>体验语言</span><select id="trialLanguageSelect"><option value="english">英语</option><option value="japanese">日语</option></select></label>
         <div class="purchase-summary" id="purchaseSummary">请选择套餐</div>
+        <p class="membership-warning">70 CNY 日语永久会员不包含在线工具箱。需要在线工具箱，请购买 30 CNY 全功能月度会员或 100 CNY 全功能永久会员。</p>
         <div class="wechat-row"><span>微信号：<strong id="wechatId">W2009Y94J</strong></span><button id="copyWechatBtn" type="button">复制微信号</button></div>
-        <p>付款后请添加微信 W2009Y94J，并提供你的用户名，由管理员人工开通会员。</p>
+        <div class="payment-order hidden" id="paymentOrderBox">
+          <dl><dt>用户名</dt><dd id="paymentUsername">-</dd><dt>会员方案</dt><dd id="paymentPlan">-</dd><dt>应付金额</dt><dd id="paymentAmount">-</dd><dt>订单编号</dt><dd><code id="paymentOrderNumber">-</code> <button id="copyOrderBtn" type="button">复制</button></dd><dt>付款备注</dt><dd><span id="paymentNote">-</span> <button id="copyPaymentNoteBtn" type="button">复制</button></dd><dt>订单状态</dt><dd id="paymentStatus">-</dd></dl>
+        </div>
+        <p>选择方案后生成订单，付款时使用页面中的备注；点击“我已付款”只会通知管理员，不会自动开通。</p>
         <p class="danger-note">注销账户后，账户数据、当前会员资格、剩余会员时间以及永久会员资格都将被清除，且无法恢复。</p>
-        <button class="primary" id="submitRechargeBtn" type="button" disabled>提交充值申请</button>
+        <div class="action-row"><button class="primary" id="submitRechargeBtn" type="button" disabled>生成付款订单</button><button class="hidden" id="confirmPaymentBtn" type="button">我已付款</button></div>
         <p class="meta-line" id="rechargeMessage" aria-live="polite"></p>
       </section>
     </div>
@@ -396,20 +451,26 @@
         <input id="adminEditUserId" type="hidden" />
         <section class="admin-editor-section">
           <h3>会员权限</h3>
+          <div class="admin-current-memberships" id="adminCurrentMemberships"></div>
           <div class="admin-membership-grid">
-            <label class="field-label"><span>会员等级</span><select id="adminMembershipSelect"><option value="free">普通用户</option><option value="trial_single_language">单语言体验版</option><option value="monthly">包月会员</option><option value="lifetime">永久会员</option></select></label>
-            <label class="field-label" id="adminTrialLanguageField"><span>体验语言</span><select id="adminTrialLanguageSelect"><option value="">请选择</option><option value="english">英语</option><option value="japanese">日语</option></select></label>
+            <label class="field-label"><span>操作</span><select id="adminMembershipAction"><option value="grant">开通或覆盖</option><option value="extend">续期一个月</option><option value="cancel">取消所选会员</option><option value="cancel_all">降级为普通用户</option></select></label>
+            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="japanese_lifetime">日语单项永久会员</option><option value="all_access_monthly">全功能月度会员</option><option value="all_access_lifetime">全功能永久会员</option></select></label>
+            <label class="field-label hidden" id="adminTrialLanguageField"><span>体验语言</span><select id="adminTrialLanguageSelect"><option value="">请选择</option><option value="english">英语</option><option value="japanese">日语</option></select></label>
           </div>
           <div class="admin-date-grid">
             <label class="field-label" id="adminMembershipStartField"><span>开始日期</span><input id="adminMembershipStart" inputmode="numeric" autocomplete="off" placeholder="例如 2026/07/12" /></label>
             <label class="field-label" id="adminMembershipExpiresField"><span>截止日期</span><input id="adminMembershipExpires" inputmode="numeric" autocomplete="off" placeholder="例如 2026/08/11" /></label>
           </div>
+          <label class="field-label"><span>操作备注</span><input id="adminMembershipNote" maxlength="500" placeholder="例如：微信订单已核对" /></label>
+          <label class="admin-checkbox"><input id="adminPreserveJapanese" type="checkbox" /> 降级时保留日语永久会员</label>
           <p class="admin-date-help">支持“年/月/日”，分隔符可用 /、.、。、空格。开始时间采用保存时的时分秒；截止时间固定为当天 23:59:59。</p>
           <div class="admin-editor-save"><button class="primary" id="saveAdminMembershipBtn" type="button">保存会员设置</button></div>
+          <div class="admin-entitlement-actions"><button id="adminDisableToolsBtn" type="button">仅取消工具权限</button><button id="adminEnableToolsBtn" type="button">恢复方案工具权限</button></div>
         </section>
         <section class="admin-editor-section">
           <h3>登录密钥</h3>
-          <div class="admin-secret-row"><input id="adminNewSecretInput" type="text" autocomplete="off" maxlength="128" placeholder="输入新的明文登录密钥" /><button id="saveAdminSecretBtn" type="button">修改并退出该用户</button></div>
+          <p class="admin-date-help">现有登录密钥已加密，任何人都不能查看；管理员只能重置。</p>
+          <div class="admin-secret-row"><input id="adminNewSecretInput" type="password" autocomplete="new-password" maxlength="128" placeholder="输入新的登录密钥" /><button id="saveAdminSecretBtn" type="button">重置并退出该用户</button></div>
         </section>
         <section class="admin-editor-section admin-danger-section">
           <h3>账户操作</h3>
@@ -457,6 +518,8 @@
       </article>
     </template>
 
-    <script src="/app.js?v=20260715-ux8"></script>
+    <script src="/vendor/qrcode.js?v=2.0.4"></script>
+    <script src="/tools.js?v=20260715-tools2"></script>
+    <script src="/app.js?v=20260715-tools2"></script>
   </body>
 </html>

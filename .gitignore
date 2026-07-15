@@ -10,6 +10,7 @@ tools/
 __pycache__/
 *.pyc
 *.log
+desktop-tools/启动日志.txt
 *.pdf
 latest-url.txt
 
@@ -18,7 +19,6 @@ latest-url.txt
 .codex/
 work/
 outputs/
-desktop-tools/
 
 # Account backend runtime data (contains plaintext login secrets by product design)
 local-backend/data/

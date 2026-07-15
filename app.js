@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-15-ux8";
+const APP_VERSION = "2026-07-15-tools2";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -100,6 +100,10 @@ let pendingScreen = "auth";
 let pendingAuthMessage = "";
 let currentProject = "";
 let selectedRechargePlan = "";
+let currentPaymentOrder = null;
+let membershipPlans = [];
+let toolsInitialized = false;
+let routeBusy = false;
 let adminUsers = [];
 let confirmAction = null;
 let lastLimitPromptKey = "";
@@ -567,9 +571,34 @@ function membershipLabel(value) {
   return {
     free: "普通用户",
     trial_single_language: "单语言体验版",
-    monthly: "包月会员",
-    lifetime: "永久会员",
+    monthly: "历史双语言包月会员",
+    lifetime: "历史双语言永久会员",
+    legacy_all_monthly: "历史双语言包月会员",
+    legacy_all_lifetime: "历史双语言永久会员",
+    japanese_lifetime: "日语单项永久会员",
+    all_access_monthly: "全功能月度会员",
+    all_access_lifetime: "全功能永久会员",
+    super_admin: "超级管理员",
   }[value] || "普通用户";
+}
+
+function accountEntitlements(account = state.account) {
+  return new Set(Array.isArray(account?.entitlements) ? account.entitlements : []);
+}
+
+function hasAccountEntitlement(code, account = state.account) {
+  return isSuperAdmin(account) || accountEntitlements(account).has(code);
+}
+
+function accountMembershipSummary(account = state.account) {
+  if (!account) return { code: "free", name: "未登录", permanent: false, expires_at: "", tools_access: false };
+  return account.membership_summary || {
+    code: account.membership || "free",
+    name: membershipLabel(account.membership),
+    permanent: account.membership === "lifetime",
+    expires_at: account.membership_expires || "",
+    tools_access: Boolean(account.tools_access),
+  };
 }
 
 function isSuperAdmin(account = state.account) {
@@ -594,8 +623,9 @@ function applyAccount(account) {
 function accountWordLimit(language = state.quizLanguage) {
   const account = state.account;
   if (!account) return 15;
-  if (isSuperAdmin(account) || ["monthly", "lifetime"].includes(account.membership)) return Infinity;
-  if (account.membership === "trial_single_language" && account.trial_language === language) return Infinity;
+  if (isSuperAdmin(account) || hasAccountEntitlement("language_all_access", account)) return Infinity;
+  if (language === "japanese" && hasAccountEntitlement("language_japanese_access", account)) return Infinity;
+  if (language === "english" && hasAccountEntitlement("language_english_access", account)) return Infinity;
   return 15;
 }
 
@@ -603,10 +633,24 @@ function renderAccountUi() {
   const account = state.account;
   const badge = $("accountBadge");
   if (!badge) return;
-  badge.textContent = account ? `${account.username} · ${membershipLabel(account.membership)}` : "未登录";
+  const summary = accountMembershipSummary(account);
+  badge.textContent = account ? `${account.username} · ${summary.name}` : "未登录";
+  $("membershipBtn")?.classList.toggle("hidden", !account);
   $("accountBtn")?.classList.toggle("hidden", !account);
   $("logoutBtn")?.classList.toggle("hidden", !account);
   $("adminBtn")?.classList.toggle("hidden", !isSuperAdmin(account));
+  $("homeBtn")?.classList.toggle("hidden", !account || location.pathname === "/select");
+  if ($("moduleMembershipStatus")) {
+    $("moduleMembershipStatus").textContent = summary.permanent
+      ? `${summary.name} · 永久有效`
+      : `${summary.name}${summary.expires_at ? ` · 到期 ${formatLocalDateTime(summary.expires_at)}` : ""}`;
+  }
+  if ($("toolsMemberBadge")) {
+    $("toolsMemberBadge").textContent = isSuperAdmin(account) || hasAccountEntitlement("tools_access", account)
+      ? "可使用"
+      : "会员功能";
+    $("toolsMemberBadge").classList.toggle("active", Boolean(account && (isSuperAdmin(account) || hasAccountEntitlement("tools_access", account))));
+  }
   renderAccountDetails();
 }
 
@@ -614,16 +658,35 @@ function renderAccountDetails() {
   const details = $("accountDetails");
   if (!details || !state.account) return;
   const account = state.account;
+  const summary = accountMembershipSummary(account);
+  const memberships = Array.isArray(account.memberships) ? account.memberships : [];
+  const membershipText = memberships.length
+    ? memberships.map((item) => {
+      const expiry = item.is_lifetime ? "永久" : formatLocalDateTime(item.expires_at, "无到期时间");
+      return `${item.plan_name || membershipLabel(item.plan_code)}（${expiry}）`;
+    }).join("；")
+    : "无";
+  const entitlementText = accountEntitlements(account).size
+    ? [...accountEntitlements(account)].map((code) => ({
+      language_japanese_access: "日语会员功能",
+      language_english_access: "英语会员功能",
+      language_all_access: "全部语言会员功能",
+      tools_access: "在线工具箱",
+      tools_batch_access: "批量处理",
+      temporary_share_access: "临时分享",
+      save_tool_config: "保存工具配置",
+      all_features_access: "全部高级功能",
+    }[code] || code)).join("、")
+    : "基础功能";
   const rows = [
     ["用户名", account.username],
     ["用户 ID", account.id],
     ["账户类型", isSuperAdmin(account) ? "超级管理员" : "普通账户"],
-    ["会员等级", membershipLabel(account.membership)],
-    ["体验语言", account.trial_language ? quizLanguageLabel(account.trial_language) : "无"],
-    ["会员开始", account.membership_start || "无"],
-    ["会员到期", account.membership === "lifetime" ? "永久" : account.membership_expires || "无"],
-    ["注册时间", account.registered_at || ""],
-    ["最后登录", account.last_login_at || ""],
+    ["当前等级", summary.name],
+    ["有效会员", membershipText],
+    ["当前权益", entitlementText],
+    ["注册时间", formatLocalDateTime(account.registered_at, "未知")],
+    ["最后登录", formatLocalDateTime(account.last_login_at, "从未")],
   ];
   details.innerHTML = "";
   rows.forEach(([label, value]) => {
@@ -647,6 +710,7 @@ async function apiGet(path) {
   if (!response.ok) {
     if (response.status === 401) {
       clearSession();
+      showAuth("登录已失效，请重新登录", { replace: true });
       throw new Error("登录已失效，请重新登录");
     }
     const error = new Error(data.error || "请求失败");
@@ -683,6 +747,12 @@ function closeModal(id, immediate = false) {
     const returnFocus = modalReturnFocus.get(id);
     modalReturnFocus.delete(id);
     if (returnFocus?.isConnected && !returnFocus.closest(".modal-layer.hidden")) returnFocus.focus();
+    if ((id === "membershipModal" && location.pathname === "/recharge") || (id === "accountModal" && location.pathname === "/account")) {
+      if (state.session && state.account) {
+        showModulePicker(false);
+        pushRoute("/select", true);
+      }
+    }
   };
   if (immediate || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) finish();
   else {
@@ -691,7 +761,7 @@ function closeModal(id, immediate = false) {
   }
 }
 
-function showAuthMode(mode) {
+function showAuthMode(mode, updateRoute = false) {
   const register = mode === "register";
   $("loginForm").classList.toggle("hidden", register);
   $("registerForm").classList.toggle("hidden", !register);
@@ -699,6 +769,7 @@ function showAuthMode(mode) {
   $("showRegisterBtn").classList.toggle("active", register);
   $("authTitle").textContent = register ? "注册账户" : "账户登录";
   $("loginError").textContent = "";
+  if (updateRoute) pushRoute(register ? "/register" : "/login");
 }
 
 async function registerAccount(event) {
@@ -716,7 +787,7 @@ async function registerAccount(event) {
     await api("/api/register", { username, secret, confirm_secret: confirmSecret });
     $("usernameInput").value = username;
     $("secretInput").value = secret;
-    showAuthMode("login");
+    showAuthMode("login", true);
     $("loginError").textContent = "注册成功，请登录";
   } catch (error) {
     $("loginError").textContent = error.message;
@@ -737,41 +808,110 @@ async function logoutAccount() {
   clearSession();
   pendingScreen = "auth";
   pendingAuthMessage = "已退出登录";
-  if (location.pathname === "/admin") history.replaceState({}, "", "/");
-  showAuth(pendingAuthMessage);
+  showAuth(pendingAuthMessage, { path: "/login", replace: true });
 }
 
 function planDetails(plan) {
-  return {
-    trial_single_language: ["单语言体验版", "5 CNY", "30 天内一门语言无限使用"],
-    monthly: ["包月会员", "10 CNY", "30 天内英语和日语无限使用"],
-    lifetime: ["永久会员", "70 CNY", "英语和日语永久无限使用"],
-  }[plan] || ["请选择套餐", "", ""];
+  const item = membershipPlans.find((candidate) => candidate.code === plan);
+  return item
+    ? [item.name, `${item.price} ${item.currency}`, item.description]
+    : ["请选择套餐", "", ""];
+}
+
+async function loadMembershipPlans() {
+  if (membershipPlans.length) return membershipPlans;
+  const response = await fetchWithTimeout("/api/membership/plans", { cache: "no-store" }, STATUS_TIMEOUT_MS);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !Array.isArray(data.plans)) throw new Error(data.error || "会员方案加载失败");
+  const order = ["all_access_monthly", "all_access_lifetime", "japanese_lifetime"];
+  membershipPlans = [...data.plans].sort((left, right) => order.indexOf(left.code) - order.indexOf(right.code));
+  const list = $("membershipPlanList");
+  if (list) {
+    list.innerHTML = membershipPlans.map((item) => `<button class="plan-option" data-plan="${escapeHtml(item.code)}" type="button">
+      <strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.price)} ${escapeHtml(item.currency)}${item.duration_months ? "/月" : ""}</span><small>${escapeHtml(item.description)}</small>
+    </button>`).join("");
+    list.querySelectorAll("[data-plan]").forEach((button) => button.addEventListener("click", () => selectRechargePlan(button.dataset.plan)));
+  }
+  return membershipPlans;
 }
 
 function selectRechargePlan(plan) {
   selectedRechargePlan = plan;
+  currentPaymentOrder = null;
   document.querySelectorAll("[data-plan]").forEach((button) => {
     button.classList.toggle("selected", button.dataset.plan === plan);
   });
-  $("trialLanguageField").classList.toggle("hidden", plan !== "trial_single_language");
+  $("trialLanguageField")?.classList.add("hidden");
   const [name, price, description] = planDetails(plan);
   $("purchaseSummary").textContent = `${name} · ${price} · ${description}`;
   $("submitRechargeBtn").disabled = !plan;
+  $("submitRechargeBtn").textContent = "生成付款订单";
+  $("confirmPaymentBtn").classList.add("hidden");
+  $("paymentOrderBox").classList.add("hidden");
   $("rechargeMessage").textContent = "";
 }
 
-function openMembershipModal() {
+async function openMembershipModal() {
+  if (!state.session || !state.account) {
+    showAuth("请先登录后查看会员方案", { path: "/login" });
+    return;
+  }
   $("copyWechatBtn").textContent = "复制微信号";
-  selectRechargePlan(selectedRechargePlan);
+  let openOrder = null;
+  let loadError = "";
+  try {
+    await loadMembershipPlans();
+    const orders = await apiGet("/api/recharge/mine");
+    openOrder = (orders.requests || []).find((item) => ["pending_payment", "user_paid"].includes(item.status)) || null;
+  } catch (error) {
+    loadError = error.message;
+  }
+  const planCode = openOrder?.plan_code || (selectedRechargePlan && membershipPlans.some((item) => item.code === selectedRechargePlan)
+    ? selectedRechargePlan
+    : "");
+  selectRechargePlan(planCode);
+  if (openOrder) {
+    renderPaymentOrder(openOrder);
+    $("rechargeMessage").textContent = openOrder.status === "user_paid"
+      ? "已通知管理员，正在等待人工核对付款。"
+      : "你有一个尚未付款的订单。请按订单备注付款后点击“我已付款”。";
+  } else if (loadError) {
+    $("rechargeMessage").textContent = loadError;
+  }
   openModal("membershipModal");
+}
+
+function paymentStatusLabel(status) {
+  return {
+    pending_payment: "等待付款",
+    user_paid: "已通知管理员，等待确认",
+    approved: "已开通",
+    rejected: "已拒绝",
+  }[status] || status || "未知";
+}
+
+function renderPaymentOrder(record) {
+  if (!record) return;
+  currentPaymentOrder = record;
+  const plan = membershipPlans.find((item) => item.code === record.plan_code);
+  $("paymentUsername").textContent = record.username || state.account?.username || "-";
+  $("paymentPlan").textContent = plan?.name || membershipLabel(record.plan_code);
+  $("paymentAmount").textContent = `${(Number(record.amount_cents || 0) / 100).toFixed(2)} ${record.currency || "CNY"}`;
+  $("paymentOrderNumber").textContent = record.order_number || "-";
+  $("paymentNote").textContent = record.payment_note || "-";
+  $("paymentStatus").textContent = paymentStatusLabel(record.status);
+  $("paymentOrderBox").classList.remove("hidden");
+  $("confirmPaymentBtn").classList.toggle("hidden", record.status !== "pending_payment");
+  $("submitRechargeBtn").textContent = record.status === "pending_payment"
+    ? "订单已生成"
+    : record.status === "user_paid" ? "等待管理员确认" : "生成付款订单";
+  $("submitRechargeBtn").disabled = record.status === "pending_payment" || record.status === "user_paid";
 }
 
 async function submitRechargeRequest() {
   if (!state.account || !state.session) {
     closeModal("membershipModal", true);
-    if (!currentProject) enterProject("english");
-    showAuth("请先登录后再提交充值申请");
+    showAuth("请先登录后再提交充值申请", { path: "/login", replace: true });
     return;
   }
   const button = $("submitRechargeBtn");
@@ -780,9 +920,26 @@ async function submitRechargeRequest() {
   try {
     const data = await api("/api/recharge/request", {
       plan: selectedRechargePlan,
-      trial_language: selectedRechargePlan === "trial_single_language" ? $("trialLanguageSelect").value : "",
     });
-    $("rechargeMessage").textContent = data.created ? "申请已提交，等待管理员人工处理" : "你已有待处理申请，请勿重复提交";
+    renderPaymentOrder(data.request);
+    $("rechargeMessage").textContent = data.created
+      ? "订单已生成。付款时请填写页面中的备注，付款后再点“我已付款”。"
+      : "你已有未完成订单，已为你显示原订单。";
+  } catch (error) {
+    $("rechargeMessage").textContent = error.message;
+  } finally {
+    button.disabled = !selectedRechargePlan || ["pending_payment", "user_paid"].includes(currentPaymentOrder?.status);
+  }
+}
+
+async function confirmRechargePayment() {
+  if (!currentPaymentOrder?.id) return;
+  const button = $("confirmPaymentBtn");
+  button.disabled = true;
+  try {
+    const data = await api("/api/recharge/confirm", { request_id: currentPaymentOrder.id });
+    renderPaymentOrder(data.request);
+    $("rechargeMessage").textContent = "已通知管理员。只有管理员核对付款后才会开通会员。";
   } catch (error) {
     $("rechargeMessage").textContent = error.message;
   } finally {
@@ -820,7 +977,7 @@ async function deleteOwnAccount(event) {
     closeModal("accountModal", true);
     clearAccountLocalData(deletedAccount);
     clearSession();
-    showProjectPicker();
+    showAuth("账户已注销", { path: "/login", replace: true });
     alert("账户已永久注销");
   } catch (error) {
     $("accountMessage").textContent = error.message;
@@ -900,7 +1057,14 @@ function formatLocalDateTime(value, fallback = "无") {
 }
 
 function rechargeStatusLabel(status) {
-  return { pending: "待处理", activated: "已开通", rejected: "已拒绝" }[status] || status || "未知";
+  return {
+    pending: "待处理",
+    pending_payment: "等待用户付款",
+    user_paid: "用户已确认付款",
+    activated: "已开通",
+    approved: "已开通",
+    rejected: "已拒绝",
+  }[status] || status || "未知";
 }
 
 function renderAdminUsers(users = null) {
@@ -915,38 +1079,35 @@ function renderAdminUsers(users = null) {
   list.innerHTML = visibleUsers.map((user) => {
     const protectedUser = user.is_super_admin;
     const stateClass = user.banned ? "account-state-bad" : "account-state-good";
-    const membershipExpiry = user.membership === "lifetime" ? "永久" : formatLocalDateTime(user.membership_expires, "无到期时间");
-    const trialLanguage = user.trial_language ? quizLanguageLabel(user.trial_language) : "无";
+    const summary = accountMembershipSummary(user);
+    const memberships = (user.memberships || []).map((item) => `${item.plan_name || membershipLabel(item.plan_code)}${item.is_lifetime ? " · 永久" : item.expires_at ? ` · 至 ${formatLocalDateTime(item.expires_at)}` : ""}`).join("；") || "无有效会员";
+    const entitlements = (user.entitlements || []).map((item) => ({
+      language_japanese_access: "日语",
+      language_english_access: "英语",
+      language_all_access: "全部语言",
+      tools_access: "工具箱",
+      tools_batch_access: "批量处理",
+      temporary_share_access: "临时分享",
+      save_tool_config: "配置保存",
+      all_features_access: "全功能",
+    }[item] || item)).join("、") || "基础功能";
     return `<article class="admin-user-card" data-user-id="${escapeHtml(user.id)}">
       <div class="admin-user-identity"><h3>${escapeHtml(user.username)}</h3><p class="admin-user-id">${escapeHtml(user.id)}</p><p class="${stateClass}">${user.banned ? "已永久封禁" : "正常"}</p></div>
-      <div class="admin-user-facts"><p><span>会员</span><strong>${escapeHtml(membershipLabel(user.membership))}</strong></p><p><span>体验语言</span><strong>${escapeHtml(trialLanguage)}</strong></p><p><span>截止时间</span><strong>${escapeHtml(membershipExpiry)}</strong></p></div>
-      <div class="admin-user-security"><p><span class="admin-field-name">登录密钥</span><span class="secret-value" data-secret-value>${"•".repeat(Math.max(6, String(user.secret || "").length))}</span></p><div class="action-row compact"><button data-admin-secret-toggle type="button">查看密钥</button><button data-admin-secret-copy type="button">复制密钥</button></div><p class="admin-last-login">最后登录：${escapeHtml(formatLocalDateTime(user.last_login_at, "从未"))}</p></div>
+      <div class="admin-user-facts"><p><span>最高等级</span><strong>${escapeHtml(summary.name)}</strong></p><p><span>有效会员</span><strong>${escapeHtml(memberships)}</strong></p><p><span>合并权益</span><strong>${escapeHtml(entitlements)}</strong></p></div>
+      <div class="admin-user-security"><p><span class="admin-field-name">登录密钥</span><span class="secret-value">已加密保存，只能重置</span></p><p class="admin-last-login">最后登录：${escapeHtml(formatLocalDateTime(user.last_login_at, "从未"))}</p></div>
       <div class="action-row compact admin-user-actions"><button data-admin-edit type="button" ${protectedUser ? "disabled" : ""}>编辑</button></div>
     </article>`;
   }).join("") || `<p class="admin-empty-state">${query ? "没有匹配的用户" : "暂无用户"}</p>`;
-  list.querySelectorAll("[data-admin-secret-toggle]").forEach((button) => button.addEventListener("click", () => {
-    const card = button.closest("[data-user-id]");
-    const user = adminUserById(card.dataset.userId);
-    const value = card.querySelector("[data-secret-value]");
-    const showing = button.dataset.showing === "1";
-    value.textContent = showing ? "•".repeat(Math.max(6, String(user.secret || "").length)) : user.secret;
-    button.textContent = showing ? "查看密钥" : "隐藏密钥";
-    button.dataset.showing = showing ? "0" : "1";
-  }));
-  list.querySelectorAll("[data-admin-secret-copy]").forEach((button) => button.addEventListener("click", async () => {
-    const user = adminUserById(button.closest("[data-user-id]").dataset.userId);
-    await copyTextWithFeedback(user.secret, button);
-  }));
   list.querySelectorAll("[data-admin-edit]").forEach((button) => button.addEventListener("click", () => openAdminEditor(button.closest("[data-user-id]").dataset.userId)));
 }
 
 function renderAdminRecharge(requests) {
   const list = $("adminRechargeList");
   list.innerHTML = (requests || []).map((request) => `<article class="admin-user-card" data-request-id="${escapeHtml(request.id)}">
-    <div class="admin-user-identity"><h3>${escapeHtml(request.username)}</h3><p class="admin-last-login">申请时间：${escapeHtml(formatLocalDateTime(request.requested_at, "未知"))}</p></div>
-    <div class="admin-user-facts"><p><span>套餐</span><strong>${escapeHtml(membershipLabel(request.plan))}</strong></p><p><span>可用语言</span><strong>${escapeHtml(request.trial_language ? quizLanguageLabel(request.trial_language) : "英语和日语")}</strong></p></div>
-    <div class="admin-request-status"><span>状态</span><strong>${escapeHtml(rechargeStatusLabel(request.status))}</strong></div>
-    <div class="action-row compact admin-user-actions">${request.status === "pending" ? '<button data-recharge-approve type="button">开通</button><button data-recharge-reject type="button">拒绝</button>' : ""}</div>
+    <div class="admin-user-identity"><h3>${escapeHtml(request.username)}</h3><p class="admin-user-id">${escapeHtml(request.order_number || request.id)}</p><p class="admin-last-login">申请：${escapeHtml(formatLocalDateTime(request.requested_at, "未知"))}</p></div>
+    <div class="admin-user-facts"><p><span>套餐</span><strong>${escapeHtml(membershipLabel(request.plan_code || request.plan))}</strong></p><p><span>金额</span><strong>${escapeHtml(`${(Number(request.amount_cents || 0) / 100).toFixed(2)} ${request.currency || "CNY"}`)}</strong></p><p><span>付款备注</span><strong>${escapeHtml(request.payment_note || "-")}</strong></p></div>
+    <div class="admin-request-status"><span>状态</span><strong>${escapeHtml(rechargeStatusLabel(request.status))}</strong>${request.user_confirmed_at ? `<small>用户确认：${escapeHtml(formatLocalDateTime(request.user_confirmed_at))}</small>` : ""}</div>
+    <div class="action-row compact admin-user-actions">${["pending_payment", "user_paid", "pending"].includes(request.status) ? '<button data-recharge-approve type="button">确认付款并开通</button><button data-recharge-reject type="button">拒绝</button>' : ""}</div>
   </article>`).join("") || "<p>暂无充值申请</p>";
   list.querySelectorAll("[data-recharge-approve], [data-recharge-reject]").forEach((button) => button.addEventListener("click", () => {
     const requestId = button.closest("[data-request-id]").dataset.requestId;
@@ -958,13 +1119,34 @@ function renderAdminRecharge(requests) {
   }));
 }
 
+function renderAdminAudit(logs) {
+  const list = $("adminAuditList");
+  list.innerHTML = (logs || []).map((log) => `<article class="admin-log-card">
+    <div><strong>${escapeHtml(log.action)}</strong><time>${escapeHtml(formatLocalDateTime(log.created_at))}</time></div>
+    <p>管理员：${escapeHtml(log.actor_username || "-")} · 对象：${escapeHtml(log.target_username || "-")}</p>
+    <p>${escapeHtml(log.note || "无备注")}</p>
+  </article>`).join("") || "<p>暂无审计记录</p>";
+}
+
+function renderAdminToolStats(tools) {
+  const list = $("adminToolStatsList");
+  list.innerHTML = (tools || []).map((item) => `<article class="admin-log-card"><div><strong>${escapeHtml(item.tool_id)}</strong><span>${escapeHtml(item.uses || 0)} 次 · ${escapeHtml(item.users || 0)} 人</span></div><p>最近使用：${escapeHtml(formatLocalDateTime(item.last_used_at, "无"))}</p></article>`).join("") || "<p>暂无工具使用记录</p>";
+}
+
 async function loadAdminData() {
   if (!isSuperAdmin()) return;
   $("adminError").textContent = "";
   try {
-    const [users, recharge] = await Promise.all([apiGet("/api/admin/users"), apiGet("/api/admin/recharge")]);
+    const [users, recharge, audit, toolStats] = await Promise.all([
+      apiGet("/api/admin/users"),
+      apiGet("/api/admin/recharge"),
+      apiGet("/api/admin/audit"),
+      apiGet("/api/admin/tool-stats"),
+    ]);
     renderAdminUsers(users.users);
     renderAdminRecharge(recharge.requests);
+    renderAdminAudit(audit.logs);
+    renderAdminToolStats(toolStats.tools);
   } catch (error) {
     $("adminError").textContent = error.message;
   }
@@ -972,27 +1154,25 @@ async function loadAdminData() {
 
 async function showAdminPanel(pushHistory = true) {
   if (!state.session || !state.account) {
-    if (!currentProject) enterProject("english");
-    showAuth("请先登录管理员账户");
+    showAuth("请先登录管理员账户", { path: "/login", replace: true });
     return;
   }
   if (!isSuperAdmin()) {
-    history.replaceState({}, "", "/");
-    showProjectPicker();
+    history.replaceState({}, "", "/select");
+    showModulePicker(false);
     alert("无管理员权限");
     return;
   }
   if (pushHistory && location.pathname !== "/admin") history.pushState({}, "", "/admin");
-  $("projectPicker").classList.add("hidden");
-  $("projectApp").classList.add("hidden");
+  hidePrimaryScreens();
   $("adminPanel").classList.remove("hidden");
   $("adminPanel").setAttribute("aria-hidden", "false");
+  renderAccountUi();
   await loadAdminData();
 }
 
 function leaveAdminPanel() {
-  if (location.pathname === "/admin") history.pushState({}, "", "/");
-  showProjectPicker();
+  showModulePicker(true);
 }
 
 function localDateValue(date = new Date()) {
@@ -1012,32 +1192,37 @@ function membershipDateValue(value) {
 }
 
 function updateAdminMembershipFields(fillDefaults = true) {
+  const action = $("adminMembershipAction").value;
   const membership = $("adminMembershipSelect").value;
-  const free = membership === "free";
-  const lifetime = membership === "lifetime";
-  const trial = membership === "trial_single_language";
-  $("adminTrialLanguageSelect").disabled = !trial;
-  $("adminTrialLanguageField").classList.toggle("field-disabled", !trial);
-  $("adminMembershipStart").disabled = free;
-  $("adminMembershipExpires").disabled = free || lifetime;
-  $("adminMembershipStartField").classList.toggle("field-disabled", free);
-  $("adminMembershipExpiresField").classList.toggle("field-disabled", free || lifetime);
-  if (free) {
+  const cancelling = action === "cancel" || action === "cancel_all";
+  const lifetime = ["japanese_lifetime", "all_access_lifetime"].includes(membership);
+  const fieldsDisabled = cancelling;
+  $("adminTrialLanguageField")?.classList.add("hidden");
+  $("adminMembershipSelect").disabled = action === "cancel_all";
+  $("adminMembershipStart").disabled = fieldsDisabled;
+  $("adminMembershipExpires").disabled = fieldsDisabled || lifetime;
+  $("adminMembershipStartField").classList.toggle("field-disabled", fieldsDisabled);
+  $("adminMembershipExpiresField").classList.toggle("field-disabled", fieldsDisabled || lifetime);
+  $("adminPreserveJapanese").closest("label").classList.toggle("hidden", action !== "cancel_all");
+  if (cancelling) {
     $("adminMembershipStart").value = "";
     $("adminMembershipExpires").value = "";
-    $("adminTrialLanguageSelect").value = "";
     return;
   }
   if (fillDefaults && !$("adminMembershipStart").value) $("adminMembershipStart").value = localDateValue();
   if (lifetime) {
     $("adminMembershipExpires").value = "";
-    $("adminTrialLanguageSelect").value = "";
   } else if (fillDefaults && !$("adminMembershipExpires").value) {
     const expiry = new Date();
-    expiry.setDate(expiry.getDate() + 30);
+    expiry.setMonth(expiry.getMonth() + 1);
     $("adminMembershipExpires").value = localDateValue(expiry);
   }
-  if (!trial) $("adminTrialLanguageSelect").value = "";
+}
+
+function renderAdminCurrentMemberships(user) {
+  const target = $("adminCurrentMemberships");
+  const memberships = Array.isArray(user?.memberships) ? user.memberships : [];
+  target.innerHTML = memberships.map((item) => `<article><strong>${escapeHtml(item.plan_name || membershipLabel(item.plan_code))}</strong><span>${item.is_lifetime ? "永久有效" : `到期 ${escapeHtml(formatLocalDateTime(item.expires_at, "未知"))}`}</span><small>${escapeHtml(item.source || "系统")}</small></article>`).join("") || "<p>当前没有有效会员</p>";
 }
 
 function openAdminEditor(userId) {
@@ -1045,13 +1230,17 @@ function openAdminEditor(userId) {
   if (!user || user.is_super_admin) return;
   $("adminEditUserId").value = user.id;
   $("adminEditTitle").textContent = `编辑 ${user.username}`;
-  $("adminMembershipSelect").value = user.membership;
-  $("adminTrialLanguageSelect").value = user.trial_language || "";
-  $("adminMembershipStart").value = membershipDateValue(user.membership_start);
-  $("adminMembershipExpires").value = membershipDateValue(user.membership_expires);
+  const preferred = (user.memberships || []).find((item) => ["all_access_lifetime", "all_access_monthly", "japanese_lifetime"].includes(item.plan_code));
+  $("adminMembershipAction").value = "grant";
+  $("adminMembershipSelect").value = preferred?.plan_code || "japanese_lifetime";
+  $("adminMembershipStart").value = membershipDateValue(preferred?.starts_at);
+  $("adminMembershipExpires").value = membershipDateValue(preferred?.expires_at);
+  $("adminMembershipNote").value = "";
+  $("adminPreserveJapanese").checked = false;
   $("adminNewSecretInput").value = "";
   $("adminToggleBanBtn").textContent = user.banned ? "解除封禁" : "永久封禁";
   $("adminEditMessage").textContent = "";
+  renderAdminCurrentMemberships(user);
   updateAdminMembershipFields(false);
   openModal("adminEditModal");
 }
@@ -1060,22 +1249,51 @@ async function saveAdminMembership() {
   const userId = $("adminEditUserId").value;
   const button = $("saveAdminMembershipBtn");
   if (button.disabled) return;
-  button.disabled = true;
-  try {
-    await api("/api/admin/membership", {
+  const action = $("adminMembershipAction").value;
+  const planCode = $("adminMembershipSelect").value;
+  const user = adminUserById(userId);
+  const actionLabel = { grant: "开通或覆盖", extend: "续期", cancel: "取消所选会员", cancel_all: "降级为普通用户" }[action] || action;
+  askConfirmation(`确认对“${user?.username || userId}”执行“${actionLabel}”？`, async () => {
+    button.disabled = true;
+    try {
+      const data = await api("/api/admin/membership/manage", {
+        user_id: userId,
+        action,
+        plan_code: planCode,
+        membership_start: $("adminMembershipStart").value.trim(),
+        membership_expires: $("adminMembershipExpires").value.trim(),
+        note: $("adminMembershipNote").value.trim(),
+        preserve_japanese: $("adminPreserveJapanese").checked,
+      });
+      $("adminEditMessage").textContent = "会员设置已保存并立即生效";
+      await loadAdminData();
+      const refreshed = adminUserById(userId) || data.user;
+      renderAdminCurrentMemberships(refreshed);
+    } catch (error) {
+      $("adminEditMessage").textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function updateAdminToolsOverride(allowed) {
+  const userId = $("adminEditUserId").value;
+  const user = adminUserById(userId);
+  const message = allowed === false
+    ? `确认仅取消“${user?.username || userId}”的在线工具箱权限？语言会员不会受影响。`
+    : `确认移除“${user?.username || userId}”的工具权限覆盖，并恢复按会员方案计算？`;
+  askConfirmation(message, async () => {
+    await api("/api/admin/entitlement", {
       user_id: userId,
-      membership: $("adminMembershipSelect").value,
-      membership_start: $("adminMembershipStart").value.trim(),
-      membership_expires: $("adminMembershipExpires").value.trim(),
-      trial_language: $("adminTrialLanguageSelect").value,
+      entitlement: "tools_access",
+      allowed,
+      note: $("adminMembershipNote").value.trim(),
     });
-    $("adminEditMessage").textContent = "会员设置已保存并立即生效";
+    $("adminEditMessage").textContent = allowed === false ? "已单独取消工具权限" : "已恢复按会员方案计算工具权限";
     await loadAdminData();
-  } catch (error) {
-    $("adminEditMessage").textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+    renderAdminCurrentMemberships(adminUserById(userId));
+  });
 }
 
 async function saveAdminSecret() {
@@ -1347,11 +1565,27 @@ function showLanguageGate() {
   showProjectPicker();
 }
 
-function showProjectPicker() {
-  if (!state.session || !state.account) {
-    showAuth(pendingAuthMessage || "请先登录后选择测试项目");
-    return;
-  }
+function pushRoute(path, replace = false) {
+  const target = String(path || "/");
+  if (location.pathname === target) return;
+  history[replace ? "replaceState" : "pushState"]({}, "", target);
+  renderAccountUi();
+}
+
+function hidePrimaryScreens() {
+  ["modulePicker", "projectPicker", "projectApp", "toolsPanel", "shareViewer", "adminPanel"].forEach((id) => {
+    const element = $(id);
+    if (!element) return;
+    element.classList.add("hidden");
+    element.setAttribute("aria-hidden", "true");
+  });
+  $("topbar")?.classList.add("hidden");
+  $("authPanel")?.classList.add("hidden");
+  $("workspace")?.classList.add("hidden");
+  window.WYJTools?.hide?.();
+}
+
+function stopProjectActivity() {
   if (currentProject) {
     saveCurrentWordDraft();
     saveProjectRuntime();
@@ -1359,27 +1593,44 @@ function showProjectPicker() {
   if (judgeController) judgeController.abort();
   clearNextTimer();
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
+function showModulePicker(pushHistory = true) {
+  if (!state.session || !state.account) {
+    showAuth(pendingAuthMessage || "请先登录", { replace: true });
+    return;
+  }
+  stopProjectActivity();
   currentProject = "";
   state.quizLanguage = "";
-  $("projectApp").classList.add("hidden");
-  $("projectApp").setAttribute("aria-hidden", "true");
-  $("topbar").classList.add("hidden");
-  $("authPanel").classList.add("hidden");
-  $("workspace").classList.add("hidden");
+  hidePrimaryScreens();
+  $("modulePicker").classList.remove("hidden");
+  $("modulePicker").setAttribute("aria-hidden", "false");
+  document.body.classList.add("project-picker-active");
+  if (pushHistory) pushRoute("/select");
+  renderAccountUi();
+}
+
+function showProjectPicker(pushHistory = true) {
+  if (!state.session || !state.account) {
+    showAuth(pendingAuthMessage || "请先登录后选择测试项目", { replace: true });
+    return;
+  }
+  stopProjectActivity();
+  currentProject = "";
+  state.quizLanguage = "";
+  hidePrimaryScreens();
   $("projectPicker").classList.remove("hidden");
   $("projectPicker").setAttribute("aria-hidden", "false");
-  $("adminPanel")?.classList.add("hidden");
-  $("adminPanel")?.setAttribute("aria-hidden", "true");
   document.body.classList.add("project-picker-active");
+  if (pushHistory) pushRoute("/language");
+  renderAccountUi();
 }
 
 function showMainShell() {
   if (!currentProject) return;
-  $("adminPanel")?.classList.add("hidden");
-  $("adminPanel")?.setAttribute("aria-hidden", "true");
+  hidePrimaryScreens();
   $("languagePanel").classList.add("hidden");
-  $("projectPicker").classList.add("hidden");
-  $("projectPicker").setAttribute("aria-hidden", "true");
   $("projectApp").classList.remove("hidden");
   $("projectApp").setAttribute("aria-hidden", "false");
   $("topbar").classList.remove("hidden");
@@ -1392,7 +1643,7 @@ function applyPendingScreen() {
   else showAuth(pendingAuthMessage);
 }
 
-function enterProject(value) {
+function enterProject(value, pushHistory = true) {
   if (!state.session || !state.account) {
     showAuth("请先登录后选择测试项目");
     return;
@@ -1412,25 +1663,19 @@ function enterProject(value) {
   saveState();
   updateLanguageUi();
   applyPendingScreen();
+  if (pushHistory) pushRoute(`/language/${language}`);
+  renderAccountUi();
 }
 
-function showAuth(message = "") {
+function showAuth(message = "", options = {}) {
   pendingScreen = "auth";
   pendingAuthMessage = message;
-  if (currentProject && state.account) {
-    saveCurrentWordDraft();
-    saveProjectRuntime();
-  }
+  stopProjectActivity();
   currentProject = "";
   state.quizLanguage = "";
-  if (judgeController) judgeController.abort();
-  clearNextTimer();
-  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-  showAuthMode("login");
-  $("adminPanel")?.classList.add("hidden");
-  $("adminPanel")?.setAttribute("aria-hidden", "true");
-  $("projectPicker").classList.add("hidden");
-  $("projectPicker").setAttribute("aria-hidden", "true");
+  const mode = options.mode || (options.path === "/register" || location.pathname === "/register" ? "register" : "login");
+  showAuthMode(mode);
+  hidePrimaryScreens();
   $("projectApp").classList.remove("hidden");
   $("projectApp").setAttribute("aria-hidden", "false");
   $("topbar").classList.add("hidden");
@@ -1440,6 +1685,9 @@ function showAuth(message = "") {
   $("loginError").textContent = message;
   $("offlineReviewBtn").classList.add("hidden");
   document.body.classList.add("project-picker-active");
+  const path = options.path || (mode === "register" ? "/register" : "/login");
+  if (!options.skipRoute) pushRoute(path, Boolean(options.replace));
+  renderAccountUi();
 }
 
 function showWorkspace() {
@@ -1452,6 +1700,98 @@ function showWorkspace() {
   if (!backendAvailable) $("modelLabel").textContent = "本地复习";
   else if (!aiAvailable) $("modelLabel").textContent = "AI 未启动";
   restoreProjectRuntime();
+}
+
+async function showTools(path = "/tools", pushHistory = true) {
+  if (!state.session || !state.account) {
+    showAuth("请先登录后使用在线工具箱", { replace: true });
+    return;
+  }
+  try {
+    await apiGet("/api/tools/access");
+    stopProjectActivity();
+    currentProject = "";
+    state.quizLanguage = "";
+    hidePrimaryScreens();
+    if (pushHistory) pushRoute(path);
+    await window.WYJTools.show(path);
+    document.body.classList.remove("project-picker-active");
+    renderAccountUi();
+  } catch (error) {
+    showModulePicker(false);
+    pushRoute("/select", true);
+    if (error.code === "membership_required") {
+      $("rechargeMessage").textContent = "当前会员不包含在线工具箱，请选择全功能会员。";
+      await openMembershipModal();
+    } else {
+      alert(error.message);
+    }
+  }
+}
+
+function showShareRoute(path) {
+  stopProjectActivity();
+  currentProject = "";
+  state.quizLanguage = "";
+  hidePrimaryScreens();
+  if (!window.WYJTools?.showShareViewer?.(path)) return false;
+  document.body.classList.add("project-picker-active");
+  renderAccountUi();
+  return true;
+}
+
+async function routeCurrent() {
+  if (routeBusy) return;
+  routeBusy = true;
+  try {
+    const path = location.pathname.replace(/\/+$/, "") || "/";
+    if (path.startsWith("/share/")) {
+      if (!showShareRoute(path)) pushRoute(state.session && state.account ? "/select" : "/login", true);
+      return;
+    }
+    if (!state.session || !state.account) {
+      const register = path === "/register";
+      showAuth(pendingAuthMessage, { mode: register ? "register" : "login", path: register ? "/register" : "/login", replace: !["/login", "/register"].includes(path) });
+      return;
+    }
+    if (["/", "/login", "/register", "/select"].includes(path)) {
+      showModulePicker(false);
+      if (path !== "/select") pushRoute("/select", true);
+      return;
+    }
+    if (path === "/language") {
+      showProjectPicker(false);
+      return;
+    }
+    const languageMatch = path.match(/^\/language\/(english|japanese)$/);
+    if (languageMatch) {
+      pendingScreen = "workspace";
+      enterProject(languageMatch[1], false);
+      return;
+    }
+    if (path === "/tools" || path.startsWith("/tools/")) {
+      await showTools(path, false);
+      return;
+    }
+    if (path === "/admin") {
+      await showAdminPanel(false);
+      return;
+    }
+    if (path === "/account") {
+      showModulePicker(false);
+      openModal("accountModal");
+      return;
+    }
+    if (path === "/recharge") {
+      showModulePicker(false);
+      await openMembershipModal();
+      return;
+    }
+    showModulePicker(false);
+    pushRoute("/select", true);
+  } finally {
+    routeBusy = false;
+  }
 }
 
 function updateLanguageUi() {
@@ -2063,6 +2403,33 @@ async function api(path, body = {}, options = {}) {
   return data;
 }
 
+async function publicApi(path, body = {}, options = {}) {
+  let response;
+  try {
+    response = await fetchWithTimeout(
+      path,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        controller: options.controller,
+      },
+      options.timeoutMs || API_TIMEOUT_MS,
+    );
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    throw new Error(backendErrorMessage(error));
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || "请求失败");
+    error.code = data.code || "request_failed";
+    throw error;
+  }
+  return data;
+}
+
 function setView(id) {
   if (id === "quizView" && !state.roundActive) id = "setupView";
   const leavingQuiz = id !== "quizView" && $("quizView")?.classList.contains("active");
@@ -2341,7 +2708,7 @@ function semanticMeaningForms(value) {
     changed = false;
     [...forms].forEach((form) => {
       const additions = [];
-      if (form.length > 1 && "的地得".includes(form.at(-1))) additions.push(form.slice(0, -1));
+      if (form.length > 1 && "的地得".includes(form[form.length - 1])) additions.push(form.slice(0, -1));
       if (form.length >= 3 && form.startsWith("有")) additions.push(form.slice(1));
       if (form.length >= 3 && form.endsWith("性")) additions.push(form.slice(0, -1));
       additions.forEach((item) => {
@@ -3358,12 +3725,42 @@ async function importWords(event) {
   }
 }
 
-function changeProfile(value) {
+function discardActiveRound() {
+  if (!state.roundActive) return;
+  if (judgeController) judgeController.abort();
+  clearNextTimer();
+  hideResultPanel();
+  setNextNowEnabled(false);
+  removeProjectRuntime();
+  state.words = [];
+  state.index = 0;
+  state.score = 0;
+  state.roundSkipped = 0;
+  state.quizSession = "";
+  state.lastRound = null;
+  state.mode = "normal";
+  state.roundActive = false;
+  state.answerLocked = false;
+  state.roundStartedAt = 0;
+  updateQuestionControls();
+  setView("setupView");
+}
+
+function changeProfile(value, options = {}) {
+  const nextProfile = sanitizeProfile(value);
+  if (state.roundActive && nextProfile !== state.profile && !options.abandonActive) {
+    $("profileInput").value = state.profile;
+    askConfirmation(`切换到“${nextProfile}”会放弃当前未完成的测试，确认继续？`, () => {
+      changeProfile(nextProfile, { abandonActive: true });
+    });
+    return;
+  }
   saveCurrentWordDraft();
   saveWrongBooks();
   saveAchievements();
   saveStudyRecords();
-  state.profile = sanitizeProfile(value);
+  if (options.abandonActive) discardActiveRound();
+  state.profile = nextProfile;
   $("profileInput").value = state.profile;
   loadWrongBooks();
   loadAchievements();
@@ -3399,8 +3796,8 @@ async function login(event) {
     pendingScreen = "workspace";
     pendingAuthMessage = "";
     $("modelLabel").textContent = data.model || "qwen3:8b";
-    if (location.pathname === "/admin") await showAdminPanel(false);
-    else showProjectPicker();
+    showModulePicker(false);
+    pushRoute("/select", true);
     updateStats();
   } catch (error) {
     $("loginError").textContent = error.message;
@@ -3482,15 +3879,18 @@ async function boot() {
 
   $("loginForm").addEventListener("submit", login);
   $("registerForm").addEventListener("submit", registerAccount);
-  $("showLoginBtn").addEventListener("click", () => showAuthMode("login"));
-  $("showRegisterBtn").addEventListener("click", () => showAuthMode("register"));
-  $("membershipBtn").addEventListener("click", openMembershipModal);
-  $("accountBtn").addEventListener("click", () => openModal("accountModal"));
+  $("showLoginBtn").addEventListener("click", () => showAuthMode("login", true));
+  $("showRegisterBtn").addEventListener("click", () => showAuthMode("register", true));
+  $("membershipBtn").addEventListener("click", async () => { pushRoute("/recharge"); await openMembershipModal(); });
+  $("accountBtn").addEventListener("click", () => { pushRoute("/account"); openModal("accountModal"); });
+  $("homeBtn").addEventListener("click", () => showModulePicker(true));
   $("adminBtn").addEventListener("click", () => showAdminPanel(true));
   $("logoutBtn").addEventListener("click", logoutAccount);
   $("submitRechargeBtn").addEventListener("click", submitRechargeRequest);
+  $("confirmPaymentBtn").addEventListener("click", confirmRechargePayment);
   $("copyWechatBtn").addEventListener("click", () => copyTextWithFeedback("W2009Y94J", $("copyWechatBtn")));
-  document.querySelectorAll("[data-plan]").forEach((button) => button.addEventListener("click", () => selectRechargePlan(button.dataset.plan)));
+  $("copyOrderBtn").addEventListener("click", () => copyTextWithFeedback(currentPaymentOrder?.order_number || "", $("copyOrderBtn")));
+  $("copyPaymentNoteBtn").addEventListener("click", () => copyTextWithFeedback(currentPaymentOrder?.payment_note || "", $("copyPaymentNoteBtn")));
   document.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", () => closeModal(button.dataset.closeModal)));
   document.querySelectorAll(".modal-layer").forEach((modal) => modal.addEventListener("click", (event) => {
     if (event.target === modal) closeModal(modal.id);
@@ -3515,6 +3915,9 @@ async function boot() {
   }));
   $("saveAdminMembershipBtn").addEventListener("click", saveAdminMembership);
   $("adminMembershipSelect").addEventListener("change", () => updateAdminMembershipFields(true));
+  $("adminMembershipAction").addEventListener("change", () => updateAdminMembershipFields(true));
+  $("adminDisableToolsBtn").addEventListener("click", () => updateAdminToolsOverride(false));
+  $("adminEnableToolsBtn").addEventListener("click", () => updateAdminToolsOverride(null));
   $("saveAdminSecretBtn").addEventListener("click", saveAdminSecret);
   $("adminToggleBanBtn").addEventListener("click", () => adminUserAction("ban"));
   $("adminForceLogoutBtn").addEventListener("click", () => adminUserAction("logout"));
@@ -3530,10 +3933,7 @@ async function boot() {
     closeModal("roundSummaryModal", true);
     setView("setupView");
   });
-  window.addEventListener("popstate", () => {
-    if (location.pathname === "/admin") showAdminPanel(false);
-    else showProjectPicker();
-  });
+  window.addEventListener("popstate", () => routeCurrent());
   $("offlineReviewBtn").addEventListener("click", () => {
     pendingScreen = "workspace";
     showWorkspace();
@@ -3590,7 +3990,15 @@ async function boot() {
   document.querySelectorAll("[data-project]").forEach((button) => {
     button.addEventListener("click", () => enterProject(button.dataset.project));
   });
-  $("backProjectBtn").addEventListener("click", showProjectPicker);
+  document.querySelectorAll("[data-module]").forEach((button) => button.addEventListener("click", async () => {
+    if (button.dataset.module === "language") showProjectPicker(true);
+    else await showTools("/tools", true);
+  }));
+  $("languageBackBtn").addEventListener("click", () => showModulePicker(true));
+  $("backProjectBtn").addEventListener("click", () => showProjectPicker(true));
+  $("leaveToolsBtn").addEventListener("click", () => showModulePicker(true));
+  $("toolsAccountBtn").addEventListener("click", () => { pushRoute("/account"); openModal("accountModal"); });
+  $("shareLoginBtn").addEventListener("click", () => state.session && state.account ? showModulePicker(true) : showAuth("", { path: "/login" }));
   $("gradingModeSelect").addEventListener("change", (event) => {
     state.gradingMode = event.target.value;
     saveState();
@@ -3610,6 +4018,19 @@ async function boot() {
   renderWrongBook();
   renderAchievements();
 
+  if (window.WYJTools && !toolsInitialized) {
+    window.WYJTools.init({
+      api,
+      apiGet,
+      publicApi,
+      copyText: writeClipboardText,
+      formatDate: formatLocalDateTime,
+      navigate: (path) => pushRoute(path),
+    });
+    toolsInitialized = true;
+  }
+  loadMembershipPlans().catch(() => {});
+
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register(`/sw.js?v=${APP_VERSION}`).catch(() => {});
   }
@@ -3621,18 +4042,21 @@ async function boot() {
     if (document.visibilityState === "visible" && navigator.onLine !== false) refreshBackendState();
   }, BACKEND_REFRESH_INTERVAL_MS);
 
+  const initialPath = location.pathname;
   const backendPromise = refreshBackendState();
-  if (state.session && state.account) showProjectPicker();
-  else showAuth();
   await runSplashSequence(() => {
     $("appShell").classList.remove("app-shell-pending");
     $("appShell").classList.add("app-shell-ready");
     $("appShell").setAttribute("aria-hidden", "false");
+    if (initialPath.startsWith("/share/") && showShareRoute(initialPath)) return;
+    showAuth(state.session ? "正在验证登录状态…" : "", {
+      mode: initialPath === "/register" ? "register" : "login",
+      path: initialPath,
+      skipRoute: true,
+    });
   });
   await backendPromise;
-  if (location.pathname === "/admin") await showAdminPanel(false);
-  else if (state.session && state.account) showProjectPicker();
-  else showAuth(pendingAuthMessage);
+  await routeCurrent();
 }
 
 boot();

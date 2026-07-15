@@ -1,0 +1,17 @@
+PRAGMA foreign_keys = OFF;
+DROP TABLE IF EXISTS temporary_room_messages;
+DROP TABLE IF EXISTS temporary_rooms;
+DROP TABLE IF EXISTS temporary_clipboards;
+DROP TABLE IF EXISTS temporary_files;
+DROP TABLE IF EXISTS temporary_texts;
+DROP TABLE IF EXISTS saved_tool_configs;
+DROP TABLE IF EXISTS tool_recent_usage;
+DROP TABLE IF EXISTS tool_favorites;
+DROP TABLE IF EXISTS admin_audit_logs;
+DROP TABLE IF EXISTS payment_requests;
+DROP TABLE IF EXISTS user_entitlement_overrides;
+DROP TABLE IF EXISTS user_memberships;
+DROP TABLE IF EXISTS membership_entitlements;
+DROP TABLE IF EXISTS membership_plans;
+DELETE FROM schema_migrations WHERE version = '001_entitlements';
+PRAGMA foreign_keys = ON;

@@ -1,175 +1,280 @@
 # WYJ的网站
 
-这是部署在 Cloudflare Pages 上的纯 HTML/CSS/JavaScript 词汇测试网站。前端通过 `functions/api/[[path]].js` 把 `/api/*` 请求转发到 `https://api.thewyj.uk`，再由 Cloudflare Tunnel 连接到本机 Python 后端和 Ollama。
+这是部署在 Cloudflare Pages 上的语言测试与在线工具箱。前端是纯 HTML/CSS/JavaScript，账户、会员、临时分享、PDF 和本地 AI 由 Python 标准库后端提供，公网通过 Cloudflare Tunnel 访问本机后端。
 
-## 架构
+正式网站：<https://thewyj.uk>
 
-- 前端：纯 HTML、CSS、JavaScript，无 npm 依赖、无构建步骤
-- Pages Functions：`functions/api/[[path]].js`，只负责 API 代理
-- 本地后端：Python 标准库 `ThreadingHTTPServer`
-- 数据库：SQLite，运行时文件 `data/users.sqlite3`
-- 用户镜像：运行目录中的 `users.txt`，按产品要求包含明文登录密钥
-- 本地 AI：Ollama
-- PWA：`manifest.webmanifest`、`sw.js`、现有图标和离线应用外壳
+## 技术栈与部署结构
 
-网站入口为仓库根目录的 `index.html`，Cloudflare Pages 不需要 `node_modules`。
+- 前端：`index.html`、`styles.css`、`app.js`、`tools.js`
+- PWA：`manifest.webmanifest`、`sw.js`
+- Pages Functions：`functions/api/[[path]].js`，把同源 `/api/*` 请求代理到固定 Tunnel
+- 后端：Python 3.8+ 标准库 `ThreadingHTTPServer`
+- 数据库：SQLite
+- 本地 AI：Ollama，默认模型 `qwen3:8b`
+- 公网链路：Cloudflare Pages -> Pages Function -> `api.thewyj.uk` -> Cloudflare Tunnel -> 本机 `8765`
+- 构建系统：无；不需要 npm、Vite、React、Vue 或 `node_modules`
 
-## 页面流程
+网站根目录保留 `index.html`，Cloudflare Pages 可直接发布仓库根目录。
 
-刷新网站后先播放全屏启动动画。未登录时先显示登录/注册页，登录成功后才显示项目选择页。选择英语或日语后，底层语言会被固定，不再重复显示语言选择框。返回项目选择页不会刷新页面，也不会清除登录、本地错题、成就或设置。
-
-前端会对 `/api/status` 做短间隔重试；设备重新联网或从微信后台回到页面时会自动复查。登录和注册按钮也会主动恢复连接，单次网络超时不会再被永久误判为 `LOCAL_API_BASE` 未配置。
-
-账户区位于页面右上角。超级管理员用户名固定为 `wyj`，但登录密钥不再写入公开仓库。已有数据库保留原密钥；全新数据库首次创建时读取本机 `VOCAB_ADMIN_SECRET`，未设置时生成随机密钥并写入运行目录的 `users.txt`。只有数据库会话中同时满足 `username == "wyj"` 和 `role == "super_admin"` 的账户才能看到并访问 `/admin`。普通用户即使手工打开该路径或直接调用管理员 API，也会被服务器拒绝。
-
-## 账户与会员
-
-`users` 表保存：
-
-- `id`：用户 ID
-- `username` / `username_normalized`：显示名及不区分大小写的唯一索引
-- `secret`：明文登录密钥（产品明确要求）
-- `role`：`user` 或 `super_admin`
-- `membership`：`free`、`trial_single_language`、`monthly`、`lifetime`
-- `membership_start` / `membership_expires`：会员开始和到期时间
-- `trial_language`：体验版无限使用的单一语言
-- `registered_at` / `last_login_at` / `created_at` / `updated_at`
-- `banned` / `permanent_ban` / `deleted` / `ban_reason`
-
-`sessions` 表保存 7 天有效的持久登录会话；每个账户最多保留最近 12 个有效会话，登录时会清理过期和超额记录。改密钥、封禁、强制退出或删除账户会立即删除相应会话。
-
-`recharge_requests` 表保存套餐、体验语言、申请时间、处理状态和管理员处理记录。同一用户同时只能有一条待处理申请，选择套餐不会自动开通会员。
-
-普通账户每次最多测试 15 个单词。前端会提示并打开会员窗口，后端 `/api/quiz/start` 仍会独立校验，因此不能通过修改浏览器变量绕过。体验会员只对已选语言无限；包月、永久和超级管理员对两种语言无限。后端在每次读取账户和授权测试时检查到期时间，过期后立即恢复 `free`。
-
-词表页提供“AI 联网选词”：日语支持 JLPT N5 至 N1，英语支持小学三至六年级、初中一至三年级、高中一至三年级及大学英语四、六级。用户可填写数量并选择替换或追加词表。追加时前端会把已有词传给后端排除，后端也会再次过滤重复词；界面按实际新增数量反馈，不会把重复词误报为已追加。后端只访问预设搜索服务，日语优先分页读取带 JLPT 标签的候选，同时保存假名读音和常用汉字词形；常用外来语会保留自然的片假名写法，不强行替换成生僻借字。英语按最多 50 个一批调用本地 Ollama 补齐；外网资料暂不可用时会明确降级为本地 AI。普通账户仍受 15 词限制，其他账户单次最多生成 200 词。
-
-日语词表始终按一行一个普通词显示。手工录入时只写汉字（如 `学校`）或只写假名（如 `がっこう`）都可以；开始听写前，后端会批量补全另一种形式。存在常用汉字写法的词必须同时填写汉字和假名，例如 `学校 / がっこう`，顺序和常见分隔符不受限制；没有常用汉字写法的纯假名或片假名词只填写其本身。旧版 `学校｜がっこう` 文件仍能导入，但界面不会再生成或显示这种内部格式。空答案会显示输入提示并停留在当前题，不会判错或写入错题本。
-
-管理员编辑会员时，开始和截止日期可按 `年/月/日` 输入，分隔符支持 `/`、`.`、`。` 和空格。开始日期会采用管理员点击保存时的本地时、分、秒；截止日期固定保存为所选日期当天 `23:59:59`。数据库中仍统一存储为 UTC ISO 时间，旧数据格式保持兼容。
-
-每轮练习结束后会显示总题数、正确、错误、跳过和正确率，用户可直接再练一轮、查看错题或返回词表；完成类成就只在整轮真正结束后解锁。管理员用户页支持按用户名或用户 ID 即时搜索，并显示当前匹配数量，用户较多时无需逐张卡片查找。
-
-“统计”视图按账户、使用者和语言记录每轮完成时间、题数、正确率、练习类型与用时，提供独立的英语/日语每日目标、今日进度、累计轮次、累计题数、近 7 天正确率、连续学习天数、7 日活动图和最近 20 条记录。当前语言统计可导出为 JSON，也可独立清除；清除统计不会删除错题、成就或另一种语言的数据。
-
-成就系统保留旧版 8 个成就 ID 和原解锁时间，并扩充为 25 个挑战。成就按入门、坚持、能力、探索和工具分类，分为初阶、进阶、高阶、卓越四个等级并计算成就点数；总览显示已获得数量、进行中数量和完成度，支持“全部 / 进行中 / 已获得”筛选。累计轮次、题数、正确数、最长连续天数、满分轮次、听写、错题复习、双语覆盖、高正确率轮次和达标天数均由真实学习记录自动计算进度，解锁时显示短暂提示。
-
-答题提交后会立即锁定本题，避免双击、回车连按或慢网络造成重复计分。刷新页面可在 100 分钟内恢复当前账户、当前语言尚未完成的测试；已经判完的题会安全前进，不会重复写入分数或错题。若用户尝试在上一轮未完成时开始新测试，界面会先确认是否放弃当前进度。
-
-词表开始、打乱、导入、导出和 AI 追加都会统一过滤空行、重复词及不属于当前语言的词，并在词表下方显示可测试数量和忽略原因。单个导入文件最大 1 MB，文本长度最多 120,000 个字符。错题页支持按单词、用户答案或标准释义搜索和逐条移除；每个错题范围保留最近 250 条，防止浏览器和同步数据无限增长。
-
-## 数据文件
-
-实际运行目录：
+## 页面流程与路由
 
 ```text
-C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-openai-primary-runtime\outputs\vocab-website
+打开或刷新
+-> 全屏启动动画
+-> 未登录进入 /login 或 /register
+-> 已登录进入 /select
+-> 选择语言测试或在线工具箱
 ```
 
-运行数据位于：
+主要路由：
+
+- `/login`、`/register`：登录与注册
+- `/select`：登录后的功能选择
+- `/language`：语言项目选择
+- `/language/english`、`/language/japanese`：固定语言测试
+- `/tools`、`/tools/<tool-id>`：会员工具箱
+- `/account`、`/recharge`：账户与充值
+- `/admin`：超级管理员后台
+- `/share/<type>/<id>`：临时分享读取页
+
+未登录访问受保护路由会回到 `/login`。没有 `tools_access` 的用户访问 `/tools` 会回到 `/select` 并打开充值窗口。工具页每次进入都会调用服务端 `/api/tools/access`，工具偏好、临时分享和管理员 API 也独立验证服务端会话与权益。
+
+## 会员方案
+
+唯一价格与权益配置位于 `local-backend/membership.py`。前端方案、充值订单和后端开通逻辑读取同一份服务端配置。
+
+| 方案代码 | 价格 | 权益 |
+| --- | ---: | --- |
+| `japanese_lifetime` | 70 CNY | 仅日语会员功能，永久有效，不包含工具箱 |
+| `all_access_monthly` | 30 CNY/月 | 全部语言会员功能、工具箱、批量处理、临时分享、配置保存 |
+| `all_access_lifetime` | 100 CNY | 全功能永久有效 |
+
+权益代码：
+
+- `language_japanese_access`
+- `language_all_access`
+- `tools_access`
+- `tools_batch_access`
+- `temporary_share_access`
+- `save_tool_config`
+- `all_features_access`
+
+权限按有效会员记录合并，不使用单一 `isVip`。优先级为全功能永久、全功能月度、日语单项、普通用户。月度会员到期后立即失去全功能权益，但同时存在的日语永久权益仍会保留。超级管理员拥有全部权益。
+
+### 老会员兼容
+
+原有数据不会被覆盖：
+
+- 旧 `trial_single_language` 迁移为隐藏兼容方案，保持原单语言体验权限
+- 旧 `monthly` 迁移为 `legacy_all_monthly`，保持原双语言包月权限，不新增工具权限
+- 旧 `lifetime` 迁移为 `legacy_all_lifetime`，保持原双语言永久权限，不新增工具权限
+- 旧待处理充值按原价格和原权益迁移，不会被静默改成新方案
+
+隐藏兼容方案不可由新用户购买。旧缓存页面提交 `monthly` 或 `lifetime` 会被服务端拒绝，避免价格或权益误开。
+
+## 充值与管理员
+
+充值窗口显示用户名、方案、金额、微信号 `W2009Y94J`、订单编号和付款备注。用户点击“我已付款”只会把订单改为待管理员核对，不会自动开通会员。
+
+管理员后台支持：
+
+- 查看用户、有效会员、合并权益、开通与到期时间
+- 查看、批准或拒绝充值申请
+- 开通、续期或取消指定会员
+- 降级普通用户并按需保留日语永久会员
+- 单独关闭或恢复工具权益
+- 重置密钥、强制退出、封禁、解封和删除测试用户
+- 查看管理员审计日志与工具使用统计
+
+所有管理员接口都在服务端验证固定超级管理员身份。会员、充值、封禁和账户操作记录管理员、对象、修改前后状态、时间与备注。封禁、改密、强制退出和删除会递增会话版本或清除会话，旧令牌不能继续使用。
+
+## 在线工具箱
+
+工具箱共 103 项，目录和实现位于 `tools.js`。原始文本、图片和普通文件默认只在浏览器本地处理，不上传服务器；服务端默认只保存工具 ID、使用时间、收藏和用户主动保存的配置。
+
+### 文本处理（29）
+
+统计、去重行、去空行、合并空格、大小写、camelCase、PascalCase、snake_case、kebab-case、前后缀、行号、查找替换、正则替换、排序、随机排序、差异对比、邮箱/URL/IP/数字日期提取、Base64、URL 编码、HTML 实体、Unicode、JSON 格式化/压缩/校验、简繁转换。
+
+### 文件处理（17）
+
+MD5、SHA-1、SHA-256、SHA-512、文件信息、CSV/JSON 互转、文本编码转换、TXT/CSV 分割、TXT/CSV/JSON 合并、多图转 PDF、重命名预览、ZIP 打包、批量 ZIP 下载。
+
+本地文件最多选择 50 个、总计 50 MB，避免浏览器内存失控。
+
+### 图片与设计（30）
+
+单张/批量压缩、PNG/JPG/WebP 转换、尺寸与百分比缩放、自由裁剪、1:1/4:3/16:9 裁剪、旋转、翻转、圆角、圆形头像、文字/图片/平铺水印、马赛克、模糊、黑色遮挡、转 PDF、EXIF 查看与删除、GPS 提醒、颜色提取与转换、渐变、纯色图、Favicon、多尺寸图标 ZIP。
+
+### 随机生成器（22）
+
+整数、小数、字符串、安全密码、UUID v4、抽签、分组、普通/带权转盘、日期、时间、颜色、调色板、硬币、D4/D6/D8/D10/D12/D20、自定义骰子、随机决定。随机和密码使用浏览器加密随机数。
+
+### 临时工具（5）
+
+- 临时文本：过期时间、访问次数、阅后即焚、密码、TXT 下载
+- 临时文件：过期时间、下载次数、下载后销毁、密码和类型/大小验证
+- 临时剪贴板：六位连接码、默认 10 分钟、可读取后销毁
+- 临时二维码：文本、URL、Wi-Fi、联系人和动态失效链接
+- 临时留言房间：密码、最大消息数、自动过期、创建者清空、不公开列出
+
+临时数据每 60 秒清理一次，也会在读取前清理。临时文件受 Pages 代理请求上限约束，当前最大 350 KB；允许 TXT、CSV、JSON、PDF、PNG、JPG、WebP、GIF 和 ZIP。服务端同时校验安全文件名、扩展名、MIME 和文件签名。
+
+## 数据库与迁移
+
+运行数据库默认位置：
 
 ```text
-data\users.sqlite3
-users.txt
+C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-openai-primary-runtime\outputs\vocab-website\data\users.sqlite3
 ```
 
-`users.txt` 先写临时文件，再使用 `os.replace` 原子替换。数据库提交成功但 TXT 同步失败时，API 会明确返回“数据库已保存但 TXT 同步失败”，不会向界面伪报成功。以上文件不在 `static` 中，也已被 `.gitignore` 排除，不能通过网站 URL 下载。
+用户镜像：
 
-浏览器中的错题、成就、设置和会话继续使用 `localStorage` / `sessionStorage`。待测试词表使用账户 ID、语言和使用者名称隔离；每次重新登录、退出或注销账户时会清除待测试词表以及旧版共享词表键，避免上一次登录留下的单词再次出现。错题、成就和设置不会随之清除。
+```text
+C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-openai-primary-runtime\outputs\vocab-website\users.txt
+```
 
-错题、成就和当前使用者现在也按账户隔离，主要键为 `vocabProfile:v2:<accountId>`、`wrongBook:v2:<accountId>:<scope>:<profile>` 和 `achievements:v2:<accountId>:<profile>`。学习记录与每日目标分别保存在 `studyHistory:v1:<accountId>:<profile>` 和 `studyGoal:v1:<accountId>:<profile>:<language>`；每个使用者最多保留最近 500 轮。未完成测试保存在会话级键 `vocabRuntime:v1:<accountId>:<language>` 中。首次升级时，旧版共享数据只会由第一个实际登录的账户认领并迁移一次，其他账户不会看到它；旧数据结构本身不作改写。
+密码使用 PBKDF2-SHA256、随机盐和 310,000 次迭代保存。`users.txt` 只写 `secret=protected`，不再写明文密码。老数据库中的明文密码会在启动时自动升级为哈希。
 
-英语和日语的判卷方式、练习方式与 AI 选词选项分别保存在新增的 `gradingMode:english|japanese`、`practiceMode:english|japanese` 和 `aiSuggestSettings:english|japanese` 键中。日语读音和常用汉字词形分别保存在 `japaneseReadingCache:v1` 与 `japaneseWrittenFormCache:v1` 中；它们是独立的可再生成缓存，不改变旧词表或错题结构。首次升级会从旧版共享设置迁移一份初始值，之后两个项目互不串台；原有键仍保留用于向旧版本兼容。登录成功和退出登录都会清空页面中的明文密钥输入框。
+迁移文件：
 
-明文密钥存在固有安全风险。不要公开运行目录、SQLite 文件或 `users.txt`，也不要把它们提交到 GitHub。此实现仅用于满足当前产品要求。
+- `local-backend/migrations/pre-001-schema.sql`：迁移前结构快照
+- `local-backend/migrations/001_entitlements_up.sql`：新权益、充值、审计、工具与临时数据表
+- `local-backend/migrations/001_entitlements_down.sql`：回滚新表
 
-## 主要 API
+第一次对老数据库执行迁移前会使用 SQLite backup API 创建一次性备份：
 
-账户接口：
+```text
+data\users.pre-entitlements-001.sqlite3
+```
 
-- `POST /api/register`
-- `POST /api/login`
-- `POST /api/logout`
-- `GET /api/me`
-- `POST /api/account/secret`
-- `POST /api/account/delete`
-- `POST /api/recharge/request`
-- `POST /api/quiz/start`
-- `POST /api/vocabulary/suggest`
-- `POST /api/japanese/readings`
+迁移可重复执行，`schema_migrations` 和来源唯一索引防止重复会员记录。该迁移前备份可能仍含旧版明文密码，必须只保存在本机受保护目录，不能上传或提交。
 
-管理员接口（统一验证当前数据库会话）：
+新增表包括 `membership_plans`、`user_memberships`、`membership_entitlements`、`user_entitlement_overrides`、`payment_requests`、`admin_audit_logs`、`tool_favorites`、`tool_recent_usage`、`saved_tool_configs` 及五类临时数据表。原 `users`、`sessions` 和 `recharge_requests` 表保留。
 
-- `GET /api/admin/users`
-- `GET /api/admin/recharge`
-- `POST /api/admin/membership`
-- `POST /api/admin/secret`
-- `POST /api/admin/ban`
-- `POST /api/admin/logout-user`
-- `POST /api/admin/delete-user`
-- `POST /api/admin/recharge/process`
+回滚前必须停止服务并另外备份当前数据库。优先恢复 `users.pre-entitlements-001.sqlite3`；直接执行 down SQL 会删除改版后产生的会员、支付、工具和临时数据。
 
-原有 `/api/status`、`/api/health`、`/api/rubric`、`/api/judge`、`/api/export-pdf` 保留。判卷接口需要由 `/api/quiz/start` 返回的 `quiz_session`，且服务器会再次检查会员权限。
+## 浏览器本地数据
+
+旧错题、成就和登录数据结构保持兼容。主要键包括：
+
+- `wyjAccountSession`：当前登录令牌
+- `vocabProfile:v2:<accountId>`：使用者
+- `wrongBook:v2:<accountId>:<scope>:<profile>`：当前/历史错题
+- `achievements:v2:<accountId>:<profile>`：成就
+- `studyHistory:v1:<accountId>:<profile>`：学习记录
+- `studyGoal:v1:<accountId>:<profile>:<language>`：每日目标
+- `vocabRuntime:v1:<accountId>:<language>`：未完成测试，仅当前浏览器会话
+- `gradingMode:<language>`、`practiceMode:<language>`、`aiSuggestSettings:<language>`：语言独立设置
+
+登录、退出和注册时会清理待测试词表，避免显示上一账户的单词；错题、成就、统计和设置不会因此被删除。
+
+## 安全措施
+
+- 密码和分享密码均不明文保存
+- 会话令牌使用加密安全随机数，服务端每次解析时检查封禁、删除、过期和会话版本
+- 登录、注册、临时创建和临时读取均有限流
+- POST 校验同源 `Origin`；无 CORS 放行；前端会话通过自定义请求头发送
+- SQL 全部使用参数绑定
+- 分享 ID 使用不可预测随机数，六位连接码只保存 HMAC 摘要
+- 用户文本通过 `textContent` 展示；动态 HTML 对用户输入做转义
+- 上传文件限制大小、文件名、扩展名、MIME 和内容签名
+- 静态目录与运行数据分离，路径解析后再次校验根目录
+- 错误响应不返回调用栈或本机路径
+- CSP、`nosniff`、禁止 iframe、严格 Referrer 和 Permissions Policy
+- Ollama `11434` 不对公网开放，公网只通过 Tunnel 访问账户后端 `8765`
+
+## 环境变量
+
+Pages Functions：
+
+| 变量 | 说明 |
+| --- | --- |
+| `LOCAL_API_BASE` | 必填，当前为 `https://api.thewyj.uk` |
+| `LOCAL_API_FALLBACK` | 可选的第二后端地址 |
+
+本地后端支持：
+
+- `VOCAB_ADMIN_SECRET`：仅全新数据库创建固定管理员时使用，不覆盖现有密码
+- `VOCAB_SHARE_HMAC_KEY`：六位临时剪贴板连接码的 HMAC 密钥；启动器会持久生成
+- `VOCAB_USERS_DB`、`VOCAB_USERS_TXT`、`VOCAB_STATIC_DIR`
+- `VOCAB_HOST`、`VOCAB_PORT`
+- `VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`
+- `VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`
+- `OLLAMA_HOST`、`OLLAMA_MODEL`、`OLLAMA_TIMEOUT_SEC`
+
+不要提交 `.env`、`data/`、SQLite、`users.txt`、日志或 Tunnel 凭据。
 
 ## 手动启动
 
-本项目**不配置开机自启动**。每次电脑重启后，需要手动双击：
+本项目不配置开机自启动。电脑重启后手动双击：
 
 ```text
 C:\Users\78252\Desktop\编程\背单词网站\启动WYJ网站.cmd
 ```
 
-启动器会同步仓库中的 `local-backend/server.py` 和 `account_store.py`，检查并启动 Ollama、本地后端和 Cloudflare Tunnel，最后打开 `https://thewyj.uk`。Ollama 暂时启动失败时会显示警告，但不会阻止登录、词表、错题等非 AI 功能和公网 Tunnel 上线。它不会创建 Windows 启动文件夹快捷方式。
+启动器会同步最新 Python 后端和迁移文件，启动或检查 Ollama、本地后端、Cloudflare Tunnel，验证 `api.thewyj.uk` 与 Pages 代理，然后打开正式网站。它会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏的断线守护进程，电脑关机后自然停止。
 
-桌面目录只保留这个手动启动入口；不创建开机自启动项，也不再放置测试或排错程序。
+源码中对应文件：
 
-## Cloudflare Pages
+- `desktop-tools/启动WYJ网站.cmd`
+- `desktop-tools/start-wyj.ps1`
+- `desktop-tools/watch-wyj.ps1`
+- `local-backend/run.ps1`
+
+也可以只启动本地后端：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\local-backend\run.ps1
+```
+
+## 测试
+
+后端、HTTP 集成和静态结构测试：
+
+```powershell
+cd local-backend
+python -m py_compile account_store.py membership.py temporary_store.py server.py test_accounts.py test_api.py test_static.py
+python -m unittest discover -p "test_*.py" -v
+```
+
+JavaScript 语法检查：
+
+```powershell
+node --check app.js
+node --check tools.js
+node --check sw.js
+node --check "functions/api/[[path]].js"
+```
+
+测试覆盖注册登录、会话、封禁、老会员迁移、新权益合并、过期降级、充值审批、审计日志、工具权限、收藏/历史/配置、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语读音、PDF 相关旧 API、并发状态请求、HTML ID、PWA 缓存和 103 项工具目录。
+
+## Cloudflare Pages 配置
 
 | 设置 | 值 |
 | --- | --- |
 | Framework preset | `None` / `Static HTML` |
 | Production branch | `main` |
-| Build command | `exit 0` |
-| Build output directory | `/`（控制台要求相对路径时填 `.`） |
-
-生产环境变量：
-
-| 变量 | 值 |
-| --- | --- |
-| `LOCAL_API_BASE` | `https://api.thewyj.uk` |
+| Build command | 留空；控制台强制要求时填 `exit 0` |
+| Build output directory | `.` |
 
 部署步骤：
 
-1. 将 `main` 推送到 `WYJ0904/japanese`。
-2. Cloudflare Pages 连接该仓库和 `main` 分支。
-3. 按上表配置构建选项和 `LOCAL_API_BASE`。
-4. 重新部署 Pages。
-5. 手动运行桌面启动器，保持本地后端和 Tunnel 在线。
-6. 打开 `https://thewyj.uk` 验证 `/api/status` 和账户登录。
+1. 推送 `main` 到 `WYJ0904/japanese`。
+2. Cloudflare Pages 连接该仓库和 `main`。
+3. 设置 `LOCAL_API_BASE=https://api.thewyj.uk`。
+4. 部署后检查 `/api/status`、登录、`/select`、无权限 `/tools` 拦截和管理员审批。
+5. 在提供本地后端的电脑上手动运行启动器，并保持电脑、网络和 Tunnel 在线。
 
-## 本地测试
+Pages 发布静态根目录，不生成 `dist`。`_redirects` 把 SPA 路由回退到 `index.html`。Service Worker 缓存版本会随本次发布更新，避免持续读取旧 JS/CSS。
 
-后端单元与 HTTP 集成测试：
+## 当前限制
 
-```powershell
-cd local-backend
-python -m py_compile account_store.py server.py test_accounts.py test_api.py
-python -m unittest -v test_accounts.py test_api.py
-```
+- 网站账户、AI、会员和临时分享依赖这台电脑在线；电脑关机、休眠、断网或 Tunnel 离线时，世界其他地区也无法使用这些服务。
+- 临时文件目前为 350 KB 上限，原因是 Pages Function 代理和 JSON/Base64 开销；普通本地文件工具仍支持总计 50 MB。
+- 纯浏览器图片处理能力受设备内存和浏览器 Canvas 支持影响；超大图片应分批处理。
+- 简繁转换使用内置常用字符映射，不等同于完整语言学词库转换。
+- 工具处理内容默认不上传，服务器因此无法恢复用户未主动保存的本地处理结果。
 
-当前自动化共包含 38 个后端测试，覆盖账户、会员、会话裁剪、注册限流、错题保留、Ollama 状态缓存、并发状态请求和主要 API。浏览器自动化另行覆盖启动动画、登录注册、管理员、英语/日语、释义/听写、错题导入导出、PDF、PWA 离线、学习统计、每日目标、成就自动解锁、成就筛选和手机窄屏。
-
-前端语法检查：
-
-```powershell
-node --check app.js
-node --check 'functions\api\[[path]].js'
-```
-
-纯静态项目没有单独的 TypeScript 类型检查或 ESLint 配置。这里的“构建”是确认根目录静态资源、Pages Function 和 Service Worker 可直接部署；不会生成 `dist`。
-
-## 环境变量
-
-本地后端支持：`OLLAMA_HOST`、`OLLAMA_MODEL`、`OLLAMA_TIMEOUT_SEC`、`VOCAB_HOST`、`VOCAB_PORT`、`VOCAB_SESSION_TTL_SEC`、`VOCAB_SESSION_MAX_ITEMS`、`VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`、`VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`、`VOCAB_USERS_DB`、`VOCAB_USERS_TXT`、`VOCAB_STATIC_DIR`、`VOCAB_ADMIN_SECRET`。`VOCAB_ADMIN_SECRET` 只在创建全新管理员记录时使用，不会在重启时覆盖已有管理员密钥。
-
-不要把 Ollama 的 `11434` 端口直接暴露到公网。公网只通过 Tunnel 访问受账户和会话保护的 Python 后端 `8765`。
+第三方二维码实现与许可证见 `THIRD_PARTY_NOTICES.md`。

@@ -1,4 +1,5 @@
 import argparse
+import base64
 import html
 import json
 import mimetypes
@@ -21,6 +22,7 @@ from pathlib import Path
 from socketserver import TCPServer
 
 from account_store import AccountError, AccountStore
+from temporary_store import MAX_TEMP_FILE_BYTES, TemporaryStore
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -30,7 +32,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-15-quality1"
+APP_BUILD = "2026-07-15-tools2"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -40,6 +42,9 @@ LOGIN_WINDOW_SEC = 300
 LOGIN_MAX_FAILURES = 8
 REGISTER_WINDOW_SEC = 10 * 60
 REGISTER_MAX_ATTEMPTS = 20
+TEMP_RATE_WINDOW_SEC = 60
+TEMP_RATE_MAX_REQUESTS = 60
+TEMP_READ_MAX_REQUESTS = 20
 SESSION_TTL_SEC = int(os.environ.get("VOCAB_SESSION_TTL_SEC", str(12 * 60 * 60)))
 SESSION_MAX_ITEMS = max(10, int(os.environ.get("VOCAB_SESSION_MAX_ITEMS", "100")))
 
@@ -58,6 +63,7 @@ OLLAMA_OPTIONS = {
 SESSIONS = {}
 LOGIN_FAILURES = {}
 REGISTER_ATTEMPTS = {}
+TEMP_REQUESTS = {}
 QUIZ_RUNS = {}
 VOCABULARY_SOURCE_CACHE = {}
 STATE_LOCK = threading.RLock()
@@ -114,6 +120,7 @@ def load_settings():
 SETTINGS = load_settings()
 ACCESS_TOKEN = os.environ.get("VOCAB_APP_TOKEN") or SETTINGS["access_token"]
 ACCOUNT_STORE = AccountStore(USERS_DB_PATH, USERS_TEXT_PATH)
+TEMPORARY_STORE = TemporaryStore(USERS_DB_PATH)
 
 
 def now_str():
@@ -301,6 +308,41 @@ def register_limited(handler, record=False):
         else:
             REGISTER_ATTEMPTS.pop(key, None)
         return len(active) >= REGISTER_MAX_ATTEMPTS
+
+
+def temporary_limited(handler, scope="write"):
+    now = time.time()
+    key = (request_client_key(handler), str(scope or "write"))
+    maximum = TEMP_READ_MAX_REQUESTS if scope == "read" else TEMP_RATE_MAX_REQUESTS
+    with STATE_LOCK:
+        active = [item for item in TEMP_REQUESTS.get(key, []) if now - item < TEMP_RATE_WINDOW_SEC]
+        if len(active) >= maximum:
+            TEMP_REQUESTS[key] = active
+            return True
+        active.append(now)
+        TEMP_REQUESTS[key] = active
+        if len(TEMP_REQUESTS) > 2000:
+            for current_key in list(TEMP_REQUESTS):
+                values = [item for item in TEMP_REQUESTS[current_key] if now - item < TEMP_RATE_WINDOW_SEC]
+                if values:
+                    TEMP_REQUESTS[current_key] = values
+                else:
+                    TEMP_REQUESTS.pop(current_key, None)
+        return False
+
+
+def same_origin_request(handler):
+    origin = str(handler.headers.get("Origin", "")).strip()
+    if not origin:
+        return True
+    try:
+        origin_host = urllib.parse.urlsplit(origin).netloc.casefold()
+    except ValueError:
+        return False
+    expected_host = str(
+        handler.headers.get("X-Forwarded-Host") or handler.headers.get("Host") or ""
+    ).strip().casefold()
+    return bool(origin_host and expected_host and origin_host == expected_host)
 
 
 def normalize_cn(value):
@@ -1338,15 +1380,25 @@ def paginate_pdf_lines(lines):
     pages = []
     page = []
     y = 46
-    for text, size, gap in lines:
-        wrapped = wrap_text(text, 62 if size <= 12 else 45)
-        for part in wrapped:
-            if y + gap > 800:
-                pages.append(page)
-                page = []
-                y = 46
-            page.append((part, size, y))
-            y += gap
+    for entry in lines:
+        block = entry if isinstance(entry, list) else [entry]
+        block_height = sum(
+            len(wrap_text(text, 62 if size <= 12 else 45)) * gap
+            for text, size, gap in block
+        )
+        if page and block_height <= 754 and y + block_height > 800:
+            pages.append(page)
+            page = []
+            y = 46
+        for text, size, gap in block:
+            wrapped = wrap_text(text, 62 if size <= 12 else 45)
+            for part in wrapped:
+                if y + gap > 800:
+                    pages.append(page)
+                    page = []
+                    y = 46
+                page.append((part, size, y))
+                y += gap
     pages.append(page)
     return pages
 
@@ -1692,7 +1744,7 @@ def wrong_book_pdf(wrong_book, title=None, meta=None):
         accepted = info.get("accepted", []) or []
         status = "跳过" if info.get("skipped") else f"错 {info.get('wrong_count', 0)} 次"
         accepted_text = "、".join(str(x) for x in accepted[:12])
-        lines.extend(
+        lines.append(
             [
                 (f"{index}. {word}  [{status}]", 15, 24),
                 (f"我的答案：{info.get('last_answer', '')}", 12, 18),
@@ -1766,6 +1818,18 @@ class VocabHandler(BaseHTTPRequestHandler):
         json_response(self, HTTPStatus.FORBIDDEN, {"error": "无管理员权限", "code": "forbidden"})
         return False
 
+    def require_entitlement(self, entitlement):
+        if not self.require_session():
+            return False
+        if ACCOUNT_STORE.has_entitlement(self.account_user, entitlement):
+            return True
+        json_response(
+            self,
+            HTTPStatus.FORBIDDEN,
+            {"error": "当前会员不包含此功能", "code": "membership_required", "entitlement": entitlement},
+        )
+        return False
+
     def account_error(self, exc):
         json_response(
             self,
@@ -1791,6 +1855,14 @@ class VocabHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/api/membership/plans":
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"ok": True, "plans": ACCOUNT_STORE.membership_plans(), "contact": "W2009Y94J"},
+            )
+            return
+
         try:
             if path == "/api/me":
                 if not self.require_session():
@@ -1800,6 +1872,28 @@ class VocabHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {"ok": True, "account": ACCOUNT_STORE.user_payload(self.account_user)},
                 )
+                return
+
+            if path == "/api/recharge/mine":
+                if not self.require_session():
+                    return
+                json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {"ok": True, "requests": ACCOUNT_STORE.list_user_payment_requests(self.account_user)},
+                )
+                return
+
+            if path in {"/api/tools/access", "/api/tools/preferences"}:
+                if not self.require_entitlement("tools_access"):
+                    return
+                payload = {
+                    "ok": True,
+                    "account": ACCOUNT_STORE.user_payload(self.account_user),
+                }
+                if path.endswith("preferences"):
+                    payload.update(ACCOUNT_STORE.list_tool_preferences(self.account_user))
+                json_response(self, HTTPStatus.OK, payload)
                 return
 
             if path == "/api/admin/users":
@@ -1817,11 +1911,37 @@ class VocabHandler(BaseHTTPRequestHandler):
                     {"ok": True, "requests": ACCOUNT_STORE.list_recharge_requests(self.account_user)},
                 )
                 return
+
+            if path == "/api/admin/audit":
+                if not self.require_super_admin():
+                    return
+                json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {"ok": True, "logs": ACCOUNT_STORE.list_audit_logs(self.account_user)},
+                )
+                return
+
+            if path == "/api/admin/tool-stats":
+                if not self.require_super_admin():
+                    return
+                json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {"ok": True, "tools": ACCOUNT_STORE.admin_tool_usage_stats(self.account_user)},
+                )
+                return
         except AccountError as exc:
             self.account_error(exc)
             return
 
-        if path in {"/", "/admin"}:
+        spa_path = (
+            path in {"/", "/login", "/register", "/select", "/language", "/tools", "/account", "/recharge", "/admin"}
+            or path.startswith("/language/")
+            or path.startswith("/tools/")
+            or path.startswith("/share/")
+        )
+        if spa_path:
             path = "/index.html"
         static_root = STATIC_DIR.resolve()
         file_path = (static_root / path.lstrip("/")).resolve()
@@ -1851,6 +1971,14 @@ class VocabHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             request_path = urllib.parse.urlsplit(self.path).path
+
+            if not same_origin_request(self):
+                json_response(
+                    self,
+                    HTTPStatus.FORBIDDEN,
+                    {"error": "请求来源无效", "code": "origin_forbidden"},
+                )
+                return
 
             if request_path == "/api/register":
                 if register_limited(self):
@@ -1904,6 +2032,60 @@ class VocabHandler(BaseHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, {"ok": True})
                 return
 
+            if request_path in {
+                "/api/share/text/read",
+                "/api/share/file/read",
+                "/api/share/clipboard/read",
+                "/api/share/room/read",
+                "/api/share/room/post",
+            }:
+                if temporary_limited(self, "read"):
+                    json_response(
+                        self,
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        {"error": "临时分享访问过于频繁，请稍后再试", "code": "share_rate_limited"},
+                    )
+                    return
+                payload = self.read_json()
+                if request_path == "/api/share/text/read":
+                    result = TEMPORARY_STORE.read_text(payload.get("id"), payload.get("password"))
+                    json_response(self, HTTPStatus.OK, {"ok": True, "share": result})
+                    return
+                if request_path == "/api/share/file/read":
+                    result = TEMPORARY_STORE.read_file(payload.get("id"), payload.get("password"))
+                    json_response(
+                        self,
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "file": {
+                                "id": result["id"],
+                                "file_name": result["file_name"],
+                                "mime_type": result["mime_type"],
+                                "size_bytes": result["size_bytes"],
+                                "expires_at": result["expires_at"],
+                                "download_count": result["download_count"],
+                                "destroyed": result["destroyed"],
+                                "base64": base64.b64encode(result["content"]).decode("ascii"),
+                            },
+                        },
+                    )
+                    return
+                if request_path == "/api/share/clipboard/read":
+                    result = TEMPORARY_STORE.read_clipboard(payload.get("code"))
+                    json_response(self, HTTPStatus.OK, {"ok": True, "clipboard": result})
+                    return
+                if request_path == "/api/share/room/read":
+                    result = TEMPORARY_STORE.room_messages(payload.get("id"), payload.get("password"))
+                    json_response(self, HTTPStatus.OK, {"ok": True, "room": result})
+                    return
+                TEMPORARY_STORE.post_room_message(
+                    payload.get("id"), payload.get("author"), payload.get("message"), payload.get("password")
+                )
+                result = TEMPORARY_STORE.room_messages(payload.get("id"), payload.get("password"))
+                json_response(self, HTTPStatus.CREATED, {"ok": True, "room": result})
+                return
+
             if not self.require_session():
                 return
 
@@ -1935,6 +2117,113 @@ class VocabHandler(BaseHTTPRequestHandler):
                 ACCOUNT_STORE.delete_own_account(self.account_user["id"], payload.get("secret"))
                 json_response(self, HTTPStatus.OK, {"ok": True, "account_deleted": True})
                 return
+
+            if request_path == "/api/recharge/confirm":
+                payload = self.read_json()
+                record = ACCOUNT_STORE.confirm_recharge_payment(self.account_user, payload.get("request_id"))
+                json_response(self, HTTPStatus.OK, {"ok": True, "request": record})
+                return
+
+            if request_path.startswith("/api/tools/"):
+                if not ACCOUNT_STORE.has_entitlement(self.account_user, "tools_access"):
+                    raise AccountError("当前会员不包含在线工具箱", 403, "membership_required")
+                payload = self.read_json()
+                if request_path == "/api/tools/favorite":
+                    ACCOUNT_STORE.set_tool_favorite(
+                        self.account_user,
+                        payload.get("tool_id"),
+                        payload.get("favorite", True),
+                        payload.get("pinned", False),
+                    )
+                    json_response(self, HTTPStatus.OK, {"ok": True})
+                    return
+                if request_path == "/api/tools/recent":
+                    ACCOUNT_STORE.record_tool_usage(self.account_user, payload.get("tool_id"))
+                    json_response(self, HTTPStatus.OK, {"ok": True})
+                    return
+                if request_path == "/api/tools/history/clear":
+                    ACCOUNT_STORE.clear_tool_history(self.account_user)
+                    json_response(self, HTTPStatus.OK, {"ok": True})
+                    return
+                if request_path == "/api/tools/config/save":
+                    if not ACCOUNT_STORE.has_entitlement(self.account_user, "save_tool_config"):
+                        raise AccountError("当前会员不包含配置保存", 403, "membership_required")
+                    config_id = ACCOUNT_STORE.save_tool_config(
+                        self.account_user,
+                        payload.get("tool_id"),
+                        payload.get("name"),
+                        payload.get("config"),
+                        payload.get("id"),
+                    )
+                    json_response(self, HTTPStatus.OK, {"ok": True, "id": config_id})
+                    return
+                if request_path == "/api/tools/config/delete":
+                    ACCOUNT_STORE.delete_tool_config(self.account_user, payload.get("id"))
+                    json_response(self, HTTPStatus.OK, {"ok": True})
+                    return
+                raise AccountError("工具接口不存在", 404, "tool_endpoint_not_found")
+
+            if request_path.startswith("/api/temporary/"):
+                if not ACCOUNT_STORE.has_entitlement(self.account_user, "temporary_share_access"):
+                    raise AccountError("当前会员不包含临时分享", 403, "membership_required")
+                if temporary_limited(self, "write"):
+                    raise AccountError("临时工具操作过于频繁，请稍后再试", 429, "share_rate_limited")
+                payload = self.read_json()
+                if request_path in {"/api/temporary/text", "/api/temporary/qr"}:
+                    result = TEMPORARY_STORE.create_text(
+                        self.account_user,
+                        payload.get("content"),
+                        payload.get("password"),
+                        payload.get("minutes", 60),
+                        payload.get("max_views", 10),
+                        payload.get("destroy_after_read", False),
+                        payload.get("kind", "qr" if request_path.endswith("qr") else "text"),
+                    )
+                    json_response(self, HTTPStatus.CREATED, {"ok": True, "share": result})
+                    return
+                if request_path == "/api/temporary/file":
+                    encoded = str(payload.get("base64") or "")
+                    if len(encoded) > ((MAX_TEMP_FILE_BYTES + 2) // 3) * 4 + 8:
+                        raise AccountError("临时文件过大", 413, "file_too_large")
+                    try:
+                        content = base64.b64decode(encoded, validate=True)
+                    except (ValueError, TypeError) as exc:
+                        raise AccountError("文件内容格式无效", 400, "file_content_invalid") from exc
+                    result = TEMPORARY_STORE.create_file(
+                        self.account_user,
+                        payload.get("file_name"),
+                        payload.get("mime_type"),
+                        content,
+                        payload.get("password"),
+                        payload.get("minutes", 60),
+                        payload.get("max_downloads", 5),
+                        payload.get("destroy_after_download", False),
+                    )
+                    json_response(self, HTTPStatus.CREATED, {"ok": True, "file": result})
+                    return
+                if request_path == "/api/temporary/clipboard":
+                    result = TEMPORARY_STORE.create_clipboard(
+                        self.account_user,
+                        payload.get("content"),
+                        payload.get("minutes", 10),
+                        payload.get("destroy_after_read", True),
+                    )
+                    json_response(self, HTTPStatus.CREATED, {"ok": True, "clipboard": result})
+                    return
+                if request_path == "/api/temporary/room":
+                    result = TEMPORARY_STORE.create_room(
+                        self.account_user,
+                        payload.get("password"),
+                        payload.get("minutes", 60),
+                        payload.get("max_messages", 50),
+                    )
+                    json_response(self, HTTPStatus.CREATED, {"ok": True, "room": result})
+                    return
+                if request_path == "/api/temporary/room/clear":
+                    TEMPORARY_STORE.clear_room(self.account_user, payload.get("id"))
+                    json_response(self, HTTPStatus.OK, {"ok": True})
+                    return
+                raise AccountError("临时工具接口不存在", 404, "temporary_endpoint_not_found")
 
             if request_path == "/api/recharge/request":
                 payload = self.read_json()
@@ -2026,6 +2315,29 @@ class VocabHandler(BaseHTTPRequestHandler):
                     raise AccountError("无管理员权限", 403, "forbidden")
                 payload = self.read_json()
                 user_id = str(payload.get("user_id", ""))
+                if request_path == "/api/admin/membership/manage":
+                    user = ACCOUNT_STORE.admin_manage_membership(
+                        self.account_user,
+                        user_id,
+                        payload.get("action"),
+                        payload.get("plan_code"),
+                        payload.get("membership_start"),
+                        payload.get("membership_expires"),
+                        payload.get("note"),
+                        payload.get("preserve_japanese", False),
+                    )
+                    json_response(self, HTTPStatus.OK, {"ok": True, "user": user})
+                    return
+                if request_path == "/api/admin/entitlement":
+                    user = ACCOUNT_STORE.admin_set_entitlement_override(
+                        self.account_user,
+                        user_id,
+                        payload.get("entitlement"),
+                        payload.get("allowed"),
+                        payload.get("note"),
+                    )
+                    json_response(self, HTTPStatus.OK, {"ok": True, "user": user})
+                    return
                 if request_path == "/api/admin/membership":
                     user = ACCOUNT_STORE.admin_set_membership(
                         self.account_user,
@@ -2140,6 +2452,14 @@ def safe_print(message=""):
         pass
 
 
+def temporary_cleanup_loop(stop_event):
+    while not stop_event.wait(60):
+        try:
+            TEMPORARY_STORE.cleanup_expired()
+        except Exception as exc:
+            log_error(exc)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.environ.get("VOCAB_HOST", "0.0.0.0"))
@@ -2147,6 +2467,14 @@ def main():
     args = parser.parse_args()
 
     server = VocabServer((args.host, args.port), VocabHandler)
+    cleanup_stop = threading.Event()
+    cleanup_thread = threading.Thread(
+        target=temporary_cleanup_loop,
+        args=(cleanup_stop,),
+        name="temporary-cleanup",
+        daemon=True,
+    )
+    cleanup_thread.start()
     safe_print("")
     safe_print("WYJ的网站本地后端已启动")
     safe_print(f"本机访问: http://127.0.0.1:{args.port}")
@@ -2154,7 +2482,11 @@ def main():
     safe_print(f"用户 TXT: {USERS_TEXT_PATH}")
     safe_print("")
     safe_print("不要把 Ollama 的 11434 端口暴露到公网；请只暴露这个网站端口。")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        cleanup_stop.set()
+        server.server_close()
 
 
 if __name__ == "__main__":

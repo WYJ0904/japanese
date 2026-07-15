@@ -1,5 +1,8 @@
 import tempfile
 import unittest
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from unittest import mock
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -62,12 +65,19 @@ class AccountStoreTests(unittest.TestCase):
             with self.assertRaises(AccountError):
                 self.register(reserved, "SECRET")
 
-    def test_plaintext_txt_is_atomically_synchronized(self):
+    def test_txt_is_atomically_synchronized_without_plaintext_secrets(self):
         self.register()
         text = self.text_path.read_text(encoding="utf-8")
         self.assertIn("username=user001", text)
-        self.assertIn("secret=ABC123", text)
+        self.assertIn("secret=protected", text)
+        self.assertNotIn("ABC123", text)
         self.assertIn("username=wyj", text)
+        with self.store.connect() as connection:
+            encoded = connection.execute(
+                "SELECT secret FROM users WHERE username_normalized = ?", ("user001",)
+            ).fetchone()[0]
+        self.assertTrue(encoded.startswith("pbkdf2_sha256$"))
+        self.assertNotIn("ABC123", encoded)
 
     def test_txt_failure_reports_committed_database_write(self):
         with mock.patch("account_store.os.replace", side_effect=OSError("file is locked")):
@@ -169,7 +179,10 @@ class AccountStoreTests(unittest.TestCase):
         token, _ = self.store.login("user001", "ABC123")
         self.store.change_own_secret(user["id"], "ABC123", "NEW456")
         self.assertIsNone(self.store.resolve_session(token))
-        self.assertIn("secret=NEW456", self.text_path.read_text(encoding="utf-8"))
+        text = self.text_path.read_text(encoding="utf-8")
+        self.assertIn("secret=protected", text)
+        self.assertNotIn("NEW456", text)
+        self.store.login("user001", "NEW456")
 
     def test_ban_invalidates_session_and_unban_restores_login(self):
         user = self.register()
@@ -205,15 +218,161 @@ class AccountStoreTests(unittest.TestCase):
 
     def test_recharge_request_is_deduplicated_and_manual(self):
         user = self.register()
-        first, created = self.store.create_recharge_request(user, "monthly")
-        second, created_again = self.store.create_recharge_request(user, "lifetime")
+        first, created = self.store.create_recharge_request(user, "all_access_monthly")
+        second, created_again = self.store.create_recharge_request(user, "all_access_lifetime")
         self.assertTrue(created)
         self.assertFalse(created_again)
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(self.store.get_user(user["id"])["membership"], "free")
         status = self.store.process_recharge_request(self.admin, first["id"], "approve")
-        self.assertEqual(status, "activated")
+        self.assertEqual(status, "approved")
         self.assertEqual(self.store.get_user(user["id"])["membership"], "monthly")
+        with self.assertRaises(AccountError):
+            self.store.create_recharge_request(user, "monthly")
+
+    def test_new_memberships_merge_entitlements_without_granting_tools_to_japanese(self):
+        user = self.register()
+        japanese = self.store.admin_manage_membership(
+            self.admin, user["id"], "grant", "japanese_lifetime"
+        )
+        self.assertIn("language_japanese_access", japanese["entitlements"])
+        self.assertNotIn("tools_access", japanese["entitlements"])
+        self.assertIsNone(self.store.quiz_limit(self.store.get_user(user["id"]), "japanese"))
+        self.assertEqual(self.store.quiz_limit(self.store.get_user(user["id"]), "english"), 15)
+
+        full = self.store.admin_manage_membership(
+            self.admin, user["id"], "grant", "all_access_monthly"
+        )
+        self.assertIn("tools_access", full["entitlements"])
+        self.assertIsNone(self.store.quiz_limit(self.store.get_user(user["id"]), "english"))
+        self.store.admin_manage_membership(
+            self.admin, user["id"], "cancel", "all_access_monthly"
+        )
+        remaining = self.store.user_payload(self.store.get_user(user["id"]))
+        self.assertNotIn("tools_access", remaining["entitlements"])
+        self.assertIn("language_japanese_access", remaining["entitlements"])
+
+    def test_legacy_membership_migration_is_idempotent_and_does_not_add_tools(self):
+        user = self.register()
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE users SET membership = 'lifetime', membership_start = ? WHERE id = ?",
+                (iso_now(), user["id"]),
+            )
+        restarted = AccountStore(self.store.database_path, self.text_path)
+        restarted_again = AccountStore(self.store.database_path, self.text_path)
+        payload = restarted_again.user_payload(restarted_again.get_user(user["id"]))
+        legacy = [item for item in payload["memberships"] if item["plan_code"] == "legacy_all_lifetime"]
+        self.assertEqual(len(legacy), 1)
+        self.assertIn("language_all_access", payload["entitlements"])
+        self.assertNotIn("tools_access", payload["entitlements"])
+
+    def test_pre_migration_database_is_backed_up_once(self):
+        root = Path(self.temporary.name) / "legacy"
+        database = root / "data" / "users.sqlite3"
+        text_path = root / "users.txt"
+        database.parent.mkdir(parents=True)
+        schema = (Path(__file__).with_name("migrations") / "pre-001-schema.sql").read_text(encoding="utf-8")
+        now = iso_now()
+        with closing(sqlite3.connect(database)) as connection:
+            connection.executescript(schema)
+            connection.execute(
+                """
+                INSERT INTO users (
+                    id, username, username_normalized, secret, role, membership,
+                    membership_start, registered_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'user', 'lifetime', ?, ?, ?, ?)
+                """,
+                ("legacy-user", "legacy", "legacy", "OLD-SECRET", now, now, now, now),
+            )
+            connection.commit()
+        migrated = AccountStore(database, text_path)
+        backup = database.with_name("users.pre-entitlements-001.sqlite3")
+        self.assertTrue(backup.exists())
+        with closing(sqlite3.connect(backup)) as connection:
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            self.assertNotIn("user_memberships", tables)
+            self.assertEqual(connection.execute("SELECT secret FROM users WHERE id = 'legacy-user'").fetchone()[0], "OLD-SECRET")
+        payload = migrated.user_payload(migrated.get_user("legacy-user"))
+        self.assertIn("language_all_access", payload["entitlements"])
+        self.assertNotIn("tools_access", payload["entitlements"])
+        migrated.login("legacy", "OLD-SECRET")
+        backup_bytes = backup.read_bytes()
+        AccountStore(database, text_path)
+        self.assertEqual(backup.read_bytes(), backup_bytes)
+
+    def test_legacy_pending_orders_keep_original_price_and_rights(self):
+        user = self.register()
+        now = iso_now()
+        with self.store.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO recharge_requests (
+                    id, user_id, username, plan, status, requested_at, updated_at
+                ) VALUES (?, ?, ?, 'monthly', 'pending', ?, ?)
+                """,
+                ("legacy-order", user["id"], user["username"], now, now),
+            )
+        restarted = AccountStore(self.store.database_path, self.text_path)
+        request = next(item for item in restarted.list_recharge_requests(self.admin) if item["id"] == "legacy-order")
+        self.assertEqual(request["plan_code"], "legacy_all_monthly")
+        self.assertEqual(request["amount_cents"], 1000)
+        restarted.process_recharge_request(self.admin, request["id"], "approve")
+        payload = restarted.user_payload(restarted.get_user(user["id"]))
+        self.assertIn("language_all_access", payload["entitlements"])
+        self.assertNotIn("tools_access", payload["entitlements"])
+
+    def test_expired_all_access_monthly_loses_tools_but_keeps_japanese(self):
+        user = self.register()
+        self.store.admin_manage_membership(self.admin, user["id"], "grant", "japanese_lifetime")
+        expired = (utc_now() - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+        self.store.admin_manage_membership(
+            self.admin,
+            user["id"],
+            "grant",
+            "all_access_monthly",
+            expires=expired,
+        )
+        payload = self.store.user_payload(self.store.get_user(user["id"]))
+        self.assertNotIn("tools_access", payload["entitlements"])
+        self.assertIn("language_japanese_access", payload["entitlements"])
+        monthly = [item for item in self.store.memberships_for(self.store.get_user(user["id"]), include_inactive=True) if item["plan_code"] == "all_access_monthly"]
+        self.assertEqual(monthly[0]["status"], "expired")
+
+    def test_admin_actions_create_audit_logs(self):
+        user = self.register()
+        self.store.admin_manage_membership(
+            self.admin, user["id"], "grant", "all_access_lifetime", note="test grant"
+        )
+        self.store.admin_set_entitlement_override(
+            self.admin, user["id"], "tools_access", False, note="test override"
+        )
+        logs = self.store.list_audit_logs(self.admin)
+        self.assertEqual(logs[0]["action"], "entitlement_override")
+        self.assertEqual(logs[1]["action"], "membership_grant")
+        self.assertEqual(logs[0]["target_user_id"], user["id"])
+
+    def test_concurrent_payment_approval_only_succeeds_once(self):
+        user = self.register()
+        request, _created = self.store.create_recharge_request(user, "all_access_lifetime")
+
+        def approve():
+            try:
+                return self.store.process_recharge_request(self.admin, request["id"], "approve")
+            except AccountError as exc:
+                return exc.code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _item: approve(), range(2)))
+
+        self.assertEqual(results.count("approved"), 1)
+        self.assertEqual(results.count("request_already_processed"), 1)
+        memberships = [
+            item
+            for item in self.store.memberships_for(self.store.get_user(user["id"]), include_inactive=True)
+            if item["plan_code"] == "all_access_lifetime" and item["status"] == "active"
+        ]
+        self.assertEqual(len(memberships), 1)
 
 
 if __name__ == "__main__":
