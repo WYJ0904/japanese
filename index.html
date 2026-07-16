@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260716-quality14" />
-    <link rel="stylesheet" href="/styles.css?v=20260716-quality14" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260716-quality15" />
+    <link rel="stylesheet" href="/styles.css?v=20260716-quality15" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -214,7 +214,10 @@
                 <span id="quizLanguageLabel">未选语言</span>
                 <span id="practiceModeLabel">释义</span>
               </div>
-              <div class="word-display" id="wordLabel">-</div>
+              <div class="word-display" id="wordLabel" aria-live="polite">
+                <span class="word-primary" id="wordText">-</span>
+                <span class="word-reading hidden" id="wordReading" aria-hidden="true"></span>
+              </div>
               <form id="answerForm" class="answer-form">
                 <input id="answerInput" autocomplete="off" maxlength="240" placeholder="中文意思" aria-describedby="answerValidation" />
                 <button class="primary" id="submitBtn" type="submit">提交</button>
@@ -543,7 +546,7 @@
     </template>
 
     <script src="/vendor/qrcode.js?v=2.0.4"></script>
-    <script src="/tools.js?v=20260716-quality14"></script>
-    <script src="/app.js?v=20260716-quality14"></script>
+    <script src="/tools.js?v=20260716-quality15"></script>
+    <script src="/app.js?v=20260716-quality15"></script>
   </body>
 </html>

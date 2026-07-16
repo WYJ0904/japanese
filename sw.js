@@ -1,14 +1,14 @@
-const CACHE = "wyj-shell-20260716-quality14";
+const CACHE = "wyj-shell-20260716-quality15";
 const CORE_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260716-quality14",
-  "/app.js?v=20260716-quality14",
-  "/tools.js?v=20260716-quality14",
+  "/styles.css?v=20260716-quality15",
+  "/app.js?v=20260716-quality15",
+  "/tools.js?v=20260716-quality15",
   "/vendor/qrcode.js?v=2.0.4",
   "/vendor/opencc-st-characters.txt",
   "/vendor/opencc-ts-characters.txt",
-  "/manifest.webmanifest?v=20260716-quality14",
+  "/manifest.webmanifest?v=20260716-quality15",
   "/icon-192.png",
   "/icon-512.png",
 ];

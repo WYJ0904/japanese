@@ -712,6 +712,8 @@ textarea {
 .word-display {
   display: grid;
   place-items: center;
+  align-content: center;
+  gap: 10px;
   min-height: 180px;
   padding: 16px;
   font-size: clamp(42px, 15vw, 86px);
@@ -720,10 +722,30 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.word-primary {
+  line-height: 1.04;
+}
+
+.word-reading {
+  color: #8fdcff;
+  font-size: 28px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-shadow: 0 0 18px rgba(80, 190, 240, 0.18);
+}
+
+.word-display.has-reading {
+  padding-block: 24px;
+}
+
 .word-display.dictation-display {
   color: #203a43;
   font-size: clamp(36px, 11vw, 64px);
   letter-spacing: 0;
+}
+
+.word-display.dictation-display .word-reading {
+  display: none;
 }
 
 .answer-form {
@@ -3181,6 +3203,10 @@ textarea::placeholder {
 
   .word-display {
     min-height: 160px;
+  }
+
+  .word-reading {
+    font-size: 22px;
   }
 }
 

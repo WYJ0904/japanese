@@ -61,14 +61,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260716-quality14"
+        release_token = "20260716-quality15"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-16-quality14"', self.app)
+        self.assertIn('const APP_VERSION = "2026-07-16-quality15"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-16-quality14"', server)
+        self.assertIn('APP_BUILD = "2026-07-16-quality15"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -150,7 +150,7 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
         self.assertIn("003_login_audit_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.3.0"', launcher)
+        self.assertIn('$LauncherVersion = "8.3.1"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
@@ -169,6 +169,11 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn(".admin-current-memberships > article", self.styles)
         self.assertIn("membershipModalLoadSequence", self.app)
         self.assertIn("if (sequence !== membershipModalLoadSequence)", self.app)
+        self.assertIn("function ensureJapaneseQuestionForms", self.app)
+        self.assertIn('$("wordReading").textContent = reading;', self.app)
+        self.assertIn('id="wordReading"', self.html)
+        question_forms = self.app.split("async function ensureJapaneseQuestionForms", 1)[1].split("async function startQuiz", 1)[0]
+        self.assertIn("if (!dictation) return hasJapaneseKanji(word) && !hasReading;", question_forms)
         self.assertIn('$("accountBar")?.classList.toggle("hidden", !account);', self.app)
         boot_source = self.app.split("async function boot()", 1)[1]
         self.assertIn("const shouldResumeWorkspace = Boolean(state.session && state.account);", boot_source)

@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-16-quality14";
+const APP_VERSION = "2026-07-16-quality15";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -3294,18 +3294,22 @@ function shuffle(items) {
   return copy;
 }
 
-async function ensureJapaneseDictationReadings(words) {
-  if (state.quizLanguage !== "japanese" || state.practiceMode !== "dictation") return true;
+async function ensureJapaneseQuestionForms(words) {
+  if (state.quizLanguage !== "japanese") return true;
+  const dictation = state.practiceMode === "dictation";
   const required = words.filter((word) => wordMatchesLanguage(word, "japanese"));
   const missing = required.filter((word) => {
     const hasReading = Boolean(japaneseReadingFor(word));
+    if (!dictation) return hasJapaneseKanji(word) && !hasReading;
     const hasWrittenResolution = hasJapaneseKanji(word)
       || Object.prototype.hasOwnProperty.call(state.japaneseWrittenForms, word);
     return !hasReading || !hasWrittenResolution;
   });
   if (!missing.length) return true;
-  if (!backendAvailable || !state.session || !aiAvailable) {
-    alert("这些日语词还缺少完整的汉字或假名写法，请启动本地 AI 后重试。");
+  if (!backendAvailable || !state.session) {
+    alert(dictation
+      ? "这些日语词还缺少完整的汉字或假名写法，请连接后端后重试。"
+      : "这些日语汉字还缺少假名读音，请连接后端后重试。");
     return false;
   }
 
@@ -3317,19 +3321,20 @@ async function ensureJapaneseDictationReadings(words) {
     );
     rememberJapaneseVocabularyData(data.readings || {}, data.written_forms || {});
   } catch (error) {
-    alert(`获取日语完整写法失败：${error.message}`);
+    alert(`${dictation ? "获取日语完整写法" : "获取日语假名读音"}失败：${error.message}。请稍后重试；生僻词可能需要本地 AI。`);
     return false;
   }
 
   const unresolved = required.filter((word) => {
     const hasReading = Boolean(japaneseReadingFor(word));
+    if (!dictation) return hasJapaneseKanji(word) && !hasReading;
     const hasWrittenResolution = hasJapaneseKanji(word)
       || Object.prototype.hasOwnProperty.call(state.japaneseWrittenForms, word);
     return !hasReading || !hasWrittenResolution;
   });
   if (unresolved.length) {
     const preview = unresolved.slice(0, 5).join("、");
-    alert(`AI 暂时未找到这些词的完整写法：${preview}${unresolved.length > 5 ? "等" : ""}。请稍后重试。`);
+    alert(`AI 暂时未找到这些词的${dictation ? "完整写法" : "假名读音"}：${preview}${unresolved.length > 5 ? "等" : ""}。请稍后重试。`);
     return false;
   }
   return true;
@@ -3385,7 +3390,7 @@ async function startQuiz(words, mode = "normal", options = {}) {
       const authorization = await api("/api/quiz/start", { language, words: quizWords });
       state.quizSession = authorization.quiz_session;
       applyAccount(authorization.account);
-      if (mode === "normal" && !(await ensureJapaneseDictationReadings(quizWords))) return;
+      if (mode === "normal" && !(await ensureJapaneseQuestionForms(quizWords))) return;
     } catch (error) {
       if (error.code === "membership_required") {
         await openMembershipModal();
@@ -3430,7 +3435,15 @@ function showWord() {
   if (!state.roundActive) return;
   const word = state.words[state.index] || "-";
   const dictation = isDictationMode();
-  $("wordLabel").textContent = dictation ? "听写" : word;
+  const reading = !dictation && state.quizLanguage === "japanese" && hasJapaneseKanji(word)
+    ? japaneseReadingFor(word)
+    : "";
+  $("wordText").textContent = dictation ? "听写" : word;
+  $("wordReading").textContent = reading;
+  $("wordReading").classList.toggle("hidden", !reading);
+  $("wordReading").setAttribute("aria-hidden", String(!reading));
+  $("wordLabel").setAttribute("aria-label", reading ? `${word}，读音 ${reading}` : (dictation ? "听写" : word));
+  $("wordLabel").classList.toggle("has-reading", Boolean(reading));
   $("wordLabel").classList.toggle("dictation-display", dictation);
   $("progressLabel").textContent = `${state.index + 1}/${state.words.length}`;
   $("scoreLabel").textContent = `得分 ${state.score}`;
