@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-16-quality12";
+const APP_VERSION = "2026-07-16-quality14";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -565,10 +565,12 @@ function clearSession() {
   localStorage.removeItem("vocabSession");
   localStorage.removeItem("wyjAccountSession");
   localStorage.removeItem("wyjAccountCache");
-  ["secretInput", "registerSecretInput", "registerConfirmInput", "currentSecretInput", "newSecretInput", "deleteSecretInput", "adminNewSecretInput"].forEach((id) => {
+  ["secretInput", "registerSecretInput", "registerConfirmInput", "currentSecretInput", "newSecretInput", "newSecretConfirmInput", "deleteSecretInput", "adminNewSecretInput"].forEach((id) => {
     const input = $(id);
     if (input) input.value = "";
   });
+  clearOwnSecretEditor();
+  clearAdminSecretEditor();
   resetLocalViewState();
   renderAccountUi();
 }
@@ -582,6 +584,8 @@ function membershipLabel(value) {
     legacy_all_monthly: "历史双语言包月会员",
     legacy_all_lifetime: "历史双语言永久会员",
     japanese_lifetime: "日语单项永久会员",
+    tools_monthly: "工具箱包月会员",
+    dual_language_monthly: "双语言测试包月会员",
     all_access_monthly: "全功能月度会员",
     all_access_lifetime: "全功能永久会员",
     super_admin: "超级管理员",
@@ -783,6 +787,8 @@ function closeModal(id, immediate = false) {
     modal.classList.add("hidden");
     modal.classList.remove("is-closing");
     modal.setAttribute("aria-hidden", "true");
+    if (id === "accountModal") clearOwnSecretEditor();
+    if (id === "adminEditModal") clearAdminSecretEditor();
     if (!document.querySelector(".modal-layer:not(.hidden)")) {
       document.body.classList.remove("modal-open");
       if ($("appShell")) $("appShell").inert = false;
@@ -892,7 +898,7 @@ async function loadMembershipPlans(force = false) {
   membershipPlansPromise = (async () => {
     const data = await requestJsonGet("/api/membership/plans", { timeoutMs: STATUS_TIMEOUT_MS });
     if (!Array.isArray(data.plans) || !data.plans.length) throw new Error("服务器没有返回可购买的会员方案");
-    const order = ["trial_single_language", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"];
+    const order = ["trial_single_language", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"];
     const rank = (code) => {
       const index = order.indexOf(code);
       return index < 0 ? order.length : index;
@@ -1062,10 +1068,20 @@ async function confirmRechargePayment() {
 async function changeOwnSecret(event) {
   event.preventDefault();
   const message = $("accountMessage");
+  const button = event.submitter || event.currentTarget.querySelector('button[type="submit"]');
+  const newSecret = $("newSecretInput").value;
+  const confirmation = $("newSecretConfirmInput").value;
+  if (newSecret !== confirmation) {
+    message.textContent = "两次输入的新登录密钥不一致";
+    $("newSecretConfirmInput").focus();
+    return;
+  }
+  button.disabled = true;
   try {
     await api("/api/account/secret", {
       current_secret: $("currentSecretInput").value,
-      new_secret: $("newSecretInput").value,
+      new_secret: newSecret,
+      confirm_secret: confirmation,
     });
     message.textContent = "密钥已修改，请使用新密钥重新登录";
     window.setTimeout(() => {
@@ -1075,6 +1091,8 @@ async function changeOwnSecret(event) {
     }, 700);
   } catch (error) {
     message.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1147,6 +1165,110 @@ async function copyTextWithFeedback(value, button) {
   return copied;
 }
 
+function clearAdminSecretResult() {
+  const result = $("adminSecretResult");
+  const value = $("adminSecretResultValue");
+  if (value) value.textContent = "";
+  if (result) result.classList.add("hidden");
+}
+
+function setAdminSecretVisibility(visible) {
+  const input = $("adminNewSecretInput");
+  const button = $("toggleAdminSecretBtn");
+  if (input) input.type = visible ? "text" : "password";
+  if (button) {
+    button.textContent = visible ? "隐藏" : "显示";
+    button.setAttribute("aria-pressed", String(Boolean(visible)));
+  }
+}
+
+function clearAdminSecretEditor() {
+  const input = $("adminNewSecretInput");
+  if (input) input.value = "";
+  setAdminSecretVisibility(false);
+  clearAdminSecretResult();
+}
+
+function secureRandomIndex(maximum) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 0x100000000) {
+    throw new Error("随机范围无效");
+  }
+  if (!globalThis.crypto?.getRandomValues) {
+    throw new Error("当前浏览器不支持安全随机数，请手动设置新密钥");
+  }
+  const values = new Uint32Array(1);
+  const range = 0x100000000;
+  const limit = range - (range % maximum);
+  do globalThis.crypto.getRandomValues(values); while (values[0] >= limit);
+  return values[0] % maximum;
+}
+
+function generateSecureSecret(length = 24) {
+  const groups = [
+    "ABCDEFGHJKLMNPQRSTUVWXYZ",
+    "abcdefghijkmnopqrstuvwxyz",
+    "23456789",
+    "!@#$%*-_=+?",
+  ];
+  const all = groups.join("");
+  const characters = groups.map((group) => group[secureRandomIndex(group.length)]);
+  while (characters.length < length) characters.push(all[secureRandomIndex(all.length)]);
+  for (let index = characters.length - 1; index > 0; index -= 1) {
+    const swapIndex = secureRandomIndex(index + 1);
+    [characters[index], characters[swapIndex]] = [characters[swapIndex], characters[index]];
+  }
+  return characters.join("");
+}
+
+function generateAdminSecretForEditor() {
+  try {
+    const input = $("adminNewSecretInput");
+    input.value = generateSecureSecret();
+    clearAdminSecretResult();
+    setAdminSecretVisibility(true);
+    $("adminEditMessage").textContent = "已生成安全密钥；保存后请把它交给该用户。";
+    input.focus();
+    input.select();
+  } catch (error) {
+    $("adminEditMessage").textContent = error.message;
+  }
+}
+
+function setSecretFieldsVisibility(inputIds, buttonId, visible) {
+  inputIds.forEach((id) => {
+    const input = $(id);
+    if (input) input.type = visible ? "text" : "password";
+  });
+  const button = $(buttonId);
+  if (button) {
+    button.textContent = visible ? "隐藏" : "显示";
+    button.setAttribute("aria-pressed", String(Boolean(visible)));
+  }
+}
+
+function clearOwnSecretEditor() {
+  ["currentSecretInput", "newSecretInput", "newSecretConfirmInput"].forEach((id) => {
+    const input = $(id);
+    if (input) input.value = "";
+  });
+  setSecretFieldsVisibility(["currentSecretInput"], "toggleCurrentSecretBtn", false);
+  setSecretFieldsVisibility(["newSecretInput", "newSecretConfirmInput"], "toggleNewSecretBtn", false);
+}
+
+function generateOwnSecret() {
+  try {
+    const secret = generateSecureSecret();
+    $("newSecretInput").value = secret;
+    $("newSecretConfirmInput").value = secret;
+    setSecretFieldsVisibility(["newSecretInput", "newSecretConfirmInput"], "toggleNewSecretBtn", true);
+    $("accountMessage").textContent = "已生成安全密钥；保存前请确认你已记住或安全保存。";
+    $("newSecretInput").focus();
+    $("newSecretInput").select();
+  } catch (error) {
+    $("accountMessage").textContent = error.message;
+  }
+}
+
 function adminUserById(id) {
   return adminUsers.find((user) => user.id === id);
 }
@@ -1206,7 +1328,7 @@ function renderAdminUsers(users = null) {
     return `<article class="admin-user-card" data-user-id="${escapeHtml(user.id)}">
       <div class="admin-user-identity"><h3>${escapeHtml(user.username)}</h3><p class="admin-user-id">${escapeHtml(user.id)}</p><p class="${stateClass}">${user.banned ? "已永久封禁" : "正常"}</p></div>
       <div class="admin-user-facts"><p><span>最高等级</span><strong>${escapeHtml(summary.name)}</strong></p><p><span>有效会员</span><strong>${escapeHtml(memberships)}</strong></p><p><span>合并权益</span><strong>${escapeHtml(entitlements)}</strong></p></div>
-      <div class="admin-user-security"><p><span class="admin-field-name">登录密钥</span><span class="secret-value">已加密保存，只能重置</span></p><p class="admin-last-login">最后登录：${escapeHtml(formatLocalDateTime(user.last_login_at, "从未"))}</p></div>
+      <div class="admin-user-security"><p><span class="admin-field-name">登录密钥</span><span class="secret-value">不可读取 · 可安全重置</span></p><p class="admin-last-login">最后登录：${escapeHtml(formatLocalDateTime(user.last_login_at, "从未"))}</p></div>
       <div class="action-row compact admin-user-actions"><button data-admin-edit type="button" ${protectedUser ? "disabled" : ""}>编辑</button></div>
     </article>`;
   }).join("") || `<p class="admin-empty-state">${query ? "没有匹配的用户" : "暂无用户"}</p>`;
@@ -1240,6 +1362,37 @@ function renderAdminAudit(logs) {
   </article>`).join("") || "<p>暂无审计记录</p>";
 }
 
+function loginReasonLabel(reason) {
+  return {
+    success: "登录成功",
+    invalid_credentials: "用户名或密钥错误",
+    account_banned: "账户已封禁",
+    login_rate_limited: "请求过于频繁",
+  }[reason] || reason || "登录失败";
+}
+
+function loginLocationLabel(log) {
+  let country = String(log.country || "").toUpperCase();
+  if (/^[A-Z]{2}$/.test(country) && typeof Intl.DisplayNames === "function") {
+    try { country = new Intl.DisplayNames(["zh-CN"], { type: "region" }).of(country) || country; } catch (_) {}
+  }
+  return [...new Set([log.city, log.region, country].map((item) => String(item || "").trim()).filter(Boolean))].join(" / ") || "未知网络位置";
+}
+
+function renderAdminLoginLogs(logs) {
+  const list = $("adminLoginList");
+  list.innerHTML = (logs || []).map((log) => {
+    const success = Boolean(log.success);
+    const username = log.username || "未知账号";
+    const source = { cloudflare_pages: "网站代理", cloudflare: "Cloudflare", direct: "直接连接" }[log.source] || log.source || "未知来源";
+    return `<article class="admin-log-card admin-login-card">
+      <div><strong class="${success ? "login-success" : "login-failed"}">${escapeHtml(username)} · ${escapeHtml(loginReasonLabel(log.reason))}</strong><time>${escapeHtml(formatLocalDateTime(log.created_at))}</time></div>
+      <p class="admin-login-location">位置：${escapeHtml(loginLocationLabel(log))} · IP：${escapeHtml(log.ip_address || "未知")} · ${escapeHtml(source)}</p>
+      <p class="admin-login-agent">设备：${escapeHtml(log.user_agent || "未知浏览器")}</p>
+    </article>`;
+  }).join("") || '<p class="admin-empty-state">暂无登录记录</p>';
+}
+
 function renderAdminToolStats(tools) {
   const list = $("adminToolStatsList");
   list.innerHTML = (tools || []).map((item) => `<article class="admin-log-card"><div><strong>${escapeHtml(item.tool_id)}</strong><span>${escapeHtml(item.uses || 0)} 次 · ${escapeHtml(item.users || 0)} 人</span></div><p>最近使用：${escapeHtml(formatLocalDateTime(item.last_used_at, "无"))}</p></article>`).join("") || "<p>暂无工具使用记录</p>";
@@ -1261,6 +1414,7 @@ async function loadAdminData() {
     { label: "用户", path: "/api/admin/users", target: "adminUserList", apply: (data) => renderAdminUsers(data.users) },
     { label: "充值申请", path: "/api/admin/recharge", target: "adminRechargeList", apply: (data) => renderAdminRecharge(data.requests) },
     { label: "审计日志", path: "/api/admin/audit", target: "adminAuditList", apply: (data) => renderAdminAudit(data.logs) },
+    { label: "登录记录", path: "/api/admin/login-logs", target: "adminLoginList", apply: (data) => renderAdminLoginLogs(data.logs) },
     { label: "工具统计", path: "/api/admin/tool-stats", target: "adminToolStatsList", apply: (data) => renderAdminToolStats(data.tools) },
   ];
   try {
@@ -1379,7 +1533,7 @@ function openAdminEditor(userId) {
   $("adminEditUserId").value = user.id;
   $("adminEditTitle").textContent = `编辑 ${user.username}`;
   const preferred = (user.memberships || [])
-    .filter((item) => ["all_access_lifetime", "all_access_monthly", "japanese_lifetime", "trial_single_language"].includes(item.plan_code))
+    .filter((item) => ["all_access_lifetime", "all_access_monthly", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "trial_single_language"].includes(item.plan_code))
     .sort((left, right) => Number(right.priority || 0) - Number(left.priority || 0))[0];
   $("adminMembershipAction").value = "grant";
   $("adminMembershipSelect").value = preferred?.plan_code || "japanese_lifetime";
@@ -1388,7 +1542,7 @@ function openAdminEditor(userId) {
   $("adminTrialLanguageSelect").value = preferred?.metadata?.language || "";
   $("adminMembershipNote").value = "";
   $("adminPreserveJapanese").checked = false;
-  $("adminNewSecretInput").value = "";
+  clearAdminSecretEditor();
   $("adminToggleBanBtn").textContent = user.banned ? "解除封禁" : "永久封禁";
   $("adminEditMessage").textContent = "";
   renderAdminCurrentMemberships(user);
@@ -1448,13 +1602,33 @@ function updateAdminToolsOverride(allowed) {
   });
 }
 
-async function saveAdminSecret() {
+function saveAdminSecret() {
   const secret = $("adminNewSecretInput").value;
-  try {
-    await api("/api/admin/secret", { user_id: $("adminEditUserId").value, secret });
-    $("adminEditMessage").textContent = "密钥已修改，旧会话已失效";
-    await loadAdminData();
-  } catch (error) { $("adminEditMessage").textContent = error.message; }
+  const saveButton = $("saveAdminSecretBtn");
+  const generateButton = $("generateAdminSecretBtn");
+  if (!secret) {
+    $("adminEditMessage").textContent = "请先输入或生成新的登录密钥";
+    $("adminNewSecretInput").focus();
+    return;
+  }
+  const userId = $("adminEditUserId").value;
+  const user = adminUserById(userId);
+  askConfirmation(`确认重置“${user?.username || userId}”的登录密钥并退出其全部会话？`, async () => {
+    saveButton.disabled = true;
+    generateButton.disabled = true;
+    try {
+      await api("/api/admin/secret", { user_id: userId, secret });
+      await loadAdminData();
+      $("adminNewSecretInput").value = "";
+      setAdminSecretVisibility(false);
+      $("adminSecretResultValue").textContent = secret;
+      $("adminSecretResult").classList.remove("hidden");
+      $("adminEditMessage").textContent = "密钥已修改，旧密钥和旧会话均已失效。请立即复制新密钥。";
+    } finally {
+      saveButton.disabled = false;
+      generateButton.disabled = false;
+    }
+  });
 }
 
 function askConfirmation(message, action) {
@@ -4101,6 +4275,9 @@ async function boot() {
     closeModal(modal.id);
   });
   $("changeSecretForm").addEventListener("submit", changeOwnSecret);
+  $("toggleCurrentSecretBtn").addEventListener("click", () => setSecretFieldsVisibility(["currentSecretInput"], "toggleCurrentSecretBtn", $("currentSecretInput").type === "password"));
+  $("toggleNewSecretBtn").addEventListener("click", () => setSecretFieldsVisibility(["newSecretInput", "newSecretConfirmInput"], "toggleNewSecretBtn", $("newSecretInput").type === "password"));
+  $("generateOwnSecretBtn").addEventListener("click", generateOwnSecret);
   $("openDeleteAccountBtn").addEventListener("click", () => openModal("deleteAccountModal"));
   $("deleteAccountForm").addEventListener("submit", deleteOwnAccount);
   $("refreshAdminBtn").addEventListener("click", loadAdminData);
@@ -4115,7 +4292,11 @@ async function boot() {
   $("adminMembershipAction").addEventListener("change", () => updateAdminMembershipFields(true));
   $("adminDisableToolsBtn").addEventListener("click", () => updateAdminToolsOverride(false));
   $("adminEnableToolsBtn").addEventListener("click", () => updateAdminToolsOverride(null));
+  $("toggleAdminSecretBtn").addEventListener("click", () => setAdminSecretVisibility($("adminNewSecretInput").type === "password"));
+  $("generateAdminSecretBtn").addEventListener("click", generateAdminSecretForEditor);
+  $("adminNewSecretInput").addEventListener("input", clearAdminSecretResult);
   $("saveAdminSecretBtn").addEventListener("click", saveAdminSecret);
+  $("copyAdminSecretBtn").addEventListener("click", () => copyTextWithFeedback($("adminSecretResultValue").textContent, $("copyAdminSecretBtn")));
   $("adminToggleBanBtn").addEventListener("click", () => adminUserAction("ban"));
   $("adminForceLogoutBtn").addEventListener("click", () => adminUserAction("logout"));
   $("adminDeleteUserBtn").addEventListener("click", () => adminUserAction("delete"));

@@ -47,12 +47,15 @@
 | 方案代码 | 价格 | 权益 |
 | --- | ---: | --- |
 | `trial_single_language` | 8 CNY/月 | 英语或日语任选一种，所选语言会员功能一个月，不包含工具箱 |
+| `dual_language_monthly` | 20 CNY/月 | 英语和日语全部测试会员功能，不包含工具箱 |
+| `tools_monthly` | 20 CNY/月 | 在线工具箱、批量处理、临时分享和配置保存，不包含语言测试会员功能 |
 | `japanese_lifetime` | 70 CNY | 仅日语会员功能，永久有效，不包含工具箱 |
 | `all_access_monthly` | 30 CNY/月 | 全部语言会员功能、工具箱、批量处理、临时分享、配置保存 |
 | `all_access_lifetime` | 100 CNY | 全功能永久有效 |
 
 权益代码：
 
+- `language_english_access`
 - `language_japanese_access`
 - `language_all_access`
 - `tools_access`
@@ -61,7 +64,7 @@
 - `save_tool_config`
 - `all_features_access`
 
-权限按有效会员记录合并，不使用单一 `isVip`。优先级为全功能永久、全功能月度、日语单项、单语言包月体验、普通用户。月度会员到期后立即失去对应权益，但同时存在的日语永久权益仍会保留。超级管理员拥有全部权益。
+权限按有效会员记录合并，不使用单一 `isVip`。全功能永久和全功能月度覆盖全部模块；20 CNY 双语言包月与 20 CNY 工具箱包月互不越权；日语永久、单语言体验和其他有效会员可以叠加。月度会员到期后立即失去对应权益，但同时存在的其他会员权益仍会保留。超级管理员拥有全部权益。
 
 ### 老会员兼容
 
@@ -85,10 +88,10 @@
 - 开通、续期或取消指定会员
 - 降级普通用户并按需保留日语永久会员
 - 单独关闭或恢复工具权益
-- 重置密钥、强制退出、封禁、解封和删除测试用户
-- 查看管理员审计日志与工具使用统计
+- 为任意普通用户手动设置或安全生成新密钥，可显隐、复制并在成功后仅本次查看；重置会立即退出该用户全部会话
+- 查看管理员审计日志、登录记录与工具使用统计
 
-所有管理员接口都在服务端验证固定超级管理员身份。会员、充值、封禁和账户操作记录管理员、对象、修改前后状态、时间与备注。封禁、改密、强制退出和删除会递增会话版本或清除会话，旧令牌不能继续使用。
+所有管理员接口都在服务端验证固定超级管理员身份。登录密钥采用不可逆哈希，管理员也不能读取；新密钥只在重置成功后的当前编辑窗口显示，关闭后即从页面清除，接口、数据库导出和审计日志均不保存明文。用户可在账户窗口验证旧密钥后自行修改并确认新密钥。登录记录保存成功或失败、时间、IP、Cloudflare 提供的国家/地区/城市网络估计和浏览器标识，不保存密钥，也不读取设备 GPS；记录保留 90 天且最多 5,000 条。会员、充值、封禁和账户操作记录管理员、对象、修改前后状态、时间与备注。封禁、改密、强制退出和删除会递增会话版本或清除会话，旧令牌不能继续使用。
 
 ## 在线工具箱
 
@@ -136,7 +139,7 @@ C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-ope
 C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-openai-primary-runtime\outputs\vocab-website\users.txt
 ```
 
-密码使用 PBKDF2-SHA256、随机盐和 310,000 次迭代保存。`users.txt` 只写 `secret=protected`，不再写明文密码。老数据库中的明文密码会在启动时自动升级为哈希。
+密码使用 PBKDF2-SHA256、随机盐和 310,000 次迭代保存。`users.txt` 只写 `secret=protected`，不再写明文密码。会话令牌只以 SHA-256 摘要存入 SQLite；老数据库中的明文密码与会话令牌会在启动时自动升级为摘要，同时保持现有登录有效。
 
 迁移文件：
 
@@ -145,6 +148,8 @@ C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-ope
 - `local-backend/migrations/001_entitlements_down.sql`：回滚新表
 - `local-backend/migrations/002_single_language_orders_up.sql`：为支付订单保存英语/日语选择
 - `local-backend/migrations/002_single_language_orders_down.sql`：无损重建支付表并回滚语言列
+- `local-backend/migrations/003_login_audit_up.sql`：登录成功/失败和网络位置审计表
+- `local-backend/migrations/003_login_audit_down.sql`：只回滚登录审计表
 
 第一次对老数据库执行迁移前会使用 SQLite backup API 创建一次性备份：
 
@@ -155,7 +160,7 @@ data\users.pre-single-language-002.sqlite3
 
 迁移由 `schema_migrations` 控制并可安全重启，来源唯一索引防止重复会员记录。每个结构阶段只创建一次迁移前备份；备份可能仍含旧版明文密码，必须只保存在本机受保护目录，不能上传或提交。
 
-新增表包括 `membership_plans`、`user_memberships`、`membership_entitlements`、`user_entitlement_overrides`、`payment_requests`、`admin_audit_logs`、`tool_favorites`、`tool_recent_usage`、`saved_tool_configs` 及五类临时数据表。原 `users`、`sessions` 和 `recharge_requests` 表保留。
+新增表包括 `membership_plans`、`user_memberships`、`membership_entitlements`、`user_entitlement_overrides`、`payment_requests`、`admin_audit_logs`、`login_audit_logs`、`tool_favorites`、`tool_recent_usage`、`saved_tool_configs` 及五类临时数据表。原 `users`、`sessions` 和 `recharge_requests` 表保留。
 
 回滚前必须停止服务并另外备份当前数据库。优先恢复 `users.pre-entitlements-001.sqlite3`；直接执行 down SQL 会删除改版后产生的会员、支付、工具和临时数据。
 
@@ -177,7 +182,7 @@ data\users.pre-single-language-002.sqlite3
 ## 安全措施
 
 - 密码和分享密码均不明文保存
-- 会话令牌使用加密安全随机数，服务端每次解析时检查封禁、删除、过期和会话版本
+- 会话令牌使用加密安全随机数，数据库只保存 SHA-256 摘要；服务端每次解析时检查封禁、删除、过期和会话版本
 - 登录、注册、临时创建和临时读取均有限流
 - POST 校验同源 `Origin`；无 CORS 放行；前端会话通过自定义请求头发送
 - SQL 全部使用参数绑定
@@ -186,7 +191,8 @@ data\users.pre-single-language-002.sqlite3
 - 上传文件限制大小、文件名、扩展名、MIME 和内容签名
 - 静态目录与运行数据分离，路径解析后再次校验根目录
 - 错误响应不返回调用栈或本机路径
-- CSP、`nosniff`、禁止 iframe、严格 Referrer 和 Permissions Policy
+- CSP、`nosniff`、禁止 iframe、严格 Referrer 和 Permissions Policy；本地图片处理仅额外允许同源生成的 `blob:` 图片
+- 公共代理错误不返回 Tunnel 地址、底层异常或调用栈；后端不暴露 Python 版本标识
 - Ollama `11434` 不对公网开放，公网只通过 Tunnel 访问账户后端 `8765`
 
 ## 环境变量
@@ -253,7 +259,7 @@ node --check "functions/api/[[path]].js"
 node local-backend/test_tools_js.mjs
 ```
 
-当前 Python 自动化套件共 70 项，另有 16 项 JavaScript 工具自检。`test_app_browser.mjs` 使用真实 Chrome 覆盖 13 条完整用户流程，`test_tools_browser.mjs` 逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）并校验实际下载。覆盖注册登录、会话、封禁、老会员迁移、8 CNY 单语言订单、新权益合并、过期降级、充值审批、审计日志、工具权限、收藏/历史/配置、模糊搜索、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语汉字与假名补全、错题 PDF、120 次并发状态请求、HTML ID、PWA 缓存、手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理和 OpenCC 词典完整性。
+当前 Python 自动化套件共 82 项，另有 16 项 JavaScript 工具自检。`test_app_browser.mjs` 使用真实 Chrome 覆盖 13 条完整用户流程，`test_tools_browser.mjs` 会自行准备隔离样本，并逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）及实际下载。覆盖注册登录、登录位置审计、会话摘要迁移、封禁、管理员安全重置密钥、用户自助改密、密钥与哈希防泄露、老会员迁移、8/20/30/70/100 CNY 方案、权益隔离与合并、过期降级、充值审批、管理员审计、工具权限、收藏/历史/配置、模糊搜索、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语汉字与假名补全、错题 PDF、HTML ID、PWA 缓存、手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理和 OpenCC 词典完整性。额外压力矩阵验证 300 次状态请求、200 次并发工具写入和 24 次并发 PDF 导出均为 0 错误。
 
 ## Cloudflare Pages 配置
 

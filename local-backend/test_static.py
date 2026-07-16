@@ -61,14 +61,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260716-quality12"
+        release_token = "20260716-quality14"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-16-quality12"', self.app)
+        self.assertIn('const APP_VERSION = "2026-07-16-quality14"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-16-quality12"', server)
+        self.assertIn('APP_BUILD = "2026-07-16-quality14"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -131,6 +131,13 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("Content-Security-Policy:", headers)
         self.assertIn("frame-ancestors 'none'", headers)
         self.assertIn("Permissions-Policy:", headers)
+        self.assertIn("img-src 'self' data: blob:", headers)
+        server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('handler.send_header("Permissions-Policy"', server)
+        self.assertIn("img-src 'self' data: blob:", server)
+        self.assertIn('server_version = "WYJ"', server)
+        self.assertIn('sys_version = ""', server)
+        self.assertNotIn('server_version = "VocabQwenWeb', server)
         self.assertEqual((ROOT / "_redirects").read_text(encoding="utf-8").strip(), "/* /index.html 200")
 
     def test_branding_and_launcher_contract(self):
@@ -142,7 +149,8 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("temporary_store.py", launcher)
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.1.9"', launcher)
+        self.assertIn("003_login_audit_up.sql", launcher)
+        self.assertIn('$LauncherVersion = "8.3.0"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
@@ -185,6 +193,39 @@ class StaticSiteTests(unittest.TestCase):
         self.assertLess(startup.index("    Ensure-Backend"), startup.index("    Ensure-Tunnel"))
         self.assertLess(startup.index("    Ensure-Tunnel"), startup.index("        Ensure-Ollama"))
 
+    def test_admin_secret_reset_ui_is_one_time_and_cryptographically_random(self):
+        for element_id in (
+            "adminNewSecretInput",
+            "toggleAdminSecretBtn",
+            "generateAdminSecretBtn",
+            "saveAdminSecretBtn",
+            "adminSecretResult",
+            "adminSecretResultValue",
+            "copyAdminSecretBtn",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn("function generateSecureSecret", self.app)
+        self.assertIn("globalThis.crypto.getRandomValues", self.app)
+        self.assertIn('if (id === "adminEditModal") clearAdminSecretEditor();', self.app)
+        self.assertIn('$("adminSecretResultValue").textContent = secret;', self.app)
+        account_store = (ROOT / "local-backend" / "account_store.py").read_text(encoding="utf-8")
+        self.assertNotIn("include_secret", account_store)
+
+    def test_login_audit_and_proxy_context_do_not_leak_credentials_or_backend_details(self):
+        proxy = (ROOT / "functions" / "api" / "[[path]].js").read_text(encoding="utf-8")
+        server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('id="adminLoginView"', self.html)
+        self.assertIn('id="adminLoginList"', self.html)
+        self.assertIn('path: "/api/admin/login-logs"', self.app)
+        self.assertIn('path == "/api/admin/login-logs"', server)
+        self.assertIn('headers.set("X-WYJ-Client-City"', proxy)
+        self.assertNotIn("detail: lastError", proxy)
+        client_key = server.split("def request_client_key", 1)[1].split("def decoded_context_header", 1)[0]
+        self.assertNotIn('X-Forwarded-For', client_key)
+        audit_source = (ROOT / "local-backend" / "account_store.py").read_text(encoding="utf-8")
+        audit_source = audit_source.split("def record_login_event", 1)[1].split("def list_login_audit_logs", 1)[0]
+        self.assertNotIn("secret", audit_source)
+
     def test_migration_is_idempotent_and_rollback_preserves_legacy_tables(self):
         migrations = ROOT / "local-backend" / "migrations"
         before = (migrations / "pre-001-schema.sql").read_text(encoding="utf-8")
@@ -192,6 +233,8 @@ class StaticSiteTests(unittest.TestCase):
         downgrade = (migrations / "001_entitlements_down.sql").read_text(encoding="utf-8")
         upgrade_two = (migrations / "002_single_language_orders_up.sql").read_text(encoding="utf-8")
         downgrade_two = (migrations / "002_single_language_orders_down.sql").read_text(encoding="utf-8")
+        upgrade_three = (migrations / "003_login_audit_up.sql").read_text(encoding="utf-8")
+        downgrade_three = (migrations / "003_login_audit_down.sql").read_text(encoding="utf-8")
         connection = sqlite3.connect(":memory:")
         try:
             connection.executescript(before)
@@ -206,6 +249,21 @@ class StaticSiteTests(unittest.TestCase):
                 row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")
             }
             self.assertIn("trial_language", trial_language_column)
+            connection.executescript(upgrade_three)
+            connection.executescript(upgrade_three)
+            login_audit_applied = connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = '003_login_audit'"
+            ).fetchone()[0]
+            self.assertEqual(login_audit_applied, 1)
+            tables = {
+                row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            self.assertIn("login_audit_logs", tables)
+            connection.executescript(downgrade_three)
+            tables = {
+                row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            self.assertNotIn("login_audit_logs", tables)
             connection.executescript(downgrade_two)
             trial_language_column = {
                 row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")

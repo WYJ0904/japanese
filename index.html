@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260716-quality12" />
-    <link rel="stylesheet" href="/styles.css?v=20260716-quality12" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260716-quality14" />
+    <link rel="stylesheet" href="/styles.css?v=20260716-quality14" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -372,6 +372,7 @@
           <button class="active" data-admin-view="adminUsersView" type="button">用户</button>
           <button data-admin-view="adminRechargeView" type="button">充值申请</button>
           <button data-admin-view="adminAuditView" type="button">审计日志</button>
+          <button data-admin-view="adminLoginView" type="button">登录记录</button>
           <button data-admin-view="adminToolStatsView" type="button">工具统计</button>
         </div>
         <section class="admin-view active" id="adminUsersView">
@@ -385,6 +386,7 @@
           <div class="admin-user-list" id="adminRechargeList"></div>
         </section>
         <section class="admin-view" id="adminAuditView"><div class="admin-user-list" id="adminAuditList"></div></section>
+        <section class="admin-view" id="adminLoginView"><div class="admin-user-list" id="adminLoginList"></div></section>
         <section class="admin-view" id="adminToolStatsView"><div class="admin-user-list" id="adminToolStatsList"></div></section>
         <p class="error" id="adminError" aria-live="polite"></p>
       </section>
@@ -404,7 +406,7 @@
         </div>
         <label class="field-label hidden" id="trialLanguageField"><span>选择单语言</span><select id="trialLanguageSelect"><option value="english">英语</option><option value="japanese">日语</option></select></label>
         <div class="purchase-summary" id="purchaseSummary">请选择套餐</div>
-        <p class="membership-warning">8 CNY 单语言包月体验只包含所选英语或日语；70 CNY 日语永久会员只包含日语。两者均不包含在线工具箱。需要工具箱，请购买 30 CNY 全功能月度会员或 100 CNY 全功能永久会员。</p>
+        <p class="membership-warning">8 CNY 单语言包月仅包含所选语言；20 CNY 双语言测试包月包含英语和日语测试；20 CNY 工具箱包月仅包含在线工具箱；70 CNY 日语永久仅包含日语。需要语言测试与工具箱全部功能，请购买 30 CNY 全功能月度会员或 100 CNY 全功能永久会员。</p>
         <div class="wechat-row"><span>微信号：<strong id="wechatId">W2009Y94J</strong></span><button id="copyWechatBtn" type="button">复制微信号</button></div>
         <div class="payment-order hidden" id="paymentOrderBox">
           <dl><dt>用户名</dt><dd id="paymentUsername">-</dd><dt>会员方案</dt><dd id="paymentPlan">-</dd><dt class="hidden" id="paymentLanguageTerm">所选语言</dt><dd class="hidden" id="paymentLanguage">-</dd><dt>应付金额</dt><dd id="paymentAmount">-</dd><dt>订单编号</dt><dd><code id="paymentOrderNumber">-</code> <button id="copyOrderBtn" type="button">复制</button></dd><dt>付款备注</dt><dd><span id="paymentNote">-</span> <button id="copyPaymentNoteBtn" type="button">复制</button></dd><dt>订单状态</dt><dd id="paymentStatus">-</dd></dl>
@@ -424,9 +426,10 @@
         <dl class="account-details" id="accountDetails"></dl>
         <form id="changeSecretForm" class="stack-form">
           <h3>修改登录密钥</h3>
-          <input id="currentSecretInput" type="password" autocomplete="current-password" maxlength="128" placeholder="当前登录密钥" required />
-          <input id="newSecretInput" type="password" autocomplete="new-password" maxlength="128" placeholder="新登录密钥" required />
-          <button type="submit">保存并退出其他会话</button>
+          <div class="secret-input-row"><input id="currentSecretInput" type="password" autocomplete="current-password" minlength="6" maxlength="128" placeholder="当前登录密钥" required /><button id="toggleCurrentSecretBtn" type="button" aria-pressed="false">显示</button></div>
+          <div class="secret-input-row"><input id="newSecretInput" type="password" autocomplete="new-password" minlength="6" maxlength="128" placeholder="新登录密钥（至少 6 个字符）" required /><button id="toggleNewSecretBtn" type="button" aria-pressed="false">显示</button></div>
+          <input id="newSecretConfirmInput" type="password" autocomplete="new-password" minlength="6" maxlength="128" placeholder="再次输入新登录密钥" required />
+          <div class="account-secret-actions"><button id="generateOwnSecretBtn" type="button">生成安全密钥</button><button class="primary" type="submit">保存并退出全部会话</button></div>
         </form>
         <div class="danger-zone">
           <strong>注销账户</strong>
@@ -459,7 +462,7 @@
           <div class="admin-current-memberships" id="adminCurrentMemberships"></div>
           <div class="admin-membership-grid">
             <label class="field-label"><span>操作</span><select id="adminMembershipAction"><option value="grant">开通或覆盖</option><option value="extend">续期一个月</option><option value="cancel">取消所选会员</option><option value="cancel_all">降级为普通用户</option></select></label>
-            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="trial_single_language">单语言包月体验会员</option><option value="japanese_lifetime">日语单项永久会员</option><option value="all_access_monthly">全功能月度会员</option><option value="all_access_lifetime">全功能永久会员</option></select></label>
+            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="trial_single_language">单语言包月体验会员</option><option value="dual_language_monthly">双语言测试包月会员</option><option value="tools_monthly">工具箱包月会员</option><option value="japanese_lifetime">日语单项永久会员</option><option value="all_access_monthly">全功能月度会员</option><option value="all_access_lifetime">全功能永久会员</option></select></label>
             <label class="field-label hidden" id="adminTrialLanguageField"><span>体验语言</span><select id="adminTrialLanguageSelect"><option value="">请选择</option><option value="english">英语</option><option value="japanese">日语</option></select></label>
           </div>
           <div class="admin-date-grid">
@@ -474,8 +477,24 @@
         </section>
         <section class="admin-editor-section">
           <h3>登录密钥</h3>
-          <p class="admin-date-help">现有登录密钥已加密，任何人都不能查看；管理员只能重置。</p>
-          <div class="admin-secret-row"><input id="adminNewSecretInput" type="password" autocomplete="new-password" maxlength="128" placeholder="输入新的登录密钥" /><button id="saveAdminSecretBtn" type="button">重置并退出该用户</button></div>
+          <p class="admin-date-help" id="adminSecretHelp">旧密钥采用不可逆哈希保存，任何人都不能读取。你可以设置或生成新密钥；保存后会注销该用户的全部现有会话。</p>
+          <div class="admin-secret-control">
+            <div class="field-label admin-secret-field">
+              <label for="adminNewSecretInput">设置新登录密钥</label>
+              <span class="admin-secret-input-wrap">
+                <input id="adminNewSecretInput" type="password" autocomplete="new-password" minlength="6" maxlength="128" aria-describedby="adminSecretHelp" placeholder="输入或生成新密钥（至少 6 个字符）" />
+                <button id="toggleAdminSecretBtn" type="button" aria-pressed="false">显示</button>
+              </span>
+            </div>
+            <div class="admin-secret-actions">
+              <button id="generateAdminSecretBtn" type="button">生成安全密钥</button>
+              <button class="primary" id="saveAdminSecretBtn" type="button">保存并退出该用户</button>
+            </div>
+          </div>
+          <div class="admin-secret-result hidden" id="adminSecretResult" role="status" aria-live="polite">
+            <div><span>新密钥（仅本次显示）</span><code id="adminSecretResultValue"></code></div>
+            <button id="copyAdminSecretBtn" type="button">复制新密钥</button>
+          </div>
         </section>
         <section class="admin-editor-section admin-danger-section">
           <h3>账户操作</h3>
@@ -524,7 +543,7 @@
     </template>
 
     <script src="/vendor/qrcode.js?v=2.0.4"></script>
-    <script src="/tools.js?v=20260716-quality12"></script>
-    <script src="/app.js?v=20260716-quality12"></script>
+    <script src="/tools.js?v=20260716-quality14"></script>
+    <script src="/app.js?v=20260716-quality14"></script>
   </body>
 </html>

@@ -29,10 +29,14 @@ LANGUAGES = {"english", "japanese"}
 RECHARGE_PLANS = {"trial_single_language", "monthly", "lifetime"}
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 MAX_SESSIONS_PER_USER = 12
+MIN_SECRET_LENGTH = 6
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = 310_000
+SESSION_TOKEN_PREFIX = "sha256"
 WECHAT_CONTACT = "W2009Y94J"
 OPEN_PAYMENT_STATUSES = {"pending_payment", "user_paid"}
+LOGIN_AUDIT_RETENTION_DAYS = 90
+LOGIN_AUDIT_MAX_RECORDS = 5000
 
 
 def utc_now():
@@ -130,6 +134,11 @@ def verify_secret(value, encoded):
         return secrets.compare_digest(actual, expected)
     except (ValueError, TypeError):
         return False
+
+
+def session_storage_key(value):
+    raw = str(value or "").encode("utf-8")
+    return f"{SESSION_TOKEN_PREFIX}${hashlib.sha256(raw).hexdigest()}"
 
 
 class AccountError(Exception):
@@ -317,10 +326,16 @@ class AccountStore:
                 "002_single_language_orders",
                 "002_single_language_orders_up.sql",
             )
+            self._apply_migration(
+                connection,
+                "003_login_audit",
+                "003_login_audit_up.sql",
+            )
             self._seed_membership_plans(connection, now)
             self._migrate_legacy_memberships(connection, now)
             self._migrate_legacy_recharge_requests(connection, now)
             self._hash_plaintext_secrets(connection)
+            self._hash_plaintext_session_tokens(connection)
             self._validate_membership_migration(connection)
         self.sync_text()
 
@@ -497,6 +512,17 @@ class AccountStore:
                 connection.execute("UPDATE users SET secret = ? WHERE id = ?", (hash_secret(row["secret"]), row["id"]))
 
     @staticmethod
+    def _hash_plaintext_session_tokens(connection):
+        rows = connection.execute("SELECT token FROM sessions").fetchall()
+        for row in rows:
+            token = str(row["token"] or "")
+            if token and not token.startswith(f"{SESSION_TOKEN_PREFIX}$"):
+                connection.execute(
+                    "UPDATE sessions SET token = ? WHERE token = ?",
+                    (session_storage_key(token), token),
+                )
+
+    @staticmethod
     def _validate_membership_migration(connection):
         missing = connection.execute(
             """
@@ -531,6 +557,8 @@ class AccountStore:
         value = str(secret or "")
         if not value:
             raise AccountError("登录密钥不能为空", 400, "secret_required")
+        if len(value) < MIN_SECRET_LENGTH:
+            raise AccountError(f"登录密钥不能少于 {MIN_SECRET_LENGTH} 个字符", 400, "secret_too_short")
         if len(value) > 128:
             raise AccountError("登录密钥不能超过 128 个字符", 400, "secret_too_long")
         if "\n" in value or "\r" in value:
@@ -620,7 +648,7 @@ class AccountStore:
         self._sync_after_write()
         return row
 
-    def user_payload(self, row, include_secret=False):
+    def user_payload(self, row):
         row = self._expire_if_needed(row)
         membership = self._effective_membership(row)
         memberships = self.memberships_for(row)
@@ -712,6 +740,7 @@ class AccountStore:
             raise AccountError("用户名或登录密钥错误", 403, "invalid_credentials")
         now = iso_now()
         token = secrets.token_urlsafe(32)
+        stored_token = session_storage_key(token)
         with self.lock, self.connect() as connection:
             cutoff = (utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)).isoformat().replace("+00:00", "Z")
             connection.execute("DELETE FROM sessions WHERE last_seen_at < ?", (cutoff,))
@@ -719,7 +748,7 @@ class AccountStore:
             current = connection.execute("SELECT session_version FROM users WHERE id = ?", (row["id"],)).fetchone()
             connection.execute(
                 "INSERT INTO sessions (token, user_id, session_version, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
-                (token, row["id"], current["session_version"], now, now),
+                (stored_token, row["id"], current["session_version"], now, now),
             )
             connection.execute(
                 """
@@ -734,17 +763,28 @@ class AccountStore:
         return token, self.get_user(row["id"])
 
     def resolve_session(self, token, touch=True):
-        token = str(token or "")
-        if not token:
+        raw_token = str(token or "")
+        if not raw_token:
             return None
+        stored_token = session_storage_key(raw_token)
         with self.lock, self.connect() as connection:
             record = connection.execute(
                 """
                 SELECT s.token, s.session_version AS session_generation, s.last_seen_at, u.*
                 FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
                 """,
-                (token,),
+                (stored_token,),
             ).fetchone()
+            if not record and not raw_token.startswith(f"{SESSION_TOKEN_PREFIX}$"):
+                record = connection.execute(
+                    """
+                    SELECT s.token, s.session_version AS session_generation, s.last_seen_at, u.*
+                    FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?
+                    """,
+                    (raw_token,),
+                ).fetchone()
+                if record:
+                    connection.execute("UPDATE sessions SET token = ? WHERE token = ?", (stored_token, raw_token))
             if not record:
                 return None
             last_seen = parse_time(record["last_seen_at"])
@@ -756,15 +796,19 @@ class AccountStore:
                 or record["session_generation"] != record["session_version"]
             )
             if invalid:
-                connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                connection.execute("DELETE FROM sessions WHERE token = ?", (stored_token,))
                 return None
             if touch:
-                connection.execute("UPDATE sessions SET last_seen_at = ? WHERE token = ?", (iso_now(), token))
+                connection.execute("UPDATE sessions SET last_seen_at = ? WHERE token = ?", (iso_now(), stored_token))
         return self.get_user(record["id"])
 
     def logout(self, token):
+        raw_token = str(token or "")
+        stored_token = session_storage_key(raw_token)
         with self.lock, self.connect() as connection:
-            connection.execute("DELETE FROM sessions WHERE token = ?", (str(token or ""),))
+            connection.execute("DELETE FROM sessions WHERE token = ?", (stored_token,))
+            if raw_token and not raw_token.startswith(f"{SESSION_TOKEN_PREFIX}$"):
+                connection.execute("DELETE FROM sessions WHERE token = ?", (raw_token,))
 
     def revoke_user_sessions(self, user_id):
         with self.lock, self.connect() as connection:
@@ -896,6 +940,8 @@ class AccountStore:
             membership, selected = "lifetime", by_plan["legacy_all_lifetime"]
         elif "all_access_monthly" in by_plan:
             membership, selected = "monthly", by_plan["all_access_monthly"]
+        elif "dual_language_monthly" in by_plan:
+            membership, selected = "monthly", by_plan["dual_language_monthly"]
         elif "legacy_all_monthly" in by_plan:
             membership, selected = "monthly", by_plan["legacy_all_monthly"]
         elif "japanese_lifetime" in by_plan:
@@ -973,7 +1019,7 @@ class AccountStore:
                 pending.setdefault(item["user_id"], item["status"])
         result = []
         for row in rows:
-            item = self.user_payload(row, include_secret=True)
+            item = self.user_payload(row)
             item["recharge_status"] = pending.get(row["id"], "")
             result.append(item)
         return result
@@ -1034,6 +1080,67 @@ class AccountStore:
                     item.pop(field, None)
             result.append(item)
         return result
+
+    def record_login_event(self, attempted_username, success, reason, context=None, user=None):
+        details = context if isinstance(context, dict) else {}
+        target = user
+        if target is None and attempted_username:
+            target = self.get_user_by_name(attempted_username, include_deleted=True)
+        username = target["username"] if target else str(attempted_username or "").strip()[:40]
+        now = iso_now()
+        cutoff = (utc_now() - timedelta(days=LOGIN_AUDIT_RETENTION_DAYS)).replace(
+            microsecond=0
+        ).isoformat().replace("+00:00", "Z")
+        values = (
+            str(uuid.uuid4()),
+            target["id"] if target else "",
+            username,
+            int(bool(success)),
+            str(reason or ("success" if success else "failed"))[:80],
+            str(details.get("ip_address") or "")[:80],
+            str(details.get("country") or "")[:80],
+            str(details.get("region") or "")[:120],
+            str(details.get("city") or "")[:120],
+            str(details.get("user_agent") or "")[:400],
+            str(details.get("source") or "direct")[:40],
+            now,
+        )
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO login_audit_logs (
+                    id, user_id, username, success, reason, ip_address,
+                    country, region, city, user_agent, source, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+            connection.execute("DELETE FROM login_audit_logs WHERE created_at < ?", (cutoff,))
+            connection.execute(
+                """
+                DELETE FROM login_audit_logs WHERE id IN (
+                    SELECT id FROM login_audit_logs
+                    ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
+                )
+                """,
+                (LOGIN_AUDIT_MAX_RECORDS,),
+            )
+
+    def list_login_audit_logs(self, actor, limit=300):
+        if not self.is_super_admin(actor):
+            raise AccountError("无管理员权限", 403, "forbidden")
+        safe_limit = max(1, min(int(limit or 300), 500))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, username, success, reason, ip_address,
+                       country, region, city, user_agent, source, created_at
+                FROM login_audit_logs
+                ORDER BY created_at DESC, rowid DESC LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def admin_manage_membership(
         self,

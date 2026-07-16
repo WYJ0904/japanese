@@ -115,6 +115,14 @@ class AccountApiTests(unittest.TestCase):
         handler.headers = {}
         handler.client_address = ("203.0.113.7", 12345)
         server.REGISTER_ATTEMPTS.clear()
+
+    def test_rate_limit_key_ignores_spoofed_forwarded_for_without_cloudflare(self):
+        handler = mock.MagicMock()
+        handler.headers = {"X-Forwarded-For": "198.51.100.99"}
+        handler.client_address = ("203.0.113.7", 12345)
+        self.assertEqual(server.request_client_key(handler), "203.0.113.7")
+        handler.headers = {"CF-Connecting-IP": "198.51.100.10"}
+        self.assertEqual(server.request_client_key(handler), "198.51.100.10")
         with mock.patch.object(server, "REGISTER_MAX_ATTEMPTS", 2):
             self.assertFalse(server.register_limited(handler, record=True))
             self.assertTrue(server.register_limited(handler, record=True))
@@ -174,6 +182,59 @@ class AccountApiTests(unittest.TestCase):
         _, _, normal_session = self.new_user()
         status, data = self.request("GET", "/api/admin/users", session=normal_session)
         self.assertEqual(status, 403, data)
+
+    def test_admin_user_api_never_exposes_login_secrets(self):
+        username, account, _ = self.new_user()
+        replacement = "Api-Reset-Secret-789!"
+        status, response = self.request(
+            "POST",
+            "/api/admin/secret",
+            {"user_id": account["id"], "secret": replacement},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200, response)
+        self.assertNotIn("secret", response)
+        status, users = self.request("GET", "/api/admin/users", session=self.admin_session)
+        self.assertEqual(status, 200, users)
+        target = next(item for item in users["users"] if item["username"] == username)
+        self.assertNotIn("secret", target)
+        serialized = json.dumps(users, ensure_ascii=False)
+        self.assertNotIn("ABC123", serialized)
+        self.assertNotIn(replacement, serialized)
+
+    def test_login_audit_records_network_context_and_is_admin_only(self):
+        username = "audit" + uuid.uuid4().hex[:8]
+        status, registered = self.request(
+            "POST",
+            "/api/register",
+            {"username": username, "secret": "Audit123", "confirm_secret": "Audit123"},
+        )
+        self.assertEqual(status, 201, registered)
+        headers = {
+            "X-WYJ-Proxy": "pages",
+            "X-WYJ-Client-IP": "203.0.113.88",
+            "X-WYJ-Client-Country": "CN",
+            "X-WYJ-Client-Region": "Guangdong",
+            "X-WYJ-Client-City": "Shenzhen",
+            "User-Agent": "Audit-Browser/1.0",
+        }
+        status, _ = self.request("POST", "/api/login", {"username": username, "secret": "wrong-value"}, extra_headers=headers)
+        self.assertEqual(status, 403)
+        status, login = self.request("POST", "/api/login", {"username": username, "secret": "Audit123"}, extra_headers=headers)
+        self.assertEqual(status, 200, login)
+        status, denied = self.request("GET", "/api/admin/login-logs", session=login["session"])
+        self.assertEqual(status, 403, denied)
+        status, data = self.request("GET", "/api/admin/login-logs", session=self.admin_session)
+        self.assertEqual(status, 200, data)
+        matching = [item for item in data["logs"] if item["username"] == username]
+        self.assertGreaterEqual(len(matching), 2)
+        self.assertTrue(matching[0]["success"])
+        self.assertEqual(matching[0]["ip_address"], "203.0.113.88")
+        self.assertEqual(matching[0]["city"], "Shenzhen")
+        self.assertIn("Audit-Browser/1.0", matching[0]["user_agent"])
+        serialized = json.dumps(matching, ensure_ascii=False)
+        self.assertNotIn("Audit123", serialized)
+        self.assertNotIn("wrong-value", serialized)
 
     def test_registration_duplicate_case_and_reserved_name(self):
         username, _, _ = self.new_user()
@@ -614,12 +675,18 @@ class AccountApiTests(unittest.TestCase):
         by_code = {item["code"]: item for item in plans["plans"]}
         self.assertEqual(by_code["japanese_lifetime"]["price_cents"], 7000)
         self.assertEqual(by_code["trial_single_language"]["price_cents"], 800)
+        self.assertEqual(by_code["tools_monthly"]["price_cents"], 2000)
+        self.assertEqual(by_code["dual_language_monthly"]["price_cents"], 2000)
         self.assertEqual(by_code["all_access_monthly"]["price_cents"], 3000)
         self.assertEqual(by_code["all_access_lifetime"]["price_cents"], 10000)
         self.assertNotIn("tools_access", by_code["japanese_lifetime"]["entitlements"])
+        self.assertIn("tools_access", by_code["tools_monthly"]["entitlements"])
+        self.assertNotIn("language_all_access", by_code["tools_monthly"]["entitlements"])
+        self.assertIn("language_all_access", by_code["dual_language_monthly"]["entitlements"])
+        self.assertNotIn("tools_access", by_code["dual_language_monthly"]["entitlements"])
         self.assertEqual(
             set(by_code),
-            {"trial_single_language", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"},
+            {"trial_single_language", "tools_monthly", "dual_language_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"},
         )
 
         _, _, session = self.new_user()
@@ -687,6 +754,54 @@ class AccountApiTests(unittest.TestCase):
         self.assertNotIn("tools_access", me["account"]["entitlements"])
         status, _ = self.request("GET", "/api/tools/access", session=session)
         self.assertEqual(status, 403)
+
+    def test_new_twenty_cny_monthly_plans_are_enforced_by_api(self):
+        _, account, session = self.new_user()
+        words = [f"word{index}" for index in range(16)]
+        status, granted = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "tools_monthly"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200, granted)
+        status, _ = self.request("GET", "/api/tools/access", session=session)
+        self.assertEqual(status, 200)
+        status, denied = self.request("POST", "/api/quiz/start", {"language": "english", "words": words}, session)
+        self.assertEqual(status, 403, denied)
+
+        self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "cancel", "plan_code": "tools_monthly"},
+            self.admin_session,
+        )
+        status, granted = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "dual_language_monthly"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200, granted)
+        status, _ = self.request("POST", "/api/quiz/start", {"language": "english", "words": words}, session)
+        self.assertEqual(status, 200)
+        status, _ = self.request("POST", "/api/quiz/start", {"language": "japanese", "words": words}, session)
+        self.assertEqual(status, 200)
+        status, denied = self.request("GET", "/api/tools/access", session=session)
+        self.assertEqual(status, 403, denied)
+
+    def test_own_secret_change_rejects_mismatched_confirmation(self):
+        username, _account, session = self.new_user()
+        status, data = self.request(
+            "POST",
+            "/api/account/secret",
+            {"current_secret": "ABC123", "new_secret": "Changed123", "confirm_secret": "Different123"},
+            session,
+        )
+        self.assertEqual(status, 400, data)
+        self.assertEqual(data["code"], "secret_mismatch")
+        status, _ = self.request("POST", "/api/login", {"username": username, "secret": "ABC123"})
+        self.assertEqual(status, 200)
 
     def test_tool_history_handles_concurrent_writes(self):
         _, account, session = self.new_user()

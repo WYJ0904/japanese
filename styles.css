@@ -307,7 +307,7 @@ h1 {
 .field-label input,
 .field-label select,
 .admin-search input,
-.admin-secret-row input,
+.admin-secret-input-wrap input,
 .study-goal-field input,
 textarea {
   width: 100%;
@@ -1999,6 +1999,24 @@ textarea {
   width: 100%;
 }
 
+.secret-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.secret-input-row input { min-width: 0; }
+.secret-input-row button {
+  min-width: 76px;
+  white-space: nowrap;
+}
+
+.account-secret-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.35fr);
+  gap: 10px;
+}
+
 .modal-layer {
   position: fixed;
   inset: 0;
@@ -2207,6 +2225,15 @@ textarea {
   text-align: center;
 }
 
+.admin-login-card .login-success { color: #8ce8bc; }
+.admin-login-card .login-failed { color: #ff9c8f; }
+.admin-login-card p { overflow-wrap: anywhere; }
+.admin-login-location { color: #d7f3ff; }
+.admin-login-agent {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .admin-user-card {
   display: grid;
   grid-template-columns: minmax(180px, 1.05fr) minmax(260px, 1.35fr) minmax(230px, 1.2fr) auto;
@@ -2305,14 +2332,66 @@ textarea {
 
 .admin-editor-save button { min-width: 168px; }
 
-.admin-secret-row {
+.admin-secret-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
 }
 
-.admin-secret-row input { min-width: 0; }
-.admin-secret-row button { white-space: nowrap; }
+.admin-secret-field > label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.admin-secret-input-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.admin-secret-input-wrap input { min-width: 0; }
+.admin-secret-input-wrap button {
+  min-width: 76px;
+  white-space: nowrap;
+}
+
+.admin-secret-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 10px;
+}
+
+.admin-secret-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(102, 210, 255, 0.36);
+  border-radius: 8px;
+  background: rgba(20, 80, 112, 0.16);
+}
+
+.admin-secret-result > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.admin-secret-result span {
+  color: #9ebccc;
+  font-size: 12px;
+}
+
+.admin-secret-result code {
+  color: #e9f8ff;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.admin-secret-result button { white-space: nowrap; }
 
 .admin-danger-section h3 { color: #ffd5ce; }
 
@@ -2460,15 +2539,19 @@ button:active:not(:disabled) {
   .admin-editor { padding: 24px 18px; }
   .admin-membership-grid,
   .admin-date-grid,
-  .admin-secret-row,
+  .admin-secret-actions,
+  .admin-secret-result,
   .admin-danger-actions { grid-template-columns: 1fr; }
+  .admin-secret-input-wrap { grid-template-columns: minmax(0, 1fr) auto; }
   .admin-current-memberships > article {
     grid-template-columns: 1fr;
     grid-template-areas: "name" "expiry" "meta";
   }
   .admin-current-memberships > article span { white-space: normal; }
   .admin-editor-save button,
-  .admin-secret-row button { width: 100%; }
+  .admin-secret-actions button,
+  .admin-secret-result button { width: 100%; }
+  .account-secret-actions { grid-template-columns: 1fr; }
 
   .study-heading { align-items: stretch; flex-direction: column; }
   .study-goal-field { align-self: flex-start; }
@@ -2919,7 +3002,7 @@ button:disabled {
 .field-label input,
 .field-label select,
 .admin-search input,
-.admin-secret-row input,
+.admin-secret-input-wrap input,
 .study-goal-field input,
 textarea {
   border-color: var(--line);

@@ -16,6 +16,13 @@ const NO_BODY_METHODS = new Set(["GET", "HEAD"]);
 const RETRYABLE_STATUS = new Set([502, 503, 504, 530]);
 const MAX_PROXY_BODY_BYTES = 600 * 1024;
 const IDEMPOTENT_RETRY_DELAYS_MS = [0, 120, 360];
+const CLIENT_CONTEXT_HEADERS = new Set([
+  "x-wyj-proxy",
+  "x-wyj-client-ip",
+  "x-wyj-client-country",
+  "x-wyj-client-region",
+  "x-wyj-client-city",
+]);
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -74,16 +81,26 @@ function configuredBases(env) {
   return uniqueBases(rawBases.map((base) => normalizeBase(base)));
 }
 
-function requestHeadersFor(request, target) {
+function encodedContextHeader(value, maxLength = 120) {
+  return encodeURIComponent(String(value || "").slice(0, maxLength));
+}
+
+function requestHeadersFor(request, target, requestContext = {}) {
   const headers = new Headers();
   request.headers.forEach((value, key) => {
-    if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+    const normalized = key.toLowerCase();
+    if (!HOP_BY_HOP_HEADERS.has(normalized) && !CLIENT_CONTEXT_HEADERS.has(normalized)) {
       headers.set(key, value);
     }
   });
   headers.set("X-Forwarded-Host", new URL(request.url).host);
   headers.set("X-Forwarded-Proto", "https");
   headers.set("X-Forwarded-For", request.headers.get("CF-Connecting-IP") || "");
+  headers.set("X-WYJ-Proxy", "pages");
+  headers.set("X-WYJ-Client-IP", encodedContextHeader(request.headers.get("CF-Connecting-IP"), 80));
+  headers.set("X-WYJ-Client-Country", encodedContextHeader(requestContext.country || request.headers.get("CF-IPCountry"), 80));
+  headers.set("X-WYJ-Client-Region", encodedContextHeader(requestContext.region || requestContext.regionCode, 120));
+  headers.set("X-WYJ-Client-City", encodedContextHeader(requestContext.city, 120));
   return headers;
 }
 
@@ -129,7 +146,6 @@ export async function onRequest(context) {
   if (body && body.byteLength > MAX_PROXY_BODY_BYTES) {
     return json({ ok: false, error: "Request body is too large." }, 413);
   }
-  let lastError = "";
   const retryDelays = NO_BODY_METHODS.has(request.method.toUpperCase()) ? IDEMPOTENT_RETRY_DELAYS_MS : [0];
   const attempts = bases.flatMap((base) => retryDelays.map((delay) => ({ base, delay })));
 
@@ -139,7 +155,7 @@ export async function onRequest(context) {
     const target = targetUrlFor(request, base);
     const init = {
       method: request.method,
-      headers: requestHeadersFor(request, target),
+      headers: requestHeadersFor(request, target, request.cf || context.cf || {}),
       redirect: "manual",
     };
 
@@ -148,7 +164,6 @@ export async function onRequest(context) {
     try {
       const response = await fetch(target.toString(), init);
       if (index < attempts.length - 1 && RETRYABLE_STATUS.has(response.status)) {
-        lastError = `Backend ${base} returned ${response.status}`;
         if (response.body) await response.body.cancel().catch(() => {});
         continue;
       }
@@ -157,16 +172,14 @@ export async function onRequest(context) {
         statusText: response.statusText,
         headers: responseHeadersFor(response),
       });
-    } catch (error) {
-      lastError = error.message;
-    }
+    } catch (_) {}
   }
 
   return json(
     {
       ok: false,
       error: "Could not reach the local backend through configured Cloudflare Tunnel URLs.",
-      detail: lastError,
+      retryable: true,
     },
     502,
   );

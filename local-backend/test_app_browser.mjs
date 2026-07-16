@@ -295,8 +295,10 @@ async function main() {
       await waitFor("!document.querySelector('#membershipModal')?.classList.contains('hidden')", 12_000, "membership modal");
       assert.equal(await evaluate("location.pathname"), "/select");
       const plans = await evaluate(`[...document.querySelectorAll('#membershipPlanList [data-plan]')].map(node => ({ code: node.dataset.plan, text: node.textContent }))`);
-      assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"]);
+      assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"]);
       assert.ok(plans.find((item) => item.code === "trial_single_language").text.includes("8"));
+      assert.ok(plans.find((item) => item.code === "dual_language_monthly").text.includes("20"));
+      assert.ok(plans.find((item) => item.code === "tools_monthly").text.includes("20"));
       assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("70"));
       assert.ok(plans.find((item) => item.code === "all_access_monthly").text.includes("30"));
       assert.ok(plans.find((item) => item.code === "all_access_lifetime").text.includes("100"));
@@ -512,6 +514,10 @@ async function main() {
       await waitFor("document.querySelectorAll('#adminUserList .admin-user-card').length === 1", 5_000, "admin user search");
       await click("#adminUserList [data-admin-edit]");
       await waitFor("!document.querySelector('#adminEditModal')?.classList.contains('hidden')", 3_000, "admin editor");
+      assert.deepEqual(
+        await evaluate("[...document.querySelector('#adminMembershipSelect').options].map(option => option.value).filter(Boolean)"),
+        ["trial_single_language", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"],
+      );
       assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("全功能月度会员"));
       await setFields({ "#adminMembershipAction": "grant", "#adminMembershipSelect": "japanese_lifetime", "#adminMembershipStart": "2026.07.16", "#adminMembershipNote": "browser matrix" });
       await click("#saveAdminMembershipBtn");
@@ -528,9 +534,16 @@ async function main() {
       await waitFor("document.querySelector('#adminEditMessage')?.textContent.includes('恢复按会员方案')", 10_000, "tools override restore");
       refreshed = await api("/api/me", null, userSession);
       assert.equal(refreshed.account.tools_access, true);
+      await api("/api/tools/recent", { tool_id: "text-stats" }, userSession);
       await click('[data-close-modal="adminEditModal"]');
+      await waitFor("document.querySelector('#adminEditModal')?.classList.contains('hidden')", 3_000, "membership editor closed");
+      await click("#refreshAdminBtn");
+      await waitFor("!document.querySelector('#refreshAdminBtn')?.disabled", 12_000, "admin stats refresh");
       await click('[data-admin-view="adminAuditView"]');
       assert.ok(Number(await evaluate("document.querySelectorAll('#adminAuditList .admin-log-card').length")) >= 3);
+      await click('[data-admin-view="adminLoginView"]');
+      assert.ok(Number(await evaluate("document.querySelectorAll('#adminLoginList .admin-login-card').length")) >= 1);
+      assert.ok((await evaluate("document.querySelector('#adminLoginList').textContent")).includes("IP"));
       await click('[data-admin-view="adminToolStatsView"]');
       assert.ok(Number(await evaluate("document.querySelectorAll('#adminToolStatsList .admin-log-card').length")) >= 1);
     });
@@ -569,12 +582,30 @@ async function main() {
       assert.equal((await request("/api/me", null, logoutUser.session)).status, 401);
 
       await openEditor(secretUser.username);
+      await click("#generateAdminSecretBtn");
+      const generatedSecret = await evaluate("document.querySelector('#adminNewSecretInput').value");
+      assert.equal(generatedSecret.length, 24);
+      assert.match(generatedSecret, /[A-Z]/);
+      assert.match(generatedSecret, /[a-z]/);
+      assert.match(generatedSecret, /[2-9]/);
+      assert.match(generatedSecret, /[!@#$%*\-_=+?]/);
+      assert.equal(await evaluate("document.querySelector('#adminNewSecretInput').type"), "text");
+      await click("#toggleAdminSecretBtn");
+      assert.equal(await evaluate("document.querySelector('#adminNewSecretInput').type"), "password");
       await setFields({ "#adminNewSecretInput": USER_SECRET_NEW });
       await click("#saveAdminSecretBtn");
-      await waitFor("document.querySelector('#adminEditMessage')?.textContent.includes('旧会话已失效')", 8_000, "secret reset");
+      await click("#acceptConfirmBtn");
+      await waitFor("!document.querySelector('#adminSecretResult')?.classList.contains('hidden') && document.querySelector('#adminSecretResultValue')?.textContent.length > 0", 8_000, "secret reset");
+      assert.equal(await evaluate("document.querySelector('#adminNewSecretInput').value"), "");
+      assert.equal(await evaluate("document.querySelector('#adminNewSecretInput').type"), "password");
+      assert.equal(await evaluate("document.querySelector('#adminSecretResultValue').textContent"), USER_SECRET_NEW);
+      assert.equal(await evaluate("document.querySelector('#adminSecretResult').classList.contains('hidden')"), false);
       assert.equal((await request("/api/login", { username: secretUser.username, secret: secretUser.secret })).status, 403);
       assert.equal((await request("/api/login", { username: secretUser.username, secret: USER_SECRET_NEW })).status, 200);
       await click('[data-close-modal="adminEditModal"]');
+      await waitFor("document.querySelector('#adminEditModal')?.classList.contains('hidden')", 3_000, "secret editor closed");
+      assert.equal(await evaluate("document.querySelector('#adminSecretResultValue').textContent"), "");
+      assert.equal(await evaluate("document.querySelector('#adminSecretResult').classList.contains('hidden')"), true);
 
       await openEditor(deleteUser.username);
       await click("#adminDeleteUserBtn");
@@ -612,7 +643,7 @@ async function main() {
       await click("#accountBtn");
       await waitFor("!document.querySelector('#accountModal')?.classList.contains('hidden')", 3_000, "account modal");
       assert.ok((await evaluate("document.querySelector('#accountDetails').textContent")).includes(USERNAME));
-      await setFields({ "#currentSecretInput": USER_SECRET, "#newSecretInput": USER_SECRET_NEW });
+      await setFields({ "#currentSecretInput": USER_SECRET, "#newSecretInput": USER_SECRET_NEW, "#newSecretConfirmInput": USER_SECRET_NEW });
       await click("#changeSecretForm button[type=submit]");
       await waitFor("document.querySelector('#accountMessage')?.textContent.includes('密钥已修改')", 10_000, "own secret change");
       await waitFor("location.pathname === '/login'", 5_000, "logout after secret change");

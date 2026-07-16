@@ -7,6 +7,7 @@ import os
 import random
 import re
 import secrets
+import sqlite3
 import threading
 import time
 import traceback
@@ -33,7 +34,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-16-quality12"
+APP_BUILD = "2026-07-16-quality14"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -261,10 +262,50 @@ def limit_text(value, max_len=MAX_TEXT_LEN):
 
 
 def request_client_key(handler):
-    forwarded = handler.headers.get("CF-Connecting-IP") or handler.headers.get("X-Forwarded-For", "")
+    forwarded = handler.headers.get("CF-Connecting-IP", "")
     if forwarded:
-        return forwarded.split(",", 1)[0].strip()[:80]
+        return str(forwarded).split(",", 1)[0].strip()[:80]
     return str(handler.client_address[0])
+
+
+def decoded_context_header(handler, name, max_length):
+    raw = str(handler.headers.get(name, "") or "")[: max_length * 3]
+    try:
+        return urllib.parse.unquote(raw).strip()[:max_length]
+    except (UnicodeDecodeError, ValueError):
+        return ""
+
+
+def request_login_context(handler):
+    pages_proxy = str(handler.headers.get("X-WYJ-Proxy", "")).casefold() == "pages"
+    forwarded_ip = decoded_context_header(handler, "X-WYJ-Client-IP", 80) if pages_proxy else ""
+    country = (
+        decoded_context_header(handler, "X-WYJ-Client-Country", 80)
+        if pages_proxy
+        else str(handler.headers.get("CF-IPCountry", "") or "")[:80]
+    )
+    return {
+        "ip_address": forwarded_ip or request_client_key(handler),
+        "country": country,
+        "region": decoded_context_header(handler, "X-WYJ-Client-Region", 120) if pages_proxy else "",
+        "city": decoded_context_header(handler, "X-WYJ-Client-City", 120) if pages_proxy else "",
+        "user_agent": str(handler.headers.get("User-Agent", "") or "")[:400],
+        "source": "cloudflare_pages" if pages_proxy else ("cloudflare" if handler.headers.get("CF-Connecting-IP") else "direct"),
+    }
+
+
+def record_login_event_safely(handler, username, success, reason, user=None):
+    try:
+        ACCOUNT_STORE.record_login_event(
+            username,
+            success,
+            reason,
+            context=request_login_context(handler),
+            user=user,
+        )
+    except (AccountError, OSError, sqlite3.Error):
+        # Login must remain available even when audit storage is temporarily unavailable.
+        return
 
 
 def prune_login_failures_locked(now):
@@ -1465,10 +1506,11 @@ def send_security_headers(handler):
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.send_header("X-Frame-Options", "DENY")
     handler.send_header("Referrer-Policy", "no-referrer")
+    handler.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     handler.send_header(
         "Content-Security-Policy",
         "default-src 'self'; script-src 'self'; style-src 'self'; "
-        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; "
         "base-uri 'none'; frame-ancestors 'none'",
     )
 
@@ -1897,7 +1939,8 @@ def pdf_response(handler, filename, content):
 
 
 class VocabHandler(BaseHTTPRequestHandler):
-    server_version = "VocabQwenWeb/1.1"
+    server_version = "WYJ"
+    sys_version = ""
 
     def log_message(self, fmt, *args):
         print("[%s] %s" % (time.strftime("%H:%M:%S"), fmt % args))
@@ -2049,6 +2092,16 @@ class VocabHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if path == "/api/admin/login-logs":
+                if not self.require_super_admin():
+                    return
+                json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {"ok": True, "logs": ACCOUNT_STORE.list_login_audit_logs(self.account_user)},
+                )
+                return
+
             if path == "/api/admin/tool-stats":
                 if not self.require_super_admin():
                     return
@@ -2129,6 +2182,7 @@ class VocabHandler(BaseHTTPRequestHandler):
 
             if request_path == "/api/login":
                 if login_limited(self):
+                    record_login_event_safely(self, "", False, "login_rate_limited")
                     json_response(
                         self,
                         HTTPStatus.TOO_MANY_REQUESTS,
@@ -2138,6 +2192,7 @@ class VocabHandler(BaseHTTPRequestHandler):
                 payload = self.read_json()
                 try:
                     session, user = ACCOUNT_STORE.login(payload.get("username"), payload.get("secret"))
+                    record_login_event_safely(self, payload.get("username"), True, "success", user=user)
                     clear_login_failures(self)
                     json_response(
                         self,
@@ -2149,7 +2204,8 @@ class VocabHandler(BaseHTTPRequestHandler):
                             "account": ACCOUNT_STORE.user_payload(user),
                         },
                     )
-                except AccountError:
+                except AccountError as exc:
+                    record_login_event_safely(self, payload.get("username"), False, exc.code)
                     record_login_failure(self)
                     raise
                 return
@@ -2233,6 +2289,8 @@ class VocabHandler(BaseHTTPRequestHandler):
 
             if request_path == "/api/account/secret":
                 payload = self.read_json()
+                if "confirm_secret" in payload and str(payload.get("new_secret", "")) != str(payload.get("confirm_secret", "")):
+                    raise AccountError("两次输入的新登录密钥不一致", 400, "secret_mismatch")
                 ACCOUNT_STORE.change_own_secret(
                     self.account_user["id"], payload.get("current_secret"), payload.get("new_secret")
                 )

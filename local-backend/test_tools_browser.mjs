@@ -15,6 +15,26 @@ const USER_SECRET = "Tool-Matrix-User-2026!";
 
 fs.mkdirSync(DOWNLOAD_ROOT, { recursive: true });
 
+function prepareFixtures() {
+  const write = (name, content) => fs.writeFileSync(path.join(TEST_ROOT, name), content);
+  write("abc.txt", "abc");
+  write("sample.txt", "first line\nsecond line\nthird line\n");
+  write("sample2.txt", "fourth line\nfifth line\n");
+  write("data.csv", "name,age\nAlice,18\nBob,20\n");
+  write("data2.csv", "name,age\nCarol,22\n");
+  write("objects.json", JSON.stringify([{ name: "Alice", age: 18 }, { name: "Bob", age: 20 }]));
+  write("array1.json", JSON.stringify([1, 2]));
+  write("array2.json", JSON.stringify([3]));
+  fs.copyFileSync(path.join(ROOT, "icon-192.png"), path.join(TEST_ROOT, "sample.png"));
+  fs.copyFileSync(path.join(ROOT, "icon-512.png"), path.join(TEST_ROOT, "sample2.png"));
+  write("sample.jpg", Buffer.from(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAEf/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABBQJ//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAwEBPwF//8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAgBAgEBPwF//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQAGPwJ//8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPyF//9oADAMBAAIAAwAAABD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/EB//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EB//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EB//2Q==",
+    "base64",
+  ));
+}
+
+prepareFixtures();
+
 const sample = (name) => path.join(TEST_ROOT, name);
 const samples = {
   abc: sample("abc.txt"),

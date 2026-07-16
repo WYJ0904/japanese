@@ -66,6 +66,11 @@ class AccountStoreTests(unittest.TestCase):
             with self.assertRaises(AccountError):
                 self.register(reserved, "SECRET")
 
+    def test_new_secrets_require_six_characters(self):
+        with self.assertRaises(AccountError) as raised:
+            self.register("short-secret", "12345")
+        self.assertEqual(raised.exception.code, "secret_too_short")
+
     def test_txt_is_atomically_synchronized_without_plaintext_secrets(self):
         self.register()
         text = self.text_path.read_text(encoding="utf-8")
@@ -97,9 +102,34 @@ class AccountStoreTests(unittest.TestCase):
         self.register()
         token, user = self.store.login("USER001", "ABC123")
         self.assertEqual(user["username"], "user001")
+        with self.store.connect() as connection:
+            stored_token = connection.execute(
+                "SELECT token FROM sessions WHERE user_id = ?", (user["id"],)
+            ).fetchone()["token"]
+        self.assertNotEqual(stored_token, token)
+        self.assertTrue(stored_token.startswith("sha256$"))
+        self.assertIsNone(self.store.resolve_session(stored_token))
         self.assertIsNotNone(self.store.resolve_session(token))
         with self.assertRaises(AccountError):
             self.store.login("user001", "WRONG")
+
+    def test_legacy_plaintext_session_is_migrated_without_logging_out(self):
+        user = self.register()
+        legacy_token = "legacy-session-token"
+        now = iso_now()
+        with self.store.connect() as connection:
+            connection.execute(
+                "INSERT INTO sessions (token, user_id, session_version, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+                (legacy_token, user["id"], user["session_version"], now, now),
+            )
+        restarted = AccountStore(self.store.database_path, self.text_path)
+        self.assertIsNotNone(restarted.resolve_session(legacy_token))
+        with restarted.connect() as connection:
+            stored = connection.execute(
+                "SELECT token FROM sessions WHERE user_id = ?", (user["id"],)
+            ).fetchone()["token"]
+        self.assertNotEqual(stored, legacy_token)
+        self.assertTrue(stored.startswith("sha256$"))
 
     def test_login_prunes_old_and_excess_sessions(self):
         user = self.register()
@@ -225,6 +255,23 @@ class AccountStoreTests(unittest.TestCase):
         self.assertNotIn("NEW456", text)
         self.store.login("user001", "NEW456")
 
+    def test_admin_secret_reset_is_hash_only_and_never_exposed(self):
+        user = self.register()
+        token, _ = self.store.login("user001", "ABC123")
+        replacement = "Admin-Reset-789!"
+        self.store.admin_change_secret(self.admin, user["id"], replacement)
+        self.assertIsNone(self.store.resolve_session(token))
+        with self.store.connect() as connection:
+            encoded = connection.execute("SELECT secret FROM users WHERE id = ?", (user["id"],)).fetchone()[0]
+        self.assertTrue(encoded.startswith("pbkdf2_sha256$"))
+        self.assertNotEqual(encoded, replacement)
+        listed_user = next(item for item in self.store.list_users() if item["id"] == user["id"])
+        self.assertNotIn("secret", listed_user)
+        self.assertNotIn(replacement, str(self.store.list_audit_logs(self.admin)))
+        with self.assertRaises(AccountError):
+            self.store.login("user001", "ABC123")
+        self.store.login("user001", replacement)
+
     def test_ban_invalidates_session_and_unban_restores_login(self):
         user = self.register()
         token, _ = self.store.login("user001", "ABC123")
@@ -292,6 +339,53 @@ class AccountStoreTests(unittest.TestCase):
         remaining = self.store.user_payload(self.store.get_user(user["id"]))
         self.assertNotIn("tools_access", remaining["entitlements"])
         self.assertIn("language_japanese_access", remaining["entitlements"])
+
+    def test_tools_and_dual_language_monthly_plans_keep_rights_separate(self):
+        tools_user = self.register("tools-only")
+        tools_payload = self.store.admin_manage_membership(
+            self.admin, tools_user["id"], "grant", "tools_monthly"
+        )
+        self.assertIn("tools_access", tools_payload["entitlements"])
+        self.assertNotIn("language_all_access", tools_payload["entitlements"])
+        self.assertEqual(self.store.quiz_limit(self.store.get_user(tools_user["id"]), "english"), 15)
+        self.assertEqual(self.store.quiz_limit(self.store.get_user(tools_user["id"]), "japanese"), 15)
+
+        dual_user = self.register("dual-only")
+        dual_payload = self.store.admin_manage_membership(
+            self.admin, dual_user["id"], "grant", "dual_language_monthly"
+        )
+        self.assertIn("language_all_access", dual_payload["entitlements"])
+        self.assertNotIn("tools_access", dual_payload["entitlements"])
+        self.assertIsNone(self.store.quiz_limit(self.store.get_user(dual_user["id"]), "english"))
+        self.assertIsNone(self.store.quiz_limit(self.store.get_user(dual_user["id"]), "japanese"))
+        self.assertEqual(self.store.get_user(dual_user["id"])["membership"], "monthly")
+
+    def test_login_audit_is_bounded_protected_and_contains_no_secrets(self):
+        user = self.register("audit-user", "AuditSecret1")
+        context = {
+            "ip_address": "203.0.113.18",
+            "country": "CN",
+            "region": "Guangdong",
+            "city": "Shenzhen",
+            "user_agent": "Test Browser",
+            "source": "cloudflare_pages",
+        }
+        with mock.patch("account_store.LOGIN_AUDIT_MAX_RECORDS", 3):
+            for index in range(5):
+                self.store.record_login_event(
+                    user["username"],
+                    index % 2 == 0,
+                    "success" if index % 2 == 0 else "invalid_credentials",
+                    context=context,
+                    user=user,
+                )
+        logs = self.store.list_login_audit_logs(self.admin)
+        self.assertEqual(len(logs), 3)
+        self.assertEqual(logs[0]["ip_address"], "203.0.113.18")
+        self.assertEqual(logs[0]["city"], "Shenzhen")
+        self.assertNotIn("AuditSecret1", str(logs))
+        with self.assertRaises(AccountError):
+            self.store.list_login_audit_logs(user)
 
     def test_legacy_membership_migration_is_idempotent_and_does_not_add_tools(self):
         user = self.register()

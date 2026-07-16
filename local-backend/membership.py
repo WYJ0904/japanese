@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 
 ENTITLEMENT_LABELS = {
+    "language_english_access": "英语会员功能",
     "language_japanese_access": "日语会员功能",
     "language_all_access": "全部语言会员功能",
     "tools_access": "在线工具箱",
@@ -26,6 +27,37 @@ MEMBERSHIP_PLANS = {
         "priority": 30,
         "description": "仅限日语语言测试会员功能，永久有效，不包含在线工具箱。",
         "entitlements": ("language_japanese_access",),
+    },
+    "tools_monthly": {
+        "name": "工具箱包月会员",
+        "price_cents": 2000,
+        "currency": "CNY",
+        "lifetime": False,
+        "duration_months": 1,
+        "purchasable": True,
+        "priority": 45,
+        "description": "仅在线工具箱全部功能，有效期一个月，不包含语言测试会员功能。",
+        "entitlements": (
+            "tools_access",
+            "tools_batch_access",
+            "temporary_share_access",
+            "save_tool_config",
+        ),
+    },
+    "dual_language_monthly": {
+        "name": "双语言测试包月会员",
+        "price_cents": 2000,
+        "currency": "CNY",
+        "lifetime": False,
+        "duration_months": 1,
+        "purchasable": True,
+        "priority": 46,
+        "description": "英语和日语测试会员功能，有效期一个月，不包含在线工具箱。",
+        "entitlements": (
+            "language_english_access",
+            "language_japanese_access",
+            "language_all_access",
+        ),
     },
     "all_access_monthly": {
         "name": "全功能月度会员",
