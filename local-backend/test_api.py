@@ -419,6 +419,36 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(readings["コーヒー"], "コーヒー")
         self.assertEqual(written_forms["コーヒー"], "コーヒー")
 
+    def test_jisho_exact_lookup_adds_common_kanji_for_hiragana_input(self):
+        payload = {
+            "data": [
+                {
+                    "is_common": True,
+                    "japanese": [{"word": "水", "reading": "みず"}],
+                    "senses": [{"tags": []}],
+                }
+            ]
+        }
+        with server.STATE_LOCK:
+            server.JAPANESE_FORM_CACHE.clear()
+        with mock.patch("server.web_get", return_value=json.dumps(payload).encode("utf-8")), mock.patch(
+            "server.ai_japanese_form_batch"
+        ) as ai:
+            readings, written_forms = server.resolve_japanese_forms(["みず"])
+        self.assertEqual(readings["みず"], "みず")
+        self.assertEqual(written_forms["みず"], "水")
+        ai.assert_not_called()
+
+    def test_jisho_exact_lookup_keeps_katakana_without_network_or_ai(self):
+        with server.STATE_LOCK:
+            server.JAPANESE_FORM_CACHE.clear()
+        with mock.patch("server.web_get") as web, mock.patch("server.ai_japanese_form_batch") as ai:
+            readings, written_forms = server.resolve_japanese_forms(["コーヒー"])
+        self.assertEqual(readings["コーヒー"], "コーヒー")
+        self.assertEqual(written_forms["コーヒー"], "コーヒー")
+        web.assert_not_called()
+        ai.assert_not_called()
+
     def test_ai_resolves_kanji_and_kana_inputs_without_manual_pairs(self):
         response = {
             "readings": {
@@ -437,6 +467,21 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(readings["学校"], "がっこう")
         self.assertEqual(written_forms["がっこう"], "学校")
         self.assertEqual(written_forms["テレビ"], "テレビ")
+
+    def test_ai_rechecks_hiragana_that_was_copied_as_written_form(self):
+        first = {
+            "readings": {"みず": "みず"},
+            "written_forms": {"みず": "みず"},
+        }
+        corrected = {"written_forms": {"みず": "水"}}
+        with mock.patch(
+            "server.call_ollama",
+            side_effect=[json.dumps(first, ensure_ascii=False), json.dumps(corrected, ensure_ascii=False)],
+        ) as ollama:
+            readings, written_forms = server.ai_japanese_form_batch(["みず"])
+        self.assertEqual(readings["みず"], "みず")
+        self.assertEqual(written_forms["みず"], "水")
+        self.assertEqual(ollama.call_count, 2)
 
     def test_vocabulary_source_cache_refetches_for_larger_japanese_request(self):
         first = ["一", "二", "三", "四", "五"]

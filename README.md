@@ -253,7 +253,7 @@ node --check "functions/api/[[path]].js"
 node local-backend/test_tools_js.mjs
 ```
 
-当前 Python 自动化套件共 64 项，另有 16 项 JavaScript 工具自检，覆盖注册登录、会话、封禁、老会员迁移、8 CNY 单语言订单、新权益合并、过期降级、充值审批、审计日志、工具权限、收藏/历史/配置、模糊搜索目录、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语读音、PDF 相关旧 API、并发状态请求、HTML ID、PWA 缓存、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理、OpenCC 词典完整性和 103 项工具简介。
+当前 Python 自动化套件共 70 项，另有 16 项 JavaScript 工具自检。`test_app_browser.mjs` 使用真实 Chrome 覆盖 13 条完整用户流程，`test_tools_browser.mjs` 逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）并校验实际下载。覆盖注册登录、会话、封禁、老会员迁移、8 CNY 单语言订单、新权益合并、过期降级、充值审批、审计日志、工具权限、收藏/历史/配置、模糊搜索、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语汉字与假名补全、错题 PDF、120 次并发状态请求、HTML ID、PWA 缓存、手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理和 OpenCC 词典完整性。
 
 ## Cloudflare Pages 配置
 

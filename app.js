@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-16-quality11";
+const APP_VERSION = "2026-07-16-quality12";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -105,6 +105,7 @@ let selectedRechargePlan = "";
 let currentPaymentOrder = null;
 let membershipPlans = [];
 let membershipPlansPromise = null;
+let membershipModalLoadSequence = 0;
 let toolsInitialized = false;
 let routeBusy = false;
 let adminUsers = [];
@@ -639,6 +640,7 @@ function renderAccountUi() {
   const badge = $("accountBadge");
   if (!badge) return;
   const summary = accountMembershipSummary(account);
+  $("accountBar")?.classList.toggle("hidden", !account);
   badge.textContent = account ? `${account.username} · ${summary.name}` : "未登录";
   $("membershipBtn")?.classList.toggle("hidden", !account);
   $("accountBtn")?.classList.toggle("hidden", !account);
@@ -928,6 +930,7 @@ async function openMembershipModal(options = {}) {
     showAuth("请先登录后查看会员方案", { path: "/login" });
     return;
   }
+  const sequence = ++membershipModalLoadSequence;
   $("copyWechatBtn").textContent = "复制微信号";
   selectRechargePlan("");
   $("rechargeMessage").textContent = "正在加载套餐与订单状态…";
@@ -936,11 +939,15 @@ async function openMembershipModal(options = {}) {
   let loadError = "";
   try {
     await loadMembershipPlans(options.forcePlans === true);
+    if (sequence !== membershipModalLoadSequence) return membershipPlans;
     const orders = await apiGet("/api/recharge/mine");
+    if (sequence !== membershipModalLoadSequence) return membershipPlans;
     openOrder = (orders.requests || []).find((item) => ["pending_payment", "user_paid"].includes(item.status)) || null;
   } catch (error) {
+    if (sequence !== membershipModalLoadSequence) return membershipPlans;
     loadError = error.message;
   }
+  if (sequence !== membershipModalLoadSequence) return membershipPlans;
   if (!state.session || !state.account) {
     closeModal("membershipModal", true);
     return;
@@ -1410,10 +1417,10 @@ async function saveAdminMembership() {
         preserve_japanese: $("adminPreserveJapanese").checked,
         trial_language: planCode === "trial_single_language" ? $("adminTrialLanguageSelect").value : "",
       });
-      $("adminEditMessage").textContent = "会员设置已保存并立即生效";
       await loadAdminData();
       const refreshed = adminUserById(userId) || data.user;
       renderAdminCurrentMemberships(refreshed);
+      $("adminEditMessage").textContent = "会员设置已保存并立即生效";
     } catch (error) {
       $("adminEditMessage").textContent = error.message;
     } finally {
@@ -1435,9 +1442,9 @@ function updateAdminToolsOverride(allowed) {
       allowed,
       note: $("adminMembershipNote").value.trim(),
     });
-    $("adminEditMessage").textContent = allowed === false ? "已单独取消工具权限" : "已恢复按会员方案计算工具权限";
     await loadAdminData();
     renderAdminCurrentMemberships(adminUserById(userId));
+    $("adminEditMessage").textContent = allowed === false ? "已单独取消工具权限" : "已恢复按会员方案计算工具权限";
   });
 }
 
@@ -1482,8 +1489,8 @@ function adminUserAction(kind) {
   const [message, path, payload] = configs[kind];
   askConfirmation(message, async () => {
     await api(path, payload);
-    closeModal("adminEditModal");
     await loadAdminData();
+    closeModal("adminEditModal");
   });
 }
 
@@ -3206,7 +3213,12 @@ async function startQuiz(words, mode = "normal", options = {}) {
       applyAccount(authorization.account);
       if (mode === "normal" && !(await ensureJapaneseDictationReadings(quizWords))) return;
     } catch (error) {
-      if (error.code !== "membership_required") alert(error.message);
+      if (error.code === "membership_required") {
+        await openMembershipModal();
+        $("rechargeMessage").textContent = error.message || "当前词表超过普通账户上限，请选择适合的会员方案。";
+      } else {
+        alert(error.message);
+      }
       return;
     } finally {
       setBusy(false);
@@ -4234,11 +4246,13 @@ async function boot() {
     $("appShell").classList.add("app-shell-ready");
     $("appShell").setAttribute("aria-hidden", "false");
     if (initialPath.startsWith("/share/") && showShareRoute(initialPath)) return;
+    const shouldResumeWorkspace = Boolean(state.session && state.account);
     showAuth(state.session ? "正在验证登录状态…" : "", {
       mode: initialPath === "/register" ? "register" : "login",
       path: initialPath,
       skipRoute: true,
     });
+    if (shouldResumeWorkspace && state.session && state.account) pendingScreen = "workspace";
   });
   await backendPromise;
   await routeCurrent();

@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,7 +33,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-16-quality11"
+APP_BUILD = "2026-07-16-quality12"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -66,6 +67,7 @@ REGISTER_ATTEMPTS = {}
 TEMP_REQUESTS = {}
 QUIZ_RUNS = {}
 VOCABULARY_SOURCE_CACHE = {}
+JAPANESE_FORM_CACHE = {}
 STATE_LOCK = threading.RLock()
 AI_SEMAPHORE = threading.BoundedSemaphore(AI_MAX_CONCURRENCY)
 OLLAMA_READY_LOCK = threading.Lock()
@@ -79,6 +81,9 @@ MAX_JAPANESE_READING_WORDS = 200
 AI_VOCABULARY_BATCH_SIZE = 50
 WEB_SEARCH_TIMEOUT_SEC = 12
 VOCABULARY_SOURCE_CACHE_TTL_SEC = 6 * 60 * 60
+JAPANESE_FORM_CACHE_TTL_SEC = 24 * 60 * 60
+JAPANESE_EXACT_LOOKUP_LIMIT = 40
+JAPANESE_EXACT_LOOKUP_WORKERS = 6
 VOCABULARY_LEVELS = {
     "japanese": {
         "n5": ("JLPT N5", "JLPT N5 日语核心词汇表"),
@@ -1113,11 +1118,92 @@ def cached_japanese_forms(words):
     return readings, written_forms
 
 
+def jisho_word_form(word):
+    word = clean_japanese_written_form(word)
+    if not word:
+        return {}
+
+    # Modern katakana words are normally written as entered. Looking up a
+    # kanji spelling here tends to surface rare ateji such as 珈琲.
+    if re.fullmatch(r"[\u30a0-\u30ff\u31f0-\u31ffー・]+", word):
+        return {"reading": word, "written": word}
+
+    now = time.time()
+    with STATE_LOCK:
+        cached = JAPANESE_FORM_CACHE.get(word)
+        if cached and now - cached["created_at"] < JAPANESE_FORM_CACHE_TTL_SEC:
+            return dict(cached["data"])
+
+    result = {}
+    try:
+        params = urllib.parse.urlencode({"keyword": word})
+        raw = web_get(f"https://jisho.org/api/v1/search/words?{params}", "application/json")
+        payload = json.loads(decode_http_body(raw))
+        exact_forms = []
+        for entry_index, entry in enumerate(payload.get("data", [])):
+            if not isinstance(entry, dict):
+                continue
+            sense_tags = {
+                str(tag).strip().casefold()
+                for sense in entry.get("senses", [])
+                if isinstance(sense, dict)
+                for tag in sense.get("tags", [])
+            }
+            usually_kana = any("usually written using kana alone" in tag for tag in sense_tags)
+            for form_index, form in enumerate(entry.get("japanese", []) or []):
+                if not isinstance(form, dict):
+                    continue
+                written = clean_japanese_written_form(form.get("word"))
+                reading = clean_japanese_reading(form.get("reading"))
+                if word not in {written, reading} or not reading:
+                    continue
+                has_kanji = bool(re.search(r"[\u3400-\u9fff々〆ヶ]", written))
+                exact_forms.append(
+                    {
+                        "written": written or reading,
+                        "reading": reading,
+                        "common": bool(entry.get("is_common")),
+                        "usually_kana": usually_kana,
+                        "has_kanji": has_kanji,
+                        "entry_index": entry_index,
+                        "form_index": form_index,
+                    }
+                )
+
+        input_is_hiragana = bool(re.fullmatch(r"[\u3040-\u309fー・]+", word))
+        if input_is_hiragana:
+            kanji_forms = [
+                item
+                for item in exact_forms
+                if item["common"] and item["has_kanji"] and not item["usually_kana"]
+            ]
+            if kanji_forms:
+                best = min(kanji_forms, key=lambda item: (item["entry_index"], item["form_index"]))
+                result = {"reading": best["reading"], "written": best["written"]}
+            elif any(item["common"] and (item["usually_kana"] or not item["has_kanji"]) for item in exact_forms):
+                result = {"reading": word, "written": word}
+        else:
+            written_matches = [item for item in exact_forms if item["written"] == word]
+            if written_matches:
+                best = min(
+                    written_matches,
+                    key=lambda item: (not item["common"], item["entry_index"], item["form_index"]),
+                )
+                result = {"reading": best["reading"], "written": best["written"]}
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        result = {}
+
+    with STATE_LOCK:
+        JAPANESE_FORM_CACHE[word] = {"created_at": now, "data": dict(result)}
+    return result
+
+
 def ai_japanese_form_batch(words, batch_index=0):
     system = (
         "你是日语词典助手。请为每个输入词补全标准现代日语假名读音和最常用书写形式。\n"
         "输入可能只有汉字，也可能只有平假名或片假名；readings 与 written_forms 的键必须与输入词完全一致。\n"
         "有常用汉字写法时 written_forms 写汉字；通常只用假名的词就保留输入假名。\n"
+        "遇到纯平假名时必须先检查常用汉字，不能因为输入没有汉字就原样复制，例如 みず→水、はな→花、やま→山。\n"
         "片假名外来语不要强行改成生僻汉字、旧式借字或不常用当て字。\n"
         "读音只能使用平假名、片假名和长音符，不要罗马字、声调、释义或解释；只输出 JSON。\n"
         '{"readings":{"学校":"がっこう","がっこう":"がっこう","コーヒー":"コーヒー"},'
@@ -1153,6 +1239,33 @@ def ai_japanese_form_batch(words, batch_index=0):
         for word, written in raw_written_forms.items()
         if str(word) in requested and clean_japanese_written_form(written)
     }
+    suspicious = [
+        word
+        for word in words
+        if re.fullmatch(r"[\u3040-\u309fー・]+", word) and written_forms.get(word) == word
+    ]
+    if suspicious:
+        correction = call_ollama(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是现代日语词典校对员。下面的纯平假名词被原样当成书写形式，请逐个重新核对。\n"
+                        "存在日常常用汉字时必须返回该汉字；只有现代日语通常仅用假名时才能保留假名。\n"
+                        "示例：みず→水、はな→花、やま→山、ありがとう→ありがとう。不要使用生僻字或当て字。\n"
+                        "只输出 JSON：{\"written_forms\":{\"输入词\":\"最常用书写\"}}"
+                    ),
+                },
+                {"role": "user", "content": json.dumps({"words": suspicious}, ensure_ascii=False)},
+            ]
+        )
+        correction_obj = extract_json(correction) or {}
+        corrected_forms = correction_obj.get("written_forms", {})
+        if isinstance(corrected_forms, dict):
+            for word in suspicious:
+                corrected = clean_japanese_written_form(corrected_forms.get(word))
+                if corrected:
+                    written_forms[word] = corrected
     return readings, written_forms
 
 
@@ -1170,6 +1283,19 @@ def resolve_japanese_forms(words):
         seen.add(word)
         unique_words.append(word)
     readings, written_forms = cached_japanese_forms(unique_words)
+    missing = [word for word in unique_words if word not in readings or word not in written_forms]
+    exact_words = missing[:JAPANESE_EXACT_LOOKUP_LIMIT]
+    if exact_words:
+        worker_count = min(JAPANESE_EXACT_LOOKUP_WORKERS, len(exact_words))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            exact_results = list(executor.map(jisho_word_form, exact_words))
+        for word, result in zip(exact_words, exact_results):
+            reading = clean_japanese_reading(result.get("reading"))
+            written = clean_japanese_written_form(result.get("written"))
+            if reading:
+                readings[word] = reading
+            if written:
+                written_forms[word] = written
     missing = [word for word in unique_words if word not in readings or word not in written_forms]
     for index in range(0, len(missing), AI_VOCABULARY_BATCH_SIZE):
         batch = missing[index : index + AI_VOCABULARY_BATCH_SIZE]

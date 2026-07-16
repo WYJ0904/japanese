@@ -666,7 +666,9 @@
       <label class="tool-wide"><span>结果</span><textarea id="textToolOutput" readonly></textarea></label>
       ${renderConfigControls(tool.id)}
     </div>`;
-    byId("runTextToolBtn").addEventListener("click", async () => {
+    byId("runTextToolBtn").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
       try {
         if (tool.id === "chinese-convert") {
           setMessage("正在加载本地简繁词典…");
@@ -675,7 +677,11 @@
         const output = runTextOperation(tool.id, byId("textToolInput").value, byId("textToolSecondary").value, byId("textToolParameter").value, byId("textToolOption")?.value || "");
         byId("textToolOutput").value = output;
         setMessage(tool.id === "chinese-convert" && openCcMaps?.source !== "opencc" ? "官方词典不可用，已使用内置基础词典" : "处理完成");
-      } catch (error) { setMessage(`处理失败：${error.message}`, true); }
+      } catch (error) {
+        setMessage(`处理失败：${error.message}`, true);
+      } finally {
+        button.disabled = false;
+      }
     });
     byId("copyTextToolBtn").addEventListener("click", (event) => copyText(byId("textToolOutput").value, event.currentTarget));
     byId("downloadTextToolBtn").addEventListener("click", () => downloadText(`${tool.id}-${Date.now()}.txt`, byId("textToolOutput").value));

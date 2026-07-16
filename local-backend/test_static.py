@@ -61,14 +61,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260716-quality11"
+        release_token = "20260716-quality12"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-16-quality11"', self.app)
+        self.assertIn('const APP_VERSION = "2026-07-16-quality12"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-16-quality11"', server)
+        self.assertIn('APP_BUILD = "2026-07-16-quality12"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -142,7 +142,7 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("temporary_store.py", launcher)
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.1.8"', launcher)
+        self.assertIn('$LauncherVersion = "8.1.9"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
@@ -159,6 +159,19 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn('setAttribute("aria-valuetext"', self.app)
         self.assertIn('const source = `来源：${item.source || "系统"}`;', self.app)
         self.assertIn(".admin-current-memberships > article", self.styles)
+        self.assertIn("membershipModalLoadSequence", self.app)
+        self.assertIn("if (sequence !== membershipModalLoadSequence)", self.app)
+        self.assertIn('$("accountBar")?.classList.toggle("hidden", !account);', self.app)
+        boot_source = self.app.split("async function boot()", 1)[1]
+        self.assertIn("const shouldResumeWorkspace = Boolean(state.session && state.account);", boot_source)
+        self.assertIn('if (shouldResumeWorkspace && state.session && state.account) pendingScreen = "workspace";', boot_source)
+        membership_source = self.app.split("async function saveAdminMembership()", 1)[1].split("function updateAdminToolsOverride", 1)[0]
+        self.assertLess(membership_source.index("await loadAdminData();"), membership_source.index("会员设置已保存并立即生效"))
+        admin_action_source = self.app.split("function adminUserAction(kind)", 1)[1].split("function wordDraftKey", 1)[0]
+        self.assertLess(admin_action_source.index("await loadAdminData();"), admin_action_source.index('closeModal("adminEditModal")'))
+        text_tool_source = self.tools.split('byId("runTextToolBtn").addEventListener', 1)[1].split('byId("copyTextToolBtn")', 1)[0]
+        self.assertIn("button.disabled = true;", text_tool_source)
+        self.assertIn("button.disabled = false;", text_tool_source)
 
     def test_remote_data_loading_has_retry_and_partial_recovery(self):
         self.assertIn('id="membershipPlanRecovery"', self.html)

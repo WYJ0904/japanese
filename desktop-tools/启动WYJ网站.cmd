@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title WYJ Website Launcher 8.1.8
+title WYJ Website Launcher 8.1.9
 set "ROOT=%~dp0"
 set "LAUNCHER=%ROOT%_wyj-tools\start-wyj.ps1"
 set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"

@@ -17,10 +17,11 @@ latest-url.txt
 # Codex workspace scratch/output folders
 .agents/
 .codex/
+.tool-e2e/
 work/
 outputs/
 
-# Account backend runtime data (contains plaintext login secrets by product design)
+# Account backend runtime data (contains private account and session data)
 local-backend/data/
 local-backend/users.txt
 *.sqlite3
