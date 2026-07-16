@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260715-tools9" />
-    <link rel="stylesheet" href="/styles.css?v=20260715-tools9" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260716-quality11" />
+    <link rel="stylesheet" href="/styles.css?v=20260716-quality11" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -38,7 +38,7 @@
       <section class="module-picker hidden" id="modulePicker" aria-labelledby="modulePickerTitle" aria-hidden="true">
         <header class="project-brand">
           <img src="/assets/logo.png" alt="WYJ的网站 Logo" />
-          <div><p class="section-kicker">WORKSPACE</p><h1 id="modulePickerTitle">选择功能</h1><p id="moduleMembershipStatus">普通注册用户</p></div>
+          <div><p class="section-kicker">WORKSPACE</p><h1 id="modulePickerTitle">选择功能</h1><p id="moduleMembershipStatus">普通注册用户</p><p class="module-access-message hidden" id="moduleAccessMessage" aria-live="polite"></p></div>
         </header>
         <div class="module-grid" aria-label="选择网站功能">
           <button class="module-card" type="button" data-module="language">
@@ -255,6 +255,7 @@
                 <button id="exportWrongDataBtn">导出错题数据</button>
                 <button id="importWrongDataBtn">导入错题数据</button>
               </div>
+              <p class="wrong-action-message hidden" id="wrongActionMessage" aria-live="polite"></p>
               <input id="wrongDataFileInput" class="hidden" type="file" accept=".json,application/json" />
               <div class="action-row secondary-row">
                 <button id="clearWrongBtn">清空本轮</button>
@@ -523,7 +524,7 @@
     </template>
 
     <script src="/vendor/qrcode.js?v=2.0.4"></script>
-    <script src="/tools.js?v=20260715-tools9"></script>
-    <script src="/app.js?v=20260715-tools9"></script>
+    <script src="/tools.js?v=20260716-quality11"></script>
+    <script src="/app.js?v=20260716-quality11"></script>
   </body>
 </html>

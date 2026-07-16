@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-15-tools9";
+const APP_VERSION = "2026-07-16-quality11";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -118,6 +118,7 @@ let storageWriteFailed = false;
 let achievementFilter = "all";
 let achievementToastTimer = null;
 let achievementToastHideTimer = null;
+let wrongActionTimer = null;
 const modalReturnFocus = new Map();
 const projectRuntime = {
   english: null,
@@ -1294,8 +1295,7 @@ async function showAdminPanel(pushHistory = true) {
   }
   if (!isSuperAdmin()) {
     history.replaceState({}, "", "/select");
-    showModulePicker(false);
-    alert("无管理员权限");
+    showModulePicker(false, "当前账户没有管理员权限，已返回功能选择。");
     return;
   }
   if (pushHistory && location.pathname !== "/admin") history.pushState({}, "", "/admin");
@@ -1361,7 +1361,8 @@ function renderAdminCurrentMemberships(user) {
   const memberships = Array.isArray(user?.memberships) ? user.memberships : [];
   target.innerHTML = memberships.map((item) => {
     const language = { english: "英语", japanese: "日语" }[item.metadata?.language] || "";
-    return `<article><strong>${escapeHtml(item.plan_name || membershipLabel(item.plan_code))}</strong><span>${item.is_lifetime ? "永久有效" : `到期 ${escapeHtml(formatLocalDateTime(item.expires_at, "未知"))}`}</span><small>${escapeHtml([language, item.source || "系统"].filter(Boolean).join(" · "))}</small></article>`;
+    const source = `来源：${item.source || "系统"}`;
+    return `<article><strong>${escapeHtml(item.plan_name || membershipLabel(item.plan_code))}</strong><span>${item.is_lifetime ? "永久有效" : `到期 ${escapeHtml(formatLocalDateTime(item.expires_at, "未知"))}`}</span><small>${escapeHtml([language, source].filter(Boolean).join(" · "))}</small></article>`;
   }).join("") || "<p>当前没有有效会员</p>";
 }
 
@@ -1739,7 +1740,7 @@ function stopProjectActivity() {
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 }
 
-function showModulePicker(pushHistory = true) {
+function showModulePicker(pushHistory = true, message = "") {
   if (!state.session || !state.account) {
     showAuth(pendingAuthMessage || "请先登录", { replace: true });
     return;
@@ -1750,6 +1751,11 @@ function showModulePicker(pushHistory = true) {
   hidePrimaryScreens();
   $("modulePicker").classList.remove("hidden");
   $("modulePicker").setAttribute("aria-hidden", "false");
+  const accessMessage = $("moduleAccessMessage");
+  if (accessMessage) {
+    accessMessage.textContent = message;
+    accessMessage.classList.toggle("hidden", !message);
+  }
   document.body.classList.add("project-picker-active");
   if (pushHistory) pushRoute("/select");
   renderAccountUi();
@@ -1862,13 +1868,14 @@ async function showTools(path = "/tools", pushHistory = true) {
     document.body.classList.remove("project-picker-active");
     renderAccountUi();
   } catch (error) {
-    showModulePicker(false);
+    const accessMessage = error.code === "membership_required"
+      ? ""
+      : `在线工具箱暂时无法打开：${error.message || "请稍后重试"}`;
+    showModulePicker(false, accessMessage);
     pushRoute("/select", true);
     if (error.code === "membership_required") {
       $("rechargeMessage").textContent = "当前会员不包含在线工具箱，请选择全功能会员。";
       await openMembershipModal();
-    } else {
-      alert(error.message);
     }
   }
 }
@@ -2329,6 +2336,8 @@ function renderStudyDashboard() {
   $("studyGoalProgress").textContent = `${today.total} / ${goal}`;
   $("studyGoalBar").max = goal;
   $("studyGoalBar").value = Math.min(today.total, goal);
+  $("studyGoalBar").textContent = `${today.total} / ${goal}`;
+  $("studyGoalBar").setAttribute("aria-valuetext", `${today.total} / ${goal} 题`);
   $("studyTotalRounds").textContent = records.length;
   $("studyTotalWords").textContent = totalWords;
   $("studyWeekAccuracy").textContent = weekWords ? `${Math.round((weekCorrect / weekWords) * 100)}%` : "--";
@@ -2459,11 +2468,18 @@ function backendErrorMessage(error) {
 }
 
 function applyBackendStatus(data) {
-  backendAvailable = true;
-  backendFailureMessage = "";
+  markBackendReachable(data);
   aiAvailable = data.ai_ready !== false;
   $("modelLabel").textContent = data.model || "qwen3:8b";
   $("statusDot").classList.toggle("online", aiAvailable);
+}
+
+function markBackendReachable(data = {}) {
+  backendAvailable = true;
+  backendFailureMessage = "";
+  if (typeof data.ai_ready === "boolean") aiAvailable = data.ai_ready;
+  if (data.model && $("modelLabel")) $("modelLabel").textContent = data.model;
+  $("statusDot")?.classList.toggle("online", backendAvailable && aiAvailable);
 }
 
 async function requestBackendStatus() {
@@ -2533,6 +2549,7 @@ async function api(path, body = {}, options = {}) {
     throw new Error(backendFailureMessage);
   }
   const data = await response.json().catch(() => ({}));
+  if (response.ok || response.status < 500) markBackendReachable(data);
   if (!response.ok) {
     if (response.status === 401) {
       clearSession();
@@ -2566,6 +2583,7 @@ async function publicApi(path, body = {}, options = {}) {
     throw new Error(backendErrorMessage(error));
   }
   const data = await response.json().catch(() => ({}));
+  if (response.ok || response.status < 500) markBackendReachable(data);
   if (!response.ok) {
     const error = new Error(data.error || "请求失败");
     error.code = data.code || "request_failed";
@@ -3422,6 +3440,7 @@ function skipWord() {
 
   const word = state.words[state.index];
   if (!word) return;
+  clearAnswerValidation();
   state.roundSkipped += 1;
   const rubric = cachedRubric(word);
   markWrong(word, SKIPPED_ANSWER, rubric && rubric.gloss ? rubric.gloss : "跳过：未作答", rubric && rubric.accepted ? rubric.accepted : []);
@@ -3585,7 +3604,26 @@ function setWrongScope(scope) {
   state.wrongScope = scope === "history" ? "history" : "current";
   $("currentWrongTab").classList.toggle("active", state.wrongScope === "current");
   $("historyWrongTab").classList.toggle("active", state.wrongScope === "history");
+  showWrongActionMessage("");
   renderWrongBook();
+}
+
+function showWrongActionMessage(message, isError = false) {
+  const node = $("wrongActionMessage");
+  if (!node) return;
+  if (wrongActionTimer) window.clearTimeout(wrongActionTimer);
+  wrongActionTimer = null;
+  node.textContent = message || "";
+  node.classList.toggle("hidden", !message);
+  node.classList.toggle("is-error", Boolean(message && isError));
+  if (message) {
+    wrongActionTimer = window.setTimeout(() => {
+      node.textContent = "";
+      node.classList.add("hidden");
+      node.classList.remove("is-error");
+      wrongActionTimer = null;
+    }, 9000);
+  }
 }
 
 function renderWrongBook() {
@@ -3651,9 +3689,9 @@ function startWrongReview(scope) {
 async function exportWrongBook(scope = "current") {
   const book = activeWrongBook(scope);
   if (!Object.keys(book).length) {
-    $("wrongScopeLabel").textContent = scope === "history"
+    showWrongActionMessage(scope === "history"
       ? "历史错题为空，暂无可导出的 PDF"
-      : "本轮错题为空，暂无可导出的 PDF";
+      : "本轮错题为空，暂无可导出的 PDF", true);
     return;
   }
 
@@ -3663,6 +3701,7 @@ async function exportWrongBook(scope = "current") {
     button.disabled = true;
     button.textContent = "导出中...";
   }
+  showWrongActionMessage("");
 
   try {
     const response = await fetchWithTimeout(
@@ -3696,8 +3735,7 @@ async function exportWrongBook(scope = "current") {
         showAuth("登录已失效，请重新登录");
         return;
       }
-      alert(data.error || "导出失败");
-      return;
+      throw new Error(data.error || "导出失败");
     }
 
     const blob = await response.blob();
@@ -3711,8 +3749,9 @@ async function exportWrongBook(scope = "current") {
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     unlockAchievement("firstPdf");
+    showWrongActionMessage("PDF 已生成并开始下载。如果没有看到文件，请检查浏览器的下载权限。");
   } catch (error) {
-    alert(`导出失败：${error.message || "请检查本地后端连接"}`);
+    showWrongActionMessage(`导出失败：${error.message || "请检查本地后端连接"}`, true);
   } finally {
     if (button) {
       button.disabled = false;
@@ -3733,6 +3772,7 @@ function exportWrongData() {
   };
   const safeProfile = state.profile.replace(/[\\/:*?"<>|]+/g, "-") || "default";
   downloadText(`wrong-book-${safeProfile}-${Date.now()}.json`, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+  showWrongActionMessage("错题数据已开始下载。");
 }
 
 function importedWrongBooks(payload) {

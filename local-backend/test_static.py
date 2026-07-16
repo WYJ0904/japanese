@@ -41,7 +41,8 @@ class StaticSiteTests(unittest.TestCase):
         required = {
             "entryScreen", "authPanel", "modulePicker", "projectPicker",
             "projectApp", "toolsPanel", "membershipModal", "adminPanel",
-            "shareViewer", "toolWorkbenchDescription", "paymentLanguage",
+            "shareViewer", "toolWorkbenchDescription", "paymentLanguage", "wrongActionMessage",
+            "moduleAccessMessage",
         }
         self.assertEqual(sorted(required - html_ids), [])
 
@@ -60,14 +61,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260715-tools9"
+        release_token = "20260716-quality11"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-15-tools9"', self.app)
+        self.assertIn('const APP_VERSION = "2026-07-16-quality11"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-15-tools9"', server)
+        self.assertIn('APP_BUILD = "2026-07-16-quality11"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -141,11 +142,23 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("temporary_store.py", launcher)
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.1.6"', launcher)
+        self.assertIn('$LauncherVersion = "8.1.8"', launcher)
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
         self.assertIn("Disable-LegacyAutoStart", launcher)
+
+    def test_quality_regressions_have_explicit_guards(self):
+        self.assertIn("function markBackendReachable", self.app)
+        self.assertGreaterEqual(self.app.count("markBackendReachable(data)"), 3)
+        skip_source = self.app.split("function skipWord()", 1)[1].split("async function submitAnswer", 1)[0]
+        self.assertLess(skip_source.index("clearAnswerValidation();"), skip_source.index("renderSkipResult();"))
+        self.assertIn('showWrongActionMessage("PDF 已生成并开始下载。', self.app)
+        self.assertIn('showModulePicker(false, "当前账户没有管理员权限，已返回功能选择。")', self.app)
+        self.assertNotIn('alert("无管理员权限")', self.app)
+        self.assertIn('setAttribute("aria-valuetext"', self.app)
+        self.assertIn('const source = `来源：${item.source || "系统"}`;', self.app)
+        self.assertIn(".admin-current-memberships > article", self.styles)
 
     def test_remote_data_loading_has_retry_and_partial_recovery(self):
         self.assertIn('id="membershipPlanRecovery"', self.html)

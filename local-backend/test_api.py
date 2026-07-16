@@ -89,6 +89,16 @@ class AccountApiTests(unittest.TestCase):
         self.assertNotIn("word-0", cleaned)
         self.assertIn(f"word-{server.MAX_WRONG_BOOK_ITEMS + 9}", cleaned)
 
+    def test_japanese_cognate_meaning_accepts_clear_chinese_synonym(self):
+        rubric = {
+            "language": "日语",
+            "gloss": "植物的花",
+            "accepted": ["花朵", "花儿", "花卉"],
+            "reading": "はな",
+        }
+        result = server.judge_answer("花", "花", rubric, "strict")
+        self.assertTrue(result["correct"], result)
+
     def test_ollama_ready_result_is_briefly_cached(self):
         response = mock.MagicMock()
         response.status = 200

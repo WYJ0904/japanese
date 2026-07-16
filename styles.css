@@ -1171,10 +1171,17 @@ textarea {
   letter-spacing: 0;
 }
 
-.module-picker .project-brand p:last-child,
+#moduleMembershipStatus,
 .tools-header p:last-child {
   margin: 0;
   color: #9eb2c7;
+}
+
+.module-access-message {
+  max-width: 44rem;
+  margin: 0.7rem 0 0;
+  color: #ffd18c;
+  line-height: 1.55;
 }
 
 .module-grid {
@@ -1730,7 +1737,8 @@ textarea {
   margin-bottom: 12px;
 }
 
-.admin-current-memberships > div {
+.admin-current-memberships > div,
+.admin-current-memberships > article {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
@@ -1738,6 +1746,26 @@ textarea {
   border: 1px solid rgba(101, 168, 210, 0.25);
   border-radius: 6px;
 }
+
+.admin-current-memberships > article {
+  grid-template-areas:
+    "name expiry"
+    "meta meta";
+  align-items: center;
+}
+
+.admin-current-memberships > article strong { grid-area: name; min-width: 0; }
+.admin-current-memberships > article span { grid-area: expiry; color: #b8cfdd; white-space: nowrap; }
+.admin-current-memberships > article small { grid-area: meta; color: #86a9bb; }
+
+.wrong-action-message {
+  min-height: 22px;
+  margin: 10px 0 0;
+  color: #9be7c4;
+  line-height: 1.55;
+}
+
+.wrong-action-message.is-error { color: var(--danger); }
 
 .admin-entitlement-actions {
   display: flex;
@@ -2434,6 +2462,11 @@ button:active:not(:disabled) {
   .admin-date-grid,
   .admin-secret-row,
   .admin-danger-actions { grid-template-columns: 1fr; }
+  .admin-current-memberships > article {
+    grid-template-columns: 1fr;
+    grid-template-areas: "name" "expiry" "meta";
+  }
+  .admin-current-memberships > article span { white-space: normal; }
   .admin-editor-save button,
   .admin-secret-row button { width: 100%; }
 
