@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.1.1"
+$LauncherVersion = "10.1.2"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -1029,6 +1029,12 @@ function Ensure-Tunnel {
         if ($protocol -eq $preferred) {
             Write-LaunchLog ("正在改用 " + $fallback.ToUpperInvariant() + "...") "Yellow"
         }
+    }
+    try {
+        $null = Start-TunnelProcess -Protocol $preferred
+        Write-LaunchLog ("两种协议均未稳定；已保留 " + $preferred.ToUpperInvariant() + " 在后台继续重连。") "Yellow"
+    } catch {
+        Write-LaunchLog ("无法保留 Tunnel 后台重连: " + $_.Exception.Message) "Yellow"
     }
     throw "QUIC 与 HTTP/2 均未恢复公网连接。"
 }

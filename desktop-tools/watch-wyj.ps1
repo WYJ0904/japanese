@@ -113,6 +113,23 @@ function Get-RepairDelaySeconds {
     return [int][Math]::Min($RepairSuspendSeconds, $BaseCooldownSeconds * $multiplier)
 }
 
+function Test-LauncherBusy {
+    $createdNew = $false
+    $probe = $null
+    try {
+        $probe = New-Object System.Threading.Mutex($true, "Local\WYJWebsiteLauncherV3", [ref]$createdNew)
+        if ($createdNew) {
+            $probe.ReleaseMutex()
+            return $false
+        }
+        return $true
+    } catch {
+        return $true
+    } finally {
+        if ($null -ne $probe) { $probe.Dispose() }
+    }
+}
+
 function Start-Repair {
     param([string]$Reason)
     if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
@@ -213,6 +230,12 @@ try {
 
         $now = Get-Date
         if ($websiteFailures -ge 2 -and $now -ge $nextWebsiteRepairAt) {
+            if (Test-LauncherBusy) {
+                Write-WatchdogLog "website repair deferred: launcher is already running"
+                $websiteFailures = 0
+                $nextWebsiteRepairAt = $now.AddSeconds(60)
+                continue
+            }
             $repairOk = Start-Repair -Reason "website"
             Update-RepairBackoff -Service "website" -Succeeded $repairOk `
                 -FailureStreak ([ref]$websiteRepairFailureStreak) `
@@ -224,6 +247,12 @@ try {
         }
 
         if ($aiFailures -ge 3 -and $now -ge $nextAiRepairAt) {
+            if (Test-LauncherBusy) {
+                Write-WatchdogLog "AI repair deferred: launcher is already running"
+                $aiFailures = 0
+                $nextAiRepairAt = $now.AddSeconds(60)
+                continue
+            }
             $repairOk = Start-Repair -Reason "AI"
             Update-RepairBackoff -Service "AI" -Succeeded $repairOk `
                 -FailureStreak ([ref]$aiRepairFailureStreak) `
