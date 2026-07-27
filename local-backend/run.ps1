@@ -42,14 +42,21 @@ if (-not $env:VOCAB_ADMIN_SECRET -and $settings.PSObject.Properties["access_toke
     $env:VOCAB_ADMIN_SECRET = [string]$settings.access_token
 }
 
-$python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+$python = ""
+if ($env:VOCAB_PYTHON_EXE -and (Test-Path -LiteralPath $env:VOCAB_PYTHON_EXE -PathType Leaf)) {
+    $python = [IO.Path]::GetFullPath($env:VOCAB_PYTHON_EXE)
+}
+if (-not $python) {
+    $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+}
 if (-not $python) {
     $python = (Get-Command python -ErrorAction SilentlyContinue).Source
 }
 if (-not $python) {
-    throw "Python 3 was not found on PATH."
+    throw "Python 3 was not found. Set VOCAB_PYTHON_EXE or add Python to PATH."
 }
 
 Set-Location -LiteralPath $Root
-& $python .\server.py --host 0.0.0.0 --port 8765
+$serverPath = Join-Path $Root "server.py"
+& $python $serverPath --host 0.0.0.0 --port 8765
 exit $LASTEXITCODE

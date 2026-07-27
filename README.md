@@ -229,7 +229,9 @@ Pages Functions：
 - `VOCAB_ADMIN_SECRET`：仅全新数据库创建固定管理员时使用，不覆盖现有密码
 - `VOCAB_SHARE_HMAC_KEY`：六位临时剪贴板连接码的 HMAC 密钥；启动器会持久生成
 - `VOCAB_USERS_DB`、`VOCAB_USERS_TXT`、`VOCAB_STATIC_DIR`
-- `VOCAB_BACKEND_ROOT`：桌面启动器的私有运行目录；未设置时使用当前 Windows 账户的本地应用数据目录
+- `VOCAB_BACKEND_ROOT`：桌面启动器的私有运行目录；优先级低于命令行 `-RuntimeRoot`，高于本机启动器配置
+- `VOCAB_PYTHON_EXE`、`VOCAB_CLOUDFLARED_EXE`、`VOCAB_OLLAMA_EXE`：需要覆盖自动发现结果时使用
+- `VOCAB_TUNNEL_CONFIG`：Cloudflare Tunnel 私有配置文件；默认使用当前 Windows 账户的 `.cloudflared/config.yml`
 - `VOCAB_PAYMENT_QR_DIR`：裁剪后支付二维码的私有目录；默认 `data/payment/qrcodes/`
 - `VOCAB_PAYMENT_QR_MAX_BYTES`：单张支付二维码最大字节数，默认 3 MB
 - `VOCAB_HOST`、`VOCAB_PORT`
@@ -241,9 +243,23 @@ Pages Functions：
 
 ## 手动启动
 
-本项目不配置开机自启动。电脑重启后可双击仓库内的 `desktop-tools/启动WYJ网站.cmd`。
+本项目不配置开机自启动。电脑重启后可双击仓库内的 `desktop-tools/启动WYJ网站.cmd`。CMD 入口会直接调用同目录的 `start-wyj.ps1`，不再依赖不存在的中间文件夹。
 
-启动器会同步最新 Python 后端和迁移文件，优先恢复本地后端与 Cloudflare Tunnel，再检查和预热 Ollama，最后验证 `api.thewyj.uk` 与 Pages 代理并打开正式网站。这样即使 AI 仍在启动，登录、会员和管理员功能也能先恢复。它会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏的断线守护进程，电脑关机后自然停止。会员方案和管理员数据使用带重试的独立加载，短暂断线不会清空已经显示的数据。启动器不再保存开发机绝对路径；已有运行目录位于其他位置时，请在本机设置 `VOCAB_BACKEND_ROOT`，目录中的数据库、Tunnel 文件和支付二维码仍保持私有且不会同步进 Git。
+V10 启动器把仓库源码和私有运行目录分开。运行目录按 `-RuntimeRoot`、`VOCAB_BACKEND_ROOT`、本机 `launcher.json`、现有旧版目录、当前账户本地应用数据目录的顺序选择；首次识别到旧目录后会保存到本机配置，继续使用原数据库、管理员账户和 Tunnel 工具，不搬移或覆盖私有数据。配置与日志位于当前 Windows 账户的本地应用数据目录，不写入 Git。
+
+启动时只原子同步白名单中的 Python 文件和 SQL 迁移，保留 `data/`、`tools/`、数据库和配置。若仓库私有目录中存在 12 张已清理支付二维码，启动器会按固定文件名复制到运行目录，不接触原始收款截图。随后依次恢复账户与支付后端、Cloudflare Tunnel 和本地 AI；AI 启动失败只会降级 AI 选词与首次释义判卷，不会阻塞登录、会员或支付。守护程序分别统计网站和 AI 故障，带冷却时间恢复，避免反复重启。
+
+常用诊断与重新配置：
+
+```powershell
+# 只读检查，不启动或停止服务
+powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop-tools\start-wyj.ps1 -CheckOnly
+
+# 显式保存现有私有运行目录，然后启动
+powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop-tools\start-wyj.ps1 -Configure -RuntimeRoot "你的私有运行目录"
+```
+
+启动器会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏守护程序，电脑关机后自然停止。启动日志为本机应用数据目录中的 `launcher.log`，守护日志为 `watchdog.log`。
 
 源码中对应文件：
 
