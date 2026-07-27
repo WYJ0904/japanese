@@ -42,7 +42,9 @@ class StaticSiteTests(unittest.TestCase):
             "entryScreen", "authPanel", "modulePicker", "projectPicker",
             "projectApp", "toolsPanel", "membershipModal", "adminPanel",
             "shareViewer", "toolWorkbenchDescription", "paymentLanguage", "wrongActionMessage",
-            "moduleAccessMessage",
+            "moduleAccessMessage", "paymentMethodList", "paymentMethod",
+            "paymentQrWrap", "paymentQrImage", "paymentQrMessage", "aiSearchInput",
+            "aiSearchResults", "cancelPaymentOrderBtn",
         }
         self.assertEqual(sorted(required - html_ids), [])
 
@@ -61,14 +63,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260716-quality15"
+        release_token = "20260727-payment-search"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-16-quality15"', self.app)
+        self.assertIn('const APP_VERSION = "2026-07-27-payment-search"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-16-quality15"', server)
+        self.assertIn('APP_BUILD = "2026-07-27-payment-search"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -146,11 +148,17 @@ class StaticSiteTests(unittest.TestCase):
         self.assertNotIn("\u5355\u8bcd\u6d4b", combined)
         launcher = (ROOT / "desktop-tools" / "start-wyj.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("membership.py", launcher)
+        self.assertIn("payment_assets.py", launcher)
         self.assertIn("temporary_store.py", launcher)
+        self.assertIn("vocabulary_index.py", launcher)
         self.assertIn("run.ps1", launcher)
         self.assertIn("002_single_language_orders_up.sql", launcher)
         self.assertIn("003_login_audit_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "8.3.1"', launcher)
+        self.assertIn("004_payment_flow_up.sql", launcher)
+        self.assertIn('$LauncherVersion = "9.0.0"', launcher)
+        self.assertIn("$FrontendRoot = Split-Path -Parent $PSScriptRoot", launcher)
+        self.assertIn("$env:VOCAB_BACKEND_ROOT", launcher)
+        self.assertNotRegex(launcher, r"[A-Za-z]:\\Users\\")
         self.assertNotIn("WScript.Shell", launcher)
         self.assertNotIn("CreateShortcut", launcher)
         self.assertNotIn("Register-ScheduledTask", launcher)
@@ -216,6 +224,43 @@ class StaticSiteTests(unittest.TestCase):
         account_store = (ROOT / "local-backend" / "account_store.py").read_text(encoding="utf-8")
         self.assertNotIn("include_secret", account_store)
 
+    def test_payment_ui_uses_protected_blob_qr_and_releases_object_urls(self):
+        self.assertNotIn("W2009", self.html + self.app)
+        self.assertIn("付款后不会立即自动开通会员", self.html)
+        self.assertIn("管理员将在 24 小时内核对付款并确认订单", self.html)
+        self.assertIn("管理员确认到账后，会员权益才会生效", self.html)
+        self.assertNotRegex(
+            self.html,
+            r'<img[^>]+src="[^"]*(?:wechat|alipay|qrcode|qr-code)',
+        )
+        self.assertIn("/api/recharge/qr?request_id=", self.app)
+        self.assertIn('"X-Session-Token": state.session', self.app)
+        self.assertIn("const blob = await response.blob();", self.app)
+        self.assertIn("URL.createObjectURL(blob)", self.app)
+        self.assertIn("URL.revokeObjectURL(paymentQrObjectUrl)", self.app)
+        self.assertIn("paymentQrController.abort()", self.app)
+        self.assertIn('await api("/api/recharge/cancel"', self.app)
+        self.assertIn('await api("/api/recharge/confirm"', self.app)
+        self.assertRegex(
+            self.styles,
+            r"\.payment-qr-wrap img\s*\{[^}]*max-width:\s*100%",
+        )
+        self.assertIn("overflow-x: hidden", self.styles)
+
+    def test_vocabulary_search_is_debounced_abortable_and_local_first(self):
+        self.assertIn("function scheduleVocabularySearch()", self.app)
+        self.assertRegex(
+            self.app,
+            r"(?s)vocabularySearchTimer = window\.setTimeout\(\(\) => \{.*?\}, 200\);",
+        )
+        self.assertIn("vocabularySearchController.abort()", self.app)
+        self.assertIn("const controller = new AbortController();", self.app)
+        self.assertIn("LOCAL_VOCABULARY_INDEX.search(", (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8"))
+        source = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
+        local_position = source.index("local_matches = LOCAL_VOCABULARY_INDEX.search(")
+        remote_position = source.index("source_data = search_vocabulary_sources(", local_position)
+        self.assertLess(local_position, remote_position)
+
     def test_login_audit_and_proxy_context_do_not_leak_credentials_or_backend_details(self):
         proxy = (ROOT / "functions" / "api" / "[[path]].js").read_text(encoding="utf-8")
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
@@ -240,6 +285,8 @@ class StaticSiteTests(unittest.TestCase):
         downgrade_two = (migrations / "002_single_language_orders_down.sql").read_text(encoding="utf-8")
         upgrade_three = (migrations / "003_login_audit_up.sql").read_text(encoding="utf-8")
         downgrade_three = (migrations / "003_login_audit_down.sql").read_text(encoding="utf-8")
+        upgrade_four = (migrations / "004_payment_flow_up.sql").read_text(encoding="utf-8")
+        downgrade_four = (migrations / "004_payment_flow_down.sql").read_text(encoding="utf-8")
         connection = sqlite3.connect(":memory:")
         try:
             connection.executescript(before)
@@ -264,6 +311,22 @@ class StaticSiteTests(unittest.TestCase):
                 row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
             self.assertIn("login_audit_logs", tables)
+            connection.executescript(upgrade_four)
+            payment_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")
+            }
+            self.assertIn("payment_method", payment_columns)
+            self.assertIn("qr_resource_id", payment_columns)
+            tables = {
+                row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            self.assertIn("payment_request_events", tables)
+            self.assertIn("payment_fulfillments", tables)
+            connection.executescript(downgrade_four)
+            payment_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(payment_requests)")
+            }
+            self.assertNotIn("payment_method", payment_columns)
             connection.executescript(downgrade_three)
             tables = {
                 row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")

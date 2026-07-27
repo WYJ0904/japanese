@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BASE_URL = process.env.WYJ_TEST_BASE || "http://127.0.0.1:8892";
 const CDP_URL = process.env.WYJ_CDP_URL || "http://127.0.0.1:9223";
-const ADMIN_SECRET = process.env.WYJ_TEST_ADMIN_SECRET || "ToolMatrix-Admin-2026!";
+const ADMIN_SECRET = process.env.WYJ_TEST_ADMIN_SECRET || "";
 const TEST_ROOT = path.join(ROOT, ".tool-e2e");
 const RUN_ID = Date.now().toString(36);
 const DOWNLOAD_ROOT = path.join(TEST_ROOT, `downloads-${RUN_ID}`);
@@ -151,6 +151,7 @@ async function connectBrowser() {
 }
 
 async function main() {
+  assert.ok(ADMIN_SECRET, "WYJ_TEST_ADMIN_SECRET is required for the isolated browser test server");
   const member = await createMember();
   const browser = await connectBrowser();
   const { client, send, targetId } = browser;

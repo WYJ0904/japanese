@@ -23,9 +23,9 @@ MEMBERSHIP_PLANS = {
         "currency": "CNY",
         "lifetime": True,
         "duration_months": 0,
-        "purchasable": True,
+        "purchasable": False,
         "priority": 30,
-        "description": "仅限日语语言测试会员功能，永久有效，不包含在线工具箱。",
+        "description": "历史方案：仅限日语语言测试会员功能，永久有效，不包含英语或在线工具箱。",
         "entitlements": ("language_japanese_access",),
     },
     "tools_monthly": {
@@ -60,7 +60,7 @@ MEMBERSHIP_PLANS = {
         ),
     },
     "all_access_monthly": {
-        "name": "全功能月度会员",
+        "name": "全功能包月会员",
         "price_cents": 3000,
         "currency": "CNY",
         "lifetime": False,
@@ -69,6 +69,21 @@ MEMBERSHIP_PLANS = {
         "priority": 80,
         "description": "全部语言测试和在线工具箱功能，有效期一个月。",
         "entitlements": ALL_ACCESS_ENTITLEMENTS,
+    },
+    "dual_language_lifetime": {
+        "name": "双语言双项永久会员",
+        "price_cents": 7000,
+        "currency": "CNY",
+        "lifetime": True,
+        "duration_months": 0,
+        "purchasable": True,
+        "priority": 70,
+        "description": "英语和日语测试会员功能，永久有效，不包含在线工具箱。",
+        "entitlements": (
+            "language_english_access",
+            "language_japanese_access",
+            "language_all_access",
+        ),
     },
     "all_access_lifetime": {
         "name": "全功能永久会员",

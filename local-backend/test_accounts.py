@@ -31,7 +31,7 @@ class AccountStoreTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def register(self, username="user001", secret="ABC123"):
+    def register(self, username="user001", secret="ABC1234"):
         return self.store.register(username, secret)
 
     def test_fixed_admin_is_created_and_strict(self):
@@ -66,29 +66,43 @@ class AccountStoreTests(unittest.TestCase):
             with self.assertRaises(AccountError):
                 self.register(reserved, "SECRET")
 
-    def test_new_secrets_require_six_characters(self):
+    def test_new_secrets_require_seven_characters(self):
         with self.assertRaises(AccountError) as raised:
-            self.register("short-secret", "12345")
+            self.register("short-secret", "123456")
         self.assertEqual(raised.exception.code, "secret_too_short")
+
+    def test_existing_short_secret_still_logs_in_and_can_be_replaced(self):
+        user = self.register("legacy-short", "LONG123")
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE users SET secret = ? WHERE id = ?",
+                ("123456", user["id"]),
+            )
+        token, logged_in = self.store.login("legacy-short", "123456")
+        self.assertTrue(token)
+        self.store.change_own_secret(logged_in["id"], "123456", "REPLACED7")
+        self.store.login("legacy-short", "REPLACED7")
+        with self.assertRaises(AccountError):
+            self.store.login("legacy-short", "123456")
 
     def test_txt_is_atomically_synchronized_without_plaintext_secrets(self):
         self.register()
         text = self.text_path.read_text(encoding="utf-8")
         self.assertIn("username=user001", text)
         self.assertIn("secret=protected", text)
-        self.assertNotIn("ABC123", text)
+        self.assertNotIn("ABC1234", text)
         self.assertIn("username=wyj", text)
         with self.store.connect() as connection:
             encoded = connection.execute(
                 "SELECT secret FROM users WHERE username_normalized = ?", ("user001",)
             ).fetchone()[0]
         self.assertTrue(encoded.startswith("pbkdf2_sha256$"))
-        self.assertNotIn("ABC123", encoded)
+        self.assertNotIn("ABC1234", encoded)
 
     def test_txt_failure_reports_committed_database_write(self):
         with mock.patch("account_store.os.replace", side_effect=OSError("file is locked")):
             with self.assertRaises(AccountError) as raised:
-                self.store.register("committed-user", "VISIBLE")
+                self.store.register("committed-user", "VISIBLE7")
         self.assertTrue(raised.exception.committed)
         self.assertEqual(raised.exception.code, "users_txt_sync_failed")
         with self.store.connect() as connection:
@@ -100,7 +114,7 @@ class AccountStoreTests(unittest.TestCase):
 
     def test_login_and_persistent_session(self):
         self.register()
-        token, user = self.store.login("USER001", "ABC123")
+        token, user = self.store.login("USER001", "ABC1234")
         self.assertEqual(user["username"], "user001")
         with self.store.connect() as connection:
             stored_token = connection.execute(
@@ -133,7 +147,7 @@ class AccountStoreTests(unittest.TestCase):
 
     def test_login_prunes_old_and_excess_sessions(self):
         user = self.register()
-        tokens = [self.store.login("user001", "ABC123")[0] for _ in range(MAX_SESSIONS_PER_USER + 4)]
+        tokens = [self.store.login("user001", "ABC1234")[0] for _ in range(MAX_SESSIONS_PER_USER + 4)]
         with self.store.connect() as connection:
             count = connection.execute("SELECT COUNT(*) FROM sessions WHERE user_id = ?", (user["id"],)).fetchone()[0]
         self.assertEqual(count, MAX_SESSIONS_PER_USER)
@@ -163,21 +177,40 @@ class AccountStoreTests(unittest.TestCase):
 
         user = self.register()
         with self.assertRaises(AccountError) as missing_language:
-            self.store.create_recharge_request(user, "trial_single_language")
+            self.store.create_recharge_request(user, "trial_single_language", "wechat")
         self.assertEqual(missing_language.exception.code, "trial_language_invalid")
 
         request, created = self.store.create_recharge_request(
-            user, "trial_single_language", "japanese"
+            user, "trial_single_language", "alipay", "japanese"
         )
         self.assertTrue(created)
         self.assertEqual(request["amount_cents"], 800)
         self.assertEqual(request["trial_language"], "japanese")
+        self.assertEqual(request["payment_method"], "alipay")
         self.assertIn("日语", request["payment_note"])
+        self.store.confirm_recharge_payment(user, request["id"])
         self.assertEqual(self.store.process_recharge_request(self.admin, request["id"], "approve"), "approved")
         current = self.store.get_user(user["id"])
         self.assertIsNone(self.store.quiz_limit(current, "japanese"))
         self.assertEqual(self.store.quiz_limit(current, "english"), 15)
         self.assertNotIn("tools_access", self.store.entitlements_for(current))
+
+    def test_repeated_payment_confirmation_never_returns_legacy_contact(self):
+        user = self.register("repeat-confirm")
+        request, _created = self.store.create_recharge_request(
+            user, "all_access_monthly", "wechat"
+        )
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE payment_requests SET contact = ? WHERE id = ?",
+                ("legacy-contact-must-not-leak", request["id"]),
+            )
+        first = self.store.confirm_recharge_payment(user, request["id"])
+        repeated = self.store.confirm_recharge_payment(user, request["id"])
+        for payload in (first, repeated):
+            self.assertEqual(payload["status"], "user_paid")
+            self.assertNotIn("contact", payload)
+            self.assertNotIn("handled_by", payload)
 
     def test_cancelled_membership_can_be_granted_again_without_duplicate_record(self):
         user = self.register()
@@ -247,17 +280,17 @@ class AccountStoreTests(unittest.TestCase):
 
     def test_secret_change_invalidates_old_sessions_and_updates_txt(self):
         user = self.register()
-        token, _ = self.store.login("user001", "ABC123")
-        self.store.change_own_secret(user["id"], "ABC123", "NEW456")
+        token, _ = self.store.login("user001", "ABC1234")
+        self.store.change_own_secret(user["id"], "ABC1234", "NEW4567")
         self.assertIsNone(self.store.resolve_session(token))
         text = self.text_path.read_text(encoding="utf-8")
         self.assertIn("secret=protected", text)
-        self.assertNotIn("NEW456", text)
-        self.store.login("user001", "NEW456")
+        self.assertNotIn("NEW4567", text)
+        self.store.login("user001", "NEW4567")
 
     def test_admin_secret_reset_is_hash_only_and_never_exposed(self):
         user = self.register()
-        token, _ = self.store.login("user001", "ABC123")
+        token, _ = self.store.login("user001", "ABC1234")
         replacement = "Admin-Reset-789!"
         self.store.admin_change_secret(self.admin, user["id"], replacement)
         self.assertIsNone(self.store.resolve_session(token))
@@ -269,28 +302,28 @@ class AccountStoreTests(unittest.TestCase):
         self.assertNotIn("secret", listed_user)
         self.assertNotIn(replacement, str(self.store.list_audit_logs(self.admin)))
         with self.assertRaises(AccountError):
-            self.store.login("user001", "ABC123")
+            self.store.login("user001", "ABC1234")
         self.store.login("user001", replacement)
 
     def test_ban_invalidates_session_and_unban_restores_login(self):
         user = self.register()
-        token, _ = self.store.login("user001", "ABC123")
+        token, _ = self.store.login("user001", "ABC1234")
         self.store.admin_set_ban(self.admin, user["id"], True)
         self.assertIsNone(self.store.resolve_session(token))
         with self.assertRaises(AccountError):
-            self.store.login("user001", "ABC123")
+            self.store.login("user001", "ABC1234")
         self.store.admin_set_ban(self.admin, user["id"], False)
-        token, _ = self.store.login("user001", "ABC123")
+        token, _ = self.store.login("user001", "ABC1234")
         self.assertTrue(token)
 
     def test_self_delete_removes_database_txt_and_sessions(self):
         user = self.register()
-        token, _ = self.store.login("user001", "ABC123")
-        self.store.delete_own_account(user["id"], "ABC123")
+        token, _ = self.store.login("user001", "ABC1234")
+        self.store.delete_own_account(user["id"], "ABC1234")
         self.assertIsNone(self.store.get_user(user["id"]))
         self.assertIsNone(self.store.resolve_session(token))
         self.assertNotIn("username=user001", self.text_path.read_text(encoding="utf-8"))
-        replacement = self.register("user001", "REUSED")
+        replacement = self.register("user001", "REUSED7")
         self.assertIsNotNone(replacement)
 
     def test_admin_cannot_be_deleted_banned_downgraded_or_changed(self):
@@ -304,19 +337,36 @@ class AccountStoreTests(unittest.TestCase):
             with self.assertRaises(AccountError):
                 call()
 
-    def test_recharge_request_is_deduplicated_and_manual(self):
+    def test_recharge_request_is_locked_manual_and_requires_cancel_to_change(self):
         user = self.register()
-        first, created = self.store.create_recharge_request(user, "all_access_monthly")
-        second, created_again = self.store.create_recharge_request(user, "all_access_lifetime")
+        first, created = self.store.create_recharge_request(
+            user, "all_access_monthly", "wechat"
+        )
+        second, created_again = self.store.create_recharge_request(
+            user, "all_access_monthly", "wechat"
+        )
         self.assertTrue(created)
         self.assertFalse(created_again)
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(self.store.get_user(user["id"])["membership"], "free")
-        status = self.store.process_recharge_request(self.admin, first["id"], "approve")
+        with self.assertRaises(AccountError) as pending:
+            self.store.process_recharge_request(self.admin, first["id"], "approve")
+        self.assertEqual(pending.exception.code, "request_already_processed")
+        with self.assertRaises(AccountError) as conflict:
+            self.store.create_recharge_request(user, "all_access_lifetime", "alipay")
+        self.assertEqual(conflict.exception.code, "payment_order_conflict")
+        cancelled = self.store.cancel_recharge_request(user, first["id"])
+        self.assertEqual(cancelled["status"], "cancelled")
+        replacement, replacement_created = self.store.create_recharge_request(
+            user, "all_access_lifetime", "alipay"
+        )
+        self.assertTrue(replacement_created)
+        self.store.confirm_recharge_payment(user, replacement["id"])
+        status = self.store.process_recharge_request(self.admin, replacement["id"], "approve")
         self.assertEqual(status, "approved")
-        self.assertEqual(self.store.get_user(user["id"])["membership"], "monthly")
+        self.assertEqual(self.store.get_user(user["id"])["membership"], "lifetime")
         with self.assertRaises(AccountError):
-            self.store.create_recharge_request(user, "monthly")
+            self.store.create_recharge_request(user, "monthly", "wechat")
 
     def test_new_memberships_merge_entitlements_without_granting_tools_to_japanese(self):
         user = self.register()
@@ -531,7 +581,10 @@ class AccountStoreTests(unittest.TestCase):
 
     def test_concurrent_payment_approval_only_succeeds_once(self):
         user = self.register()
-        request, _created = self.store.create_recharge_request(user, "all_access_lifetime")
+        request, _created = self.store.create_recharge_request(
+            user, "all_access_lifetime", "wechat"
+        )
+        self.store.confirm_recharge_payment(user, request["id"])
 
         def approve():
             try:
@@ -550,6 +603,194 @@ class AccountStoreTests(unittest.TestCase):
             if item["plan_code"] == "all_access_lifetime" and item["status"] == "active"
         ]
         self.assertEqual(len(memberships), 1)
+        with self.store.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM payment_fulfillments WHERE payment_request_id = ?",
+                    (request["id"],),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_payment_approval_rolls_back_processing_and_history_on_failure(self):
+        user = self.register("rollback-user")
+        request, _created = self.store.create_recharge_request(
+            user, "all_access_monthly", "wechat"
+        )
+        self.store.confirm_recharge_payment(user, request["id"])
+        injected = AccountError("injected fulfillment failure", 500, "injected_failure")
+        with mock.patch.object(
+            self.store,
+            "_fulfill_payment_in_transaction",
+            side_effect=injected,
+        ):
+            with self.assertRaises(AccountError) as raised:
+                self.store.process_recharge_request(
+                    self.admin, request["id"], "approve", admin_note="rollback test"
+                )
+        self.assertEqual(raised.exception.code, "injected_failure")
+        current = next(
+            item
+            for item in self.store.list_recharge_requests(self.admin)
+            if item["id"] == request["id"]
+        )
+        self.assertEqual(current["status"], "user_paid")
+        self.assertEqual(
+            [event["to_status"] for event in current["history"]],
+            ["pending_payment", "user_paid"],
+        )
+        with self.store.connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM payment_fulfillments WHERE payment_request_id = ?",
+                    (request["id"],),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_monthly_payment_renews_from_remaining_expiry_by_calendar_month(self):
+        user = self.register("renew-user")
+        original_expiry = utc_now() + timedelta(days=12)
+        original_expiry_text = original_expiry.replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        )
+        self.store.admin_manage_membership(
+            self.admin,
+            user["id"],
+            "grant",
+            "all_access_monthly",
+            expires=original_expiry_text,
+        )
+        request, _created = self.store.create_recharge_request(
+            user, "all_access_monthly", "alipay"
+        )
+        self.store.confirm_recharge_payment(user, request["id"])
+        self.store.process_recharge_request(self.admin, request["id"], "approve")
+        with self.store.connect() as connection:
+            renewed = connection.execute(
+                """
+                SELECT membership.expires_at
+                FROM payment_fulfillments AS fulfillment
+                JOIN user_memberships AS membership
+                  ON membership.id = fulfillment.user_membership_id
+                WHERE fulfillment.payment_request_id = ?
+                """,
+                (request["id"],),
+            ).fetchone()
+        self.assertIsNotNone(renewed)
+        renewed_expiry = parse_time(renewed["expires_at"])
+        self.assertGreater(renewed_expiry, original_expiry + timedelta(days=27))
+
+    def test_repeated_lifetime_payment_reuses_membership_without_duplicate_rights(self):
+        user = self.register("repeat-lifetime")
+        request_ids = []
+        for method in ("wechat", "alipay"):
+            request, _created = self.store.create_recharge_request(
+                user, "dual_language_lifetime", method
+            )
+            request_ids.append(request["id"])
+            self.store.confirm_recharge_payment(user, request["id"])
+            self.store.process_recharge_request(self.admin, request["id"], "approve")
+        active = [
+            item
+            for item in self.store.memberships_for(
+                self.store.get_user(user["id"]), include_inactive=True
+            )
+            if item["plan_code"] == "dual_language_lifetime"
+            and item["status"] == "active"
+        ]
+        self.assertEqual(len(active), 1)
+        payload = self.store.user_payload(self.store.get_user(user["id"]))
+        self.assertIn("language_all_access", payload["entitlements"])
+        self.assertNotIn("tools_access", payload["entitlements"])
+        with self.store.connect() as connection:
+            fulfillments = connection.execute(
+                """
+                SELECT payment_request_id, user_membership_id
+                FROM payment_fulfillments
+                WHERE payment_request_id IN (?, ?)
+                ORDER BY payment_request_id
+                """,
+                request_ids,
+            ).fetchall()
+        self.assertEqual(len(fulfillments), 2)
+        self.assertEqual(len({row["user_membership_id"] for row in fulfillments}), 1)
+
+    def test_payment_history_records_the_complete_state_machine(self):
+        user = self.register("history-user")
+        request, _created = self.store.create_recharge_request(
+            user, "tools_monthly", "wechat"
+        )
+        self.store.confirm_recharge_payment(user, request["id"])
+        self.store.process_recharge_request(
+            self.admin, request["id"], "reject", admin_note="receipt mismatch"
+        )
+        current = next(
+            item
+            for item in self.store.list_recharge_requests(self.admin)
+            if item["id"] == request["id"]
+        )
+        self.assertEqual(current["status"], "rejected")
+        self.assertEqual(
+            [event["to_status"] for event in current["history"]],
+            ["pending_payment", "user_paid", "processing", "rejected"],
+        )
+        self.assertEqual(current["history"][-1]["note"], "receipt mismatch")
+        self.assertNotIn(
+            "tools_access",
+            self.store.user_payload(self.store.get_user(user["id"]))["entitlements"],
+        )
+
+    def test_payment_flow_migration_is_backed_up_once(self):
+        root = Path(self.temporary.name) / "payment-v3"
+        database = root / "data" / "users.sqlite3"
+        text_path = root / "users.txt"
+        database.parent.mkdir(parents=True)
+        migrations = Path(__file__).with_name("migrations")
+        with closing(sqlite3.connect(database)) as connection:
+            connection.executescript(
+                (migrations / "pre-001-schema.sql").read_text(encoding="utf-8")
+            )
+            for migration in (
+                "001_entitlements_up.sql",
+                "002_single_language_orders_up.sql",
+                "003_login_audit_up.sql",
+            ):
+                connection.executescript(
+                    (migrations / migration).read_text(encoding="utf-8")
+                )
+        migrated = AccountStore(database, text_path)
+        backup = database.with_name("users.pre-payment-004.sqlite3")
+        self.assertTrue(backup.exists())
+        with closing(sqlite3.connect(backup)) as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(payment_requests)")
+            }
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertNotIn("payment_method", columns)
+        self.assertNotIn("payment_fulfillments", tables)
+        with migrated.connect() as connection:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(payment_requests)")
+            }
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertIn("payment_method", columns)
+        self.assertIn("payment_fulfillments", tables)
+        backup_bytes = backup.read_bytes()
+        AccountStore(database, text_path)
+        self.assertEqual(backup.read_bytes(), backup_bytes)
 
 
 if __name__ == "__main__":

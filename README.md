@@ -42,6 +42,8 @@
 
 日语释义测试允许词表只输入汉字或只输入假名。纯假名会直接出题；含汉字的词会在开考前由后端词典缓存、Jisho 精确查询及必要时 Ollama 补全读音，并在题目汉字下方显示假名，例如“電話 / でんわ”。听写模式继续隐藏词形与读音，避免直接泄露答案。
 
+单词搜索和阶段推荐优先使用按语言与等级建立的内存索引，顺序为精确匹配、前缀匹配、标准化词形、同等级模糊匹配和最多四个相邻等级补充。本地结果足够时不会访问网络或等待 Ollama；只有不足时才使用受等级校验的在线/AI 补充。索引统一处理 NFKC、大小写、全角半角和片假名/平假名，结果使用有界 TTL/LRU 缓存。前端输入采用 200 ms 防抖并通过 `AbortController` 取消旧请求。
+
 ## 会员方案
 
 唯一价格与权益配置位于 `local-backend/membership.py`。前端方案、充值订单和后端开通逻辑读取同一份服务端配置。
@@ -51,8 +53,8 @@
 | `trial_single_language` | 8 CNY/月 | 英语或日语任选一种，所选语言会员功能一个月，不包含工具箱 |
 | `dual_language_monthly` | 20 CNY/月 | 英语和日语全部测试会员功能，不包含工具箱 |
 | `tools_monthly` | 20 CNY/月 | 在线工具箱、批量处理、临时分享和配置保存，不包含语言测试会员功能 |
-| `japanese_lifetime` | 70 CNY | 仅日语会员功能，永久有效，不包含工具箱 |
 | `all_access_monthly` | 30 CNY/月 | 全部语言会员功能、工具箱、批量处理、临时分享、配置保存 |
+| `dual_language_lifetime` | 70 CNY | 英语和日语全部测试会员功能永久有效，不包含工具箱 |
 | `all_access_lifetime` | 100 CNY | 全功能永久有效 |
 
 权益代码：
@@ -66,7 +68,7 @@
 - `save_tool_config`
 - `all_features_access`
 
-权限按有效会员记录合并，不使用单一 `isVip`。全功能永久和全功能月度覆盖全部模块；20 CNY 双语言包月与 20 CNY 工具箱包月互不越权；日语永久、单语言体验和其他有效会员可以叠加。月度会员到期后立即失去对应权益，但同时存在的其他会员权益仍会保留。超级管理员拥有全部权益。
+权限按有效会员记录合并，不使用单一 `isVip`。全功能永久和全功能包月覆盖全部模块；20 CNY 双语言包月与 20 CNY 工具箱包月互不越权；70 CNY 双语言永久不包含工具箱；单语言体验和其他有效会员可以叠加。包月会员到期后立即失去对应权益，但同时存在的其他会员权益仍会保留。超级管理员拥有全部权益。
 
 ### 老会员兼容
 
@@ -75,13 +77,35 @@
 - 旧 `trial_single_language` 保持原语言和剩余时间；新订单按 8 CNY/月销售，旧待处理订单仍保留原 5 CNY 金额
 - 旧 `monthly` 迁移为 `legacy_all_monthly`，保持原双语言包月权限，不新增工具权限
 - 旧 `lifetime` 迁移为 `legacy_all_lifetime`，保持原双语言永久权限，不新增工具权限
+- 旧 `japanese_lifetime` 记录保持日语单项永久权益，不会静默增加英语；该方案停止销售，仅供历史记录和管理员兼容
 - 旧待处理充值按原价格和原权益迁移，不会被静默改成新方案
 
-旧双语言兼容方案不可由新用户购买。旧缓存页面提交 `monthly` 或 `lifetime` 会被服务端拒绝，避免价格或权益误开。
+旧兼容方案不可由新用户购买。新 70 CNY 订单只能使用 `dual_language_lifetime`；旧缓存页面提交 `monthly`、`lifetime` 或 `japanese_lifetime` 会被服务端拒绝，避免价格或权益误开。
 
 ## 充值与管理员
 
-充值窗口显示用户名、方案、单语言订单所选语言、金额、微信号 `W2009Y94J`、订单编号和付款备注。用户点击“我已付款”只会把订单改为待管理员核对，不会自动开通会员。
+支付方式仅支持微信支付和支付宝。流程为“选择套餐 → 选择支付方式 → 确认订单 → 后端锁定订单快照 → 加载该订单的私有二维码 → 用户声明已付款 → 管理员人工核对”。确认订单前不显示二维码；用户点击“我已付款”只会把状态从 `pending_payment` 改为 `user_paid`，不会自动开通会员。页面明确说明管理员会在 24 小时内核对，到账确认后权益才生效。
+
+订单由服务端锁定用户、套餐名称快照、金额、币种、支付方式、二维码资源、单语言选择、订单编号和付款备注。客户端提交的金额、币种、期限、权益、用户或文件路径都会被忽略。更换支付方式必须先取消仍处于 `pending_payment` 的原订单，再创建新订单。
+
+支付状态统一为：
+
+```text
+pending_payment -> user_paid -> processing -> approved
+                                      \----> rejected
+pending_payment -> cancelled
+pending_payment -> expired
+```
+
+管理员只能处理 `user_paid`。批准在一个 `BEGIN IMMEDIATE` 事务内完成状态更新、会员发放/续期、唯一履约、状态历史和审计；失败会整体回滚，并发批准只能成功一次。包月续费从“当前时间”和“同套餐现有到期时间”中较晚者开始增加一个日历月，不会覆盖剩余时间；重复购买永久方案复用已有永久会员记录。
+
+### 私有收款二维码
+
+裁剪后的收款图片只保留二维码、金额和套餐名称，并在使用前验证扫码内容与处理前一致。图片必须去除头像、姓名、账号、状态栏及元数据，且不得进入 Git、公开静态目录、README、日志、数据库或源码 Base64。
+
+运行时把 12 张已清理 PNG 放在后端私有数据目录 `data/payment/qrcodes/`，或通过 `VOCAB_PAYMENT_QR_DIR` 指向等价的受保护目录。文件名固定为 `wechat_<plan_code>.png` 与 `alipay_<plan_code>.png`。该目录已被 `.gitignore` 排除，部署时必须通过受控的本机文件传输单独配置。
+
+浏览器只能通过 `GET /api/recharge/qr?request_id=<订单ID>` 获取二维码。接口检查会话、订单归属、状态、支付方式、套餐与固定资源映射、解析后的根目录、文件大小和 PNG 签名，并返回 `Cache-Control: private, no-store`。前端携带 `X-Session-Token` 获取 Blob，关闭窗口、切换订单、退出或会话失效时撤销 Object URL。
 
 管理员后台支持：
 
@@ -129,17 +153,7 @@ MD5、SHA-1、SHA-256、SHA-512、文件信息、CSV/JSON 互转、文本编码�
 
 ## 数据库与迁移
 
-运行数据库默认位置：
-
-```text
-C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-openai-primary-runtime\outputs\vocab-website\data\users.sqlite3
-```
-
-用户镜像：
-
-```text
-C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-openai-primary-runtime\outputs\vocab-website\users.txt
-```
+运行数据库默认位于后端工作目录的 `data/users.sqlite3`，用户镜像为同一工作目录下的 `users.txt`；生产环境可用 `VOCAB_USERS_DB` 与 `VOCAB_USERS_TXT` 显式指定。不要在文档、日志或公开响应中记录实际绝对路径。
 
 密码使用 PBKDF2-SHA256、随机盐和 310,000 次迭代保存。`users.txt` 只写 `secret=protected`，不再写明文密码。会话令牌只以 SHA-256 摘要存入 SQLite；老数据库中的明文密码与会话令牌会在启动时自动升级为摘要，同时保持现有登录有效。
 
@@ -152,19 +166,22 @@ C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-ope
 - `local-backend/migrations/002_single_language_orders_down.sql`：无损重建支付表并回滚语言列
 - `local-backend/migrations/003_login_audit_up.sql`：登录成功/失败和网络位置审计表
 - `local-backend/migrations/003_login_audit_down.sql`：只回滚登录审计表
+- `local-backend/migrations/004_payment_flow_up.sql`：支付方式、锁定快照、过期/处理状态、状态历史和唯一履约
+- `local-backend/migrations/004_payment_flow_down.sql`：删除支付历史/履约表并无损重建旧版订单列；`processing` 回退为 `user_paid`，`cancelled`/`expired` 回退为 `rejected`
 
 第一次对老数据库执行迁移前会使用 SQLite backup API 创建一次性备份：
 
 ```text
 data\users.pre-entitlements-001.sqlite3
 data\users.pre-single-language-002.sqlite3
+data\users.pre-payment-004.sqlite3
 ```
 
-迁移由 `schema_migrations` 控制并可安全重启，来源唯一索引防止重复会员记录。每个结构阶段只创建一次迁移前备份；备份可能仍含旧版明文密码，必须只保存在本机受保护目录，不能上传或提交。
+迁移由 `schema_migrations` 控制并可安全重启。支付履约对订单 ID 和 `source_ref=payment:<payment_request_id>` 都有唯一索引，防止重复增加期限。每个结构阶段只创建一次迁移前备份；备份可能仍含旧版明文密码，必须只保存在本机受保护目录，不能上传或提交。
 
 新增表包括 `membership_plans`、`user_memberships`、`membership_entitlements`、`user_entitlement_overrides`、`payment_requests`、`admin_audit_logs`、`login_audit_logs`、`tool_favorites`、`tool_recent_usage`、`saved_tool_configs` 及五类临时数据表。原 `users`、`sessions` 和 `recharge_requests` 表保留。
 
-回滚前必须停止服务并另外备份当前数据库。优先恢复 `users.pre-entitlements-001.sqlite3`；直接执行 down SQL 会删除改版后产生的会员、支付、工具和临时数据。
+回滚前必须停止服务并另外备份当前数据库。只回退本次支付改版时可执行 `004_payment_flow_down.sql`，但会删除新增的支付状态历史与履约表，因此优先恢复 `users.pre-payment-004.sqlite3`。完整回退旧权益系统时才使用早期备份或更早的 down SQL。
 
 ## 浏览器本地数据
 
@@ -192,6 +209,7 @@ data\users.pre-single-language-002.sqlite3
 - 用户文本通过 `textContent` 展示；动态 HTML 对用户输入做转义
 - 上传文件限制大小、文件名、扩展名、MIME 和内容签名
 - 静态目录与运行数据分离，路径解析后再次校验根目录
+- 支付二维码不在静态目录，只有订单本人可通过会话保护接口读取；响应禁止缓存且不暴露文件路径
 - 错误响应不返回调用栈或本机路径
 - CSP、`nosniff`、禁止 iframe、严格 Referrer 和 Permissions Policy；本地图片处理仅额外允许同源生成的 `blob:` 图片
 - 公共代理错误不返回 Tunnel 地址、底层异常或调用栈；后端不暴露 Python 版本标识
@@ -211,6 +229,9 @@ Pages Functions：
 - `VOCAB_ADMIN_SECRET`：仅全新数据库创建固定管理员时使用，不覆盖现有密码
 - `VOCAB_SHARE_HMAC_KEY`：六位临时剪贴板连接码的 HMAC 密钥；启动器会持久生成
 - `VOCAB_USERS_DB`、`VOCAB_USERS_TXT`、`VOCAB_STATIC_DIR`
+- `VOCAB_BACKEND_ROOT`：桌面启动器的私有运行目录；未设置时使用当前 Windows 账户的本地应用数据目录
+- `VOCAB_PAYMENT_QR_DIR`：裁剪后支付二维码的私有目录；默认 `data/payment/qrcodes/`
+- `VOCAB_PAYMENT_QR_MAX_BYTES`：单张支付二维码最大字节数，默认 3 MB
 - `VOCAB_HOST`、`VOCAB_PORT`
 - `VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`
 - `VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`
@@ -220,13 +241,9 @@ Pages Functions：
 
 ## 手动启动
 
-本项目不配置开机自启动。电脑重启后手动双击：
+本项目不配置开机自启动。电脑重启后可双击仓库内的 `desktop-tools/启动WYJ网站.cmd`。
 
-```text
-C:\Users\78252\Desktop\编程\背单词网站\启动WYJ网站.cmd
-```
-
-启动器会同步最新 Python 后端和迁移文件，优先恢复本地后端与 Cloudflare Tunnel，再检查和预热 Ollama，最后验证 `api.thewyj.uk` 与 Pages 代理并打开正式网站。这样即使 AI 仍在启动，登录、会员和管理员功能也能先恢复。它会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏的断线守护进程，电脑关机后自然停止。会员方案和管理员数据使用带重试的独立加载，短暂断线不会清空已经显示的数据。
+启动器会同步最新 Python 后端和迁移文件，优先恢复本地后端与 Cloudflare Tunnel，再检查和预热 Ollama，最后验证 `api.thewyj.uk` 与 Pages 代理并打开正式网站。这样即使 AI 仍在启动，登录、会员和管理员功能也能先恢复。它会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏的断线守护进程，电脑关机后自然停止。会员方案和管理员数据使用带重试的独立加载，短暂断线不会清空已经显示的数据。启动器不再保存开发机绝对路径；已有运行目录位于其他位置时，请在本机设置 `VOCAB_BACKEND_ROOT`，目录中的数据库、Tunnel 文件和支付二维码仍保持私有且不会同步进 Git。
 
 源码中对应文件：
 
@@ -247,7 +264,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\local-backend\run.ps1
 
 ```powershell
 cd local-backend
-python -m py_compile account_store.py membership.py temporary_store.py server.py test_accounts.py test_api.py test_static.py
+python -m py_compile account_store.py membership.py payment_assets.py temporary_store.py vocabulary_index.py server.py test_accounts.py test_api.py test_payment_assets.py test_static.py test_vocabulary_index.py
 python -m unittest discover -p "test_*.py" -v
 ```
 
@@ -261,7 +278,7 @@ node --check "functions/api/[[path]].js"
 node local-backend/test_tools_js.mjs
 ```
 
-当前 Python 自动化套件共 82 项，另有 16 项 JavaScript 工具自检。`test_app_browser.mjs` 使用真实 Chrome 覆盖 13 条完整用户流程，`test_tools_browser.mjs` 会自行准备隔离样本，并逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）及实际下载。覆盖注册登录、登录位置审计、会话摘要迁移、封禁、管理员安全重置密钥、用户自助改密、密钥与哈希防泄露、老会员迁移、8/20/30/70/100 CNY 方案、权益隔离与合并、过期降级、充值审批、管理员审计、工具权限、收藏/历史/配置、模糊搜索、临时生命周期、文件签名、跨站拒绝、限流、AI 选词、日语汉字自动标音、纯假名直接出题、汉字与假名听写判卷、错题 PDF、HTML ID、PWA 缓存、手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理和 OpenCC 词典完整性。额外压力矩阵验证 300 次状态请求、200 次并发工具写入和 24 次并发 PDF 导出均为 0 错误。
+当前 Python 自动化套件共 113 项，另有 16 项 JavaScript 工具自检。`test_app_browser.mjs` 使用真实 Chrome 覆盖 13 条完整用户流程，`test_tools_browser.mjs` 会自行准备隔离样本，并逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）及实际下载。覆盖注册登录、登录位置审计、会话摘要迁移、封禁、管理员安全重置密钥、用户自助改密、密钥与哈希防泄露、老会员迁移、六种在售方案、支付方式锁定、私有二维码鉴权、完整支付状态机、原子审批与唯一履约、包月续期与永久会员幂等、权益隔离与合并、过期降级、管理员审计、本地优先分级搜索、NFKC/大小写/假名归一化、英语词形匹配、稳定排序、TTL/LRU 缓存、完整排除词缓存键、工具权限、收藏/历史/配置、临时生命周期、文件签名、跨站拒绝、限流、AI 兜底选词、日语汉字自动标音、纯假名直接出题、汉字与假名听写判卷、错题 PDF、HTML ID、PWA 缓存、390 像素手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理和 OpenCC 词典完整性。额外压力矩阵验证 300 次状态请求、200 次并发工具写入和 24 次并发 PDF 导出均为 0 错误。
 
 ## Cloudflare Pages 配置
 

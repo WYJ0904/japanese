@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zlib
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +25,9 @@ from pathlib import Path
 from socketserver import TCPServer
 
 from account_store import AccountError, AccountStore
+from payment_assets import PaymentAssetError, load_qr_asset, public_payment_methods
 from temporary_store import MAX_TEMP_FILE_BYTES, TemporaryStore
+from vocabulary_index import LOCAL_VOCABULARY_INDEX, normalize_word
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -34,7 +37,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-16-quality15"
+APP_BUILD = "2026-07-27-payment-search"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
@@ -67,7 +70,7 @@ LOGIN_FAILURES = {}
 REGISTER_ATTEMPTS = {}
 TEMP_REQUESTS = {}
 QUIZ_RUNS = {}
-VOCABULARY_SOURCE_CACHE = {}
+VOCABULARY_SOURCE_CACHE = OrderedDict()
 JAPANESE_FORM_CACHE = {}
 STATE_LOCK = threading.RLock()
 AI_SEMAPHORE = threading.BoundedSemaphore(AI_MAX_CONCURRENCY)
@@ -82,6 +85,7 @@ MAX_JAPANESE_READING_WORDS = 200
 AI_VOCABULARY_BATCH_SIZE = 50
 WEB_SEARCH_TIMEOUT_SEC = 12
 VOCABULARY_SOURCE_CACHE_TTL_SEC = 6 * 60 * 60
+VOCABULARY_SOURCE_CACHE_MAX_ITEMS = 64
 JAPANESE_FORM_CACHE_TTL_SEC = 24 * 60 * 60
 JAPANESE_EXACT_LOOKUP_LIMIT = 40
 JAPANESE_EXACT_LOOKUP_WORKERS = 6
@@ -918,7 +922,6 @@ def jisho_level_candidates(level, desired):
                 written_forms[word] = word if uses_katakana_display else written or word
         if len(candidates) >= desired:
             break
-    random.shuffle(candidates)
     return candidates, readings, written_forms
 
 
@@ -931,7 +934,10 @@ def search_vocabulary_sources(language, level, count):
         cached_candidates = (cached or {}).get("data", {}).get("candidates", [])
         cache_has_enough_words = language != "japanese" or len(cached_candidates) >= count
         if cached and cache_has_enough_words and now - cached["created_at"] < VOCABULARY_SOURCE_CACHE_TTL_SEC:
+            VOCABULARY_SOURCE_CACHE.move_to_end(cache_key)
             return json.loads(json.dumps(cached["data"], ensure_ascii=False))
+        if cached:
+            VOCABULARY_SOURCE_CACHE.pop(cache_key, None)
     result = {
         "online": False,
         "candidates": [],
@@ -969,22 +975,25 @@ def search_vocabulary_sources(language, level, count):
     result["sources"] = result["sources"][:8]
     if result["online"]:
         with STATE_LOCK:
+            VOCABULARY_SOURCE_CACHE.pop(cache_key, None)
             VOCABULARY_SOURCE_CACHE[cache_key] = {
                 "created_at": now,
                 "data": json.loads(json.dumps(result, ensure_ascii=False)),
             }
+            while len(VOCABULARY_SOURCE_CACHE) > VOCABULARY_SOURCE_CACHE_MAX_ITEMS:
+                VOCABULARY_SOURCE_CACHE.popitem(last=False)
     return result
 
 
 def sanitize_suggested_words(values, language, allowed=None):
     if not isinstance(values, list):
         return []
-    allowed_keys = {item.casefold() for item in allowed or []}
+    allowed_keys = {normalize_word(item, language) for item in allowed or []}
     result = []
     seen = set()
     for item in values:
         word = str(item.get("word", "") if isinstance(item, dict) else item).strip()
-        key = word.casefold()
+        key = normalize_word(word, language)
         if not word or key in seen or len(word) > 64 or re.search(r"\s", word):
             continue
         if language == "english" and not re.fullmatch(r"[A-Za-z][A-Za-z'-]*", word):
@@ -1040,8 +1049,8 @@ def ai_vocabulary_batch(language, level_label, count, source_data, exclude=None,
         language,
         candidates if language == "japanese" and candidates else None,
     )
-    excluded_keys = {str(word).casefold() for word in exclude or []}
-    return [word for word in words if word.casefold() not in excluded_keys]
+    excluded_keys = {normalize_word(word, language) for word in exclude or []}
+    return [word for word in words if normalize_word(word, language) not in excluded_keys]
 
 
 def collect_ai_vocabulary(language, level_label, count, source_data, exclude=None):
@@ -1065,7 +1074,7 @@ def collect_ai_vocabulary(language, level_label, count, source_data, exclude=Non
     return words[:count]
 
 
-def suggest_vocabulary(user, language, level, count, exclude=None):
+def suggest_vocabulary(user, language, level, count, exclude=None, query=""):
     language = str(language or "").strip().lower()
     level = str(level or "").strip().lower()
     try:
@@ -1080,6 +1089,16 @@ def suggest_vocabulary(user, language, level, count, exclude=None):
         raise AccountError(f"每次可生成 1 至 {MAX_SUGGESTED_WORDS} 个词", 400, "suggest_count_invalid")
     raw_exclude = exclude if isinstance(exclude, list) else []
     exclude = sanitize_suggested_words(raw_exclude[:MAX_VOCABULARY_SOURCE_WORDS], language)
+    query = unicodedata.normalize("NFKC", str(query or "")).strip()
+    if len(query) > 64:
+        raise AccountError("搜索内容不能超过 64 个字符", 400, "suggest_query_invalid")
+    if query:
+        if language == "english" and not re.fullmatch(r"[A-Za-z'-]+", query):
+            raise AccountError("英语搜索只能包含字母、撇号或连字符", 400, "suggest_query_invalid")
+        if language == "japanese" and not re.fullmatch(
+            r"[\u3040-\u30ff\u31f0-\u31ff\u3400-\u9fff々〆ヶー・]+", query
+        ):
+            raise AccountError("日语搜索内容格式无效", 400, "suggest_query_invalid")
     account_limit = ACCOUNT_STORE.quiz_limit(user, language)
     if account_limit is not None and count > account_limit:
         raise AccountError(
@@ -1089,24 +1108,89 @@ def suggest_vocabulary(user, language, level, count, exclude=None):
         )
 
     level_label = VOCABULARY_LEVELS[language][level][0]
+    local_matches = LOCAL_VOCABULARY_INDEX.search(
+        language,
+        level,
+        query=query,
+        count=count,
+        exclude=exclude,
+    )
+    local_words = [item["word"] for item in local_matches]
+    local_source = {
+        "title": f"本地分级词库 · {level_label}",
+        "url": "",
+        "kind": "local",
+    }
+    if query or len(local_words) >= count:
+        selected = local_words[:count]
+        written_forms = {
+            word: clean_japanese_written_form(word)
+            for word in selected
+            if language == "japanese"
+            and re.search(r"[\u3400-\u9fff々〆ヶ]", word)
+            and clean_japanese_written_form(word)
+        }
+        return {
+            "words": selected,
+            "matches": local_matches[:count],
+            "readings": {},
+            "written_forms": written_forms,
+            "language": language,
+            "level": level,
+            "level_label": level_label,
+            "query": query,
+            "online": False,
+            "partial": len(selected) < count,
+            "selection_source": "local",
+            "sources": [local_source],
+        }
+
     source_count = min(MAX_VOCABULARY_SOURCE_WORDS, count + len(exclude))
     source_data = search_vocabulary_sources(language, level, source_count)
+    remaining = count - len(local_words)
+    generated = collect_ai_vocabulary(
+        language,
+        level_label,
+        remaining,
+        source_data,
+        exclude + local_words,
+    )
     if language == "japanese" and source_data.get("candidates"):
-        words = ai_vocabulary_batch(
+        verified_candidates = sanitize_suggested_words(
+            source_data.get("candidates", []),
             language,
-            level_label,
-            min(count, AI_VOCABULARY_BATCH_SIZE),
-            source_data,
-            exclude,
         )
-        excluded_keys = {word.casefold() for word in exclude}
-        candidates = [word for word in source_data.get("candidates", []) if word.casefold() not in excluded_keys]
-        words = sanitize_suggested_words(words + candidates, language)
+        generated = sanitize_suggested_words(
+            generated + verified_candidates,
+            language,
+            allowed=verified_candidates,
+        )
     else:
-        words = collect_ai_vocabulary(language, level_label, count, source_data, exclude)
-    if len(words) < count:
-        raise AiUnavailable(f"AI 只整理出 {len(words)} 个合格词，请减少数量或重试")
-    selected = words[:count]
+        generated = [
+            word
+            for word in sanitize_suggested_words(generated, language)
+            if LOCAL_VOCABULARY_INDEX.accepts_stage(
+                word, language, level, allow_adjacent=True
+            )
+        ]
+    excluded_keys = {
+        normalize_word(word, language)
+        for word in exclude + local_words
+    }
+    additions = []
+    for word in generated:
+        key = normalize_word(word, language)
+        if not key or key in excluded_keys:
+            continue
+        excluded_keys.add(key)
+        additions.append(word)
+        if len(additions) >= remaining:
+            break
+    selected = (local_words + additions)[:count]
+    if len(selected) < count:
+        raise AiUnavailable(
+            f"当前等级只找到 {len(selected)} 个经过分级校验的词，请减少数量或缩小排除范围"
+        )
     source_readings = source_data.get("readings", {})
     source_written_forms = source_data.get("written_forms", {})
     readings = {
@@ -1122,13 +1206,26 @@ def suggest_vocabulary(user, language, level, count, exclude=None):
     }
     return {
         "words": selected,
+        "matches": local_matches
+        + [
+            {
+                "word": word,
+                "level": level,
+                "match_type": "verified_online" if language == "japanese" else "ai_validated",
+                "score": 120,
+            }
+            for word in additions
+        ],
         "readings": readings,
         "written_forms": written_forms,
         "language": language,
         "level": level,
         "level_label": level_label,
+        "query": "",
         "online": bool(source_data.get("online")),
-        "sources": source_data.get("sources", [])[:8],
+        "partial": False,
+        "selection_source": "hybrid",
+        "sources": [local_source] + source_data.get("sources", [])[:7],
     }
 
 
@@ -1500,6 +1597,20 @@ def json_response(handler, status, data):
     send_security_headers(handler)
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def payment_qr_response(handler, content, content_type):
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(content)))
+    handler.send_header("Content-Disposition", 'inline; filename="payment-qr.png"')
+    handler.send_header("Cache-Control", "private, no-store, max-age=0")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Expires", "0")
+    handler.send_header("Cross-Origin-Resource-Policy", "same-origin")
+    send_security_headers(handler)
+    handler.end_headers()
+    handler.wfile.write(content)
 
 
 def send_security_headers(handler):
@@ -2029,7 +2140,11 @@ class VocabHandler(BaseHTTPRequestHandler):
             json_response(
                 self,
                 HTTPStatus.OK,
-                {"ok": True, "plans": ACCOUNT_STORE.membership_plans(), "contact": "W2009Y94J"},
+                {
+                    "ok": True,
+                    "plans": ACCOUNT_STORE.membership_plans(),
+                    "payment_methods": public_payment_methods(),
+                },
             )
             return
 
@@ -2052,6 +2167,25 @@ class VocabHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     {"ok": True, "requests": ACCOUNT_STORE.list_user_payment_requests(self.account_user)},
                 )
+                return
+
+            if path == "/api/recharge/qr":
+                if not self.require_session():
+                    return
+                request_id = str(
+                    urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+                    .get("request_id", [""])[0]
+                )
+                record = ACCOUNT_STORE.payment_request_for_qr(self.account_user, request_id)
+                try:
+                    content, content_type = load_qr_asset(
+                        record["payment_method"],
+                        record["plan_code"],
+                        record["qr_resource_id"],
+                    )
+                except PaymentAssetError as exc:
+                    raise AccountError(str(exc), 503, exc.code) from exc
+                payment_qr_response(self, content, content_type)
                 return
 
             if path in {"/api/tools/access", "/api/tools/preferences"}:
@@ -2309,6 +2443,14 @@ class VocabHandler(BaseHTTPRequestHandler):
                 json_response(self, HTTPStatus.OK, {"ok": True, "request": record})
                 return
 
+            if request_path == "/api/recharge/cancel":
+                payload = self.read_json()
+                record = ACCOUNT_STORE.cancel_recharge_request(
+                    self.account_user, payload.get("request_id")
+                )
+                json_response(self, HTTPStatus.OK, {"ok": True, "request": record})
+                return
+
             if request_path.startswith("/api/tools/"):
                 if not ACCOUNT_STORE.has_entitlement(self.account_user, "tools_access"):
                     raise AccountError("当前会员不包含在线工具箱", 403, "membership_required")
@@ -2413,7 +2555,10 @@ class VocabHandler(BaseHTTPRequestHandler):
             if request_path == "/api/recharge/request":
                 payload = self.read_json()
                 record, created = ACCOUNT_STORE.create_recharge_request(
-                    self.account_user, payload.get("plan"), payload.get("trial_language")
+                    self.account_user,
+                    payload.get("plan"),
+                    payload.get("payment_method"),
+                    payload.get("trial_language"),
                 )
                 json_response(
                     self,
@@ -2449,6 +2594,7 @@ class VocabHandler(BaseHTTPRequestHandler):
                     payload.get("level"),
                     payload.get("count"),
                     payload.get("exclude"),
+                    payload.get("query"),
                 )
                 result.update({"ok": True, "build": APP_BUILD})
                 json_response(self, HTTPStatus.OK, result)
@@ -2553,7 +2699,10 @@ class VocabHandler(BaseHTTPRequestHandler):
                     return
                 if request_path == "/api/admin/recharge/process":
                     status = ACCOUNT_STORE.process_recharge_request(
-                        self.account_user, payload.get("request_id"), payload.get("action")
+                        self.account_user,
+                        payload.get("request_id"),
+                        payload.get("action"),
+                        payload.get("admin_note"),
                     )
                     json_response(self, HTTPStatus.OK, {"ok": True, "status": status})
                     return

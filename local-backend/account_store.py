@@ -20,6 +20,12 @@ from membership import (
     default_plan_expiry,
     public_plan_payload,
 )
+from payment_assets import (
+    PAYMENT_METHODS,
+    PaymentAssetError,
+    normalize_payment_method,
+    qr_resource_id_for,
+)
 
 
 ADMIN_USERNAME = "wyj"
@@ -29,12 +35,13 @@ LANGUAGES = {"english", "japanese"}
 RECHARGE_PLANS = {"trial_single_language", "monthly", "lifetime"}
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 MAX_SESSIONS_PER_USER = 12
-MIN_SECRET_LENGTH = 6
+MIN_SECRET_LENGTH = 7
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = 310_000
 SESSION_TOKEN_PREFIX = "sha256"
-WECHAT_CONTACT = "W2009Y94J"
-OPEN_PAYMENT_STATUSES = {"pending_payment", "user_paid"}
+OPEN_PAYMENT_STATUSES = {"pending_payment", "user_paid", "processing"}
+PAYMENT_QR_STATUSES = {"pending_payment", "user_paid", "processing"}
+PAYMENT_ORDER_TTL_HOURS = 24
 LOGIN_AUDIT_RETENTION_DAYS = 90
 LOGIN_AUDIT_MAX_RECORDS = 5000
 
@@ -158,6 +165,7 @@ class AccountStore:
         self.text_path.parent.mkdir(parents=True, exist_ok=True)
         self._backup_before_membership_migration()
         self._backup_before_single_language_migration()
+        self._backup_before_payment_migration()
         self.initialize()
 
     def _backup_before_membership_migration(self):
@@ -215,6 +223,39 @@ class AccountStore:
                 applied = source.execute(
                     "SELECT 1 FROM schema_migrations WHERE version = ?",
                     ("002_single_language_orders",),
+                ).fetchone()
+                if applied:
+                    return
+                with closing(sqlite3.connect(str(backup_path), timeout=15)) as destination:
+                    source.backup(destination)
+        except sqlite3.Error:
+            try:
+                backup_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _backup_before_payment_migration(self):
+        if not self.database_path.exists() or self.database_path.stat().st_size == 0:
+            return
+        backup_path = self.database_path.with_name(
+            f"{self.database_path.stem}.pre-payment-004.sqlite3"
+        )
+        if backup_path.exists():
+            return
+        try:
+            with closing(sqlite3.connect(str(self.database_path), timeout=15)) as source:
+                tables = {
+                    row[0]
+                    for row in source.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                if "payment_requests" not in tables or "schema_migrations" not in tables:
+                    return
+                applied = source.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?",
+                    ("004_payment_flow",),
                 ).fetchone()
                 if applied:
                     return
@@ -331,6 +372,11 @@ class AccountStore:
                 "003_login_audit",
                 "003_login_audit_up.sql",
             )
+            self._apply_migration(
+                connection,
+                "004_payment_flow",
+                "004_payment_flow_up.sql",
+            )
             self._seed_membership_plans(connection, now)
             self._migrate_legacy_memberships(connection, now)
             self._migrate_legacy_recharge_requests(connection, now)
@@ -411,7 +457,14 @@ class AccountStore:
     @staticmethod
     def _migrate_legacy_memberships(connection, now):
         rows = connection.execute(
-            "SELECT * FROM users WHERE deleted = 0 AND role != 'super_admin' AND membership != 'free'"
+            """
+            SELECT * FROM users
+            WHERE deleted = 0 AND role != 'super_admin' AND membership != 'free'
+              AND NOT EXISTS (
+                  SELECT 1 FROM user_memberships
+                  WHERE user_memberships.user_id = users.id
+              )
+            """
         ).fetchall()
         for row in rows:
             plan_code = LEGACY_PLAN_MAP.get(row["membership"])
@@ -481,8 +534,8 @@ class AccountStore:
                 INSERT OR IGNORE INTO payment_requests (
                     id, order_number, user_id, username, plan_code, amount_cents, currency,
                     contact, payment_note, status, requested_at, user_confirmed_at,
-                    handled_at, handled_by, updated_at, trial_language
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    handled_at, handled_by, updated_at, trial_language, plan_name_snapshot
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["id"],
@@ -492,7 +545,7 @@ class AccountStore:
                     plan_code,
                     legacy_prices[row["plan"]],
                     plan["currency"],
-                    WECHAT_CONTACT,
+                    "",
                     payment_note,
                     status,
                     row["requested_at"],
@@ -501,6 +554,7 @@ class AccountStore:
                     row["handled_by"],
                     row["updated_at"] or now,
                     trial_language,
+                    plan["name"],
                 ),
             )
 
@@ -822,6 +876,97 @@ class AccountStore:
     def membership_plans(include_hidden=False):
         return public_plan_payload(include_hidden=include_hidden)
 
+    @staticmethod
+    def payment_methods():
+        return list(PAYMENT_METHODS)
+
+    @staticmethod
+    def payment_request_payload(row):
+        if not row:
+            return {}
+        value = dict(row)
+        return {
+            "id": value.get("id", ""),
+            "order_number": value.get("order_number", ""),
+            "user_id": value.get("user_id", ""),
+            "username": value.get("username", ""),
+            "plan_code": value.get("plan_code", ""),
+            "plan_name": value.get("plan_name_snapshot", "") or value.get("plan_code", ""),
+            "amount_cents": int(value.get("amount_cents", 0) or 0),
+            "currency": value.get("currency", "CNY"),
+            "payment_method": value.get("payment_method", ""),
+            "qr_resource_id": value.get("qr_resource_id", ""),
+            "trial_language": value.get("trial_language", ""),
+            "payment_note": value.get("payment_note", ""),
+            "status": value.get("status", ""),
+            "requested_at": value.get("requested_at", ""),
+            "expires_at": value.get("expires_at", ""),
+            "user_confirmed_at": value.get("user_confirmed_at", ""),
+            "processing_at": value.get("processing_at", ""),
+            "handled_at": value.get("handled_at", ""),
+            "admin_note": value.get("admin_note", ""),
+            "updated_at": value.get("updated_at", ""),
+        }
+
+    @staticmethod
+    def _record_payment_event(
+        connection,
+        request_id,
+        from_status,
+        to_status,
+        actor=None,
+        note="",
+        created_at=None,
+    ):
+        connection.execute(
+            """
+            INSERT INTO payment_request_events (
+                id, payment_request_id, from_status, to_status,
+                actor_user_id, actor_username, note, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                request_id,
+                str(from_status or ""),
+                str(to_status or ""),
+                actor["id"] if actor else "",
+                actor["username"] if actor else "",
+                str(note or "")[:500],
+                created_at or iso_now(),
+            ),
+        )
+
+    @staticmethod
+    def _expire_pending_payment_requests(connection, user_id=""):
+        now = iso_now()
+        query = """
+            SELECT id FROM payment_requests
+            WHERE status = 'pending_payment' AND expires_at != '' AND expires_at <= ?
+        """
+        parameters = [now]
+        if user_id:
+            query += " AND user_id = ?"
+            parameters.append(user_id)
+        expired = connection.execute(query, parameters).fetchall()
+        for item in expired:
+            connection.execute(
+                """
+                UPDATE payment_requests
+                SET status = 'expired', handled_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending_payment'
+                """,
+                (now, now, item["id"]),
+            )
+            AccountStore._record_payment_event(
+                connection,
+                item["id"],
+                "pending_payment",
+                "expired",
+                note="订单超过有效期自动关闭",
+                created_at=now,
+            )
+
     def _expire_user_memberships(self, user_id):
         now = utc_now()
         with self.lock, self.connect() as connection:
@@ -925,17 +1070,45 @@ class AccountStore:
             "tools_access": "tools_access" in entitlements,
         }
 
-    def _sync_legacy_membership_snapshot(self, user_id):
-        row = self.get_user(user_id)
-        if not row or self.is_super_admin(row):
+    @staticmethod
+    def _sync_legacy_membership_snapshot_in_connection(connection, user_id, now=None):
+        current_time = now or iso_now()
+        row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row or (row["username_normalized"] == ADMIN_USERNAME and row["role"] == "super_admin"):
             return
-        memberships = self.memberships_for(row)
-        by_plan = {item["plan_code"]: item for item in memberships}
+        active_rows = connection.execute(
+            """
+            SELECT id, expires_at, is_lifetime
+            FROM user_memberships
+            WHERE user_id = ? AND status = 'active'
+            """,
+            (user_id,),
+        ).fetchall()
+        for item in active_rows:
+            expiry = parse_time(item["expires_at"])
+            if not item["is_lifetime"] and (not expiry or expiry <= utc_now()):
+                connection.execute(
+                    "UPDATE user_memberships SET status = 'expired', updated_at = ? WHERE id = ?",
+                    (current_time, item["id"]),
+                )
+        memberships = connection.execute(
+            """
+            SELECT * FROM user_memberships
+            WHERE user_id = ? AND status = 'active'
+            ORDER BY is_lifetime DESC, expires_at DESC, created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        by_plan = {}
+        for item in memberships:
+            by_plan.setdefault(item["plan_code"], item)
         membership = "free"
         start = expires = language = ""
         selected = None
         if "all_access_lifetime" in by_plan:
             membership, selected = "lifetime", by_plan["all_access_lifetime"]
+        elif "dual_language_lifetime" in by_plan:
+            membership, selected = "lifetime", by_plan["dual_language_lifetime"]
         elif "legacy_all_lifetime" in by_plan:
             membership, selected = "lifetime", by_plan["legacy_all_lifetime"]
         elif "all_access_monthly" in by_plan:
@@ -950,19 +1123,25 @@ class AccountStore:
             expires = "9999-12-31T23:59:59Z"
         elif "trial_single_language" in by_plan:
             membership, selected = "trial_single_language", by_plan["trial_single_language"]
-            language = selected.get("metadata", {}).get("language", "")
+            try:
+                language = json.loads(selected["metadata_json"] or "{}").get("language", "")
+            except (json.JSONDecodeError, TypeError):
+                language = ""
         if selected:
             start = selected["starts_at"]
             if membership not in {"lifetime"} and not expires:
                 expires = selected["expires_at"]
+        connection.execute(
+            """
+            UPDATE users SET membership = ?, membership_start = ?, membership_expires = ?,
+                trial_language = ?, updated_at = ? WHERE id = ?
+            """,
+            (membership, start, expires, language, current_time, user_id),
+        )
+
+    def _sync_legacy_membership_snapshot(self, user_id):
         with self.lock, self.connect() as connection:
-            connection.execute(
-                """
-                UPDATE users SET membership = ?, membership_start = ?, membership_expires = ?,
-                    trial_language = ?, updated_at = ? WHERE id = ?
-                """,
-                (membership, start, expires, language, iso_now(), user_id),
-            )
+            self._sync_legacy_membership_snapshot_in_connection(connection, user_id)
 
     def quiz_limit(self, row, language):
         if self.is_super_admin(row):
@@ -1551,13 +1730,27 @@ class AccountStore:
             )
         self._sync_after_write()
 
-    def create_recharge_request(self, user, plan, trial_language=""):
+    @staticmethod
+    def _payment_asset_account_error(exc):
+        status = 400 if exc.code in {
+            "payment_method_invalid",
+            "payment_qr_not_configured",
+            "payment_qr_mismatch",
+        } else 503
+        return AccountError(str(exc), status, exc.code)
+
+    def create_recharge_request(self, user, plan, payment_method="", trial_language=""):
         if not user or user["deleted"] or user["banned"]:
             raise AccountError("账户不可用", 403, "account_unavailable")
         plan_code = str(plan or "").strip()
         if plan_code not in PURCHASABLE_PLAN_CODES:
             raise AccountError("充值套餐无效", 400, "plan_invalid")
         plan_data = MEMBERSHIP_PLANS[plan_code]
+        try:
+            method = normalize_payment_method(payment_method)
+            resource_id = qr_resource_id_for(method, plan_code)
+        except PaymentAssetError as exc:
+            raise self._payment_asset_account_error(exc) from exc
         language_value = str(trial_language or "").strip().lower()
         if plan_code == "trial_single_language":
             if language_value not in LANGUAGES:
@@ -1565,27 +1758,45 @@ class AccountStore:
         else:
             language_value = ""
         now = iso_now()
+        expires_at = (
+            utc_now() + timedelta(hours=PAYMENT_ORDER_TTL_HOURS)
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         request_id = str(uuid.uuid4())
         order_number = f"WYJ-{datetime.now().strftime('%Y%m%d')}-{secrets.token_hex(4).upper()}"
         language_label = {"english": "英语", "japanese": "日语"}.get(language_value, "")
         plan_label = f"{plan_data['name']}（{language_label}）" if language_label else plan_data["name"]
         payment_note = f"{user['username']} {order_number} {plan_label}"
         with self.lock, self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_pending_payment_requests(connection, user["id"])
             existing = connection.execute(
                 """
                 SELECT * FROM payment_requests WHERE user_id = ?
-                AND status IN ('pending_payment', 'user_paid') ORDER BY requested_at DESC LIMIT 1
+                AND status IN ('pending_payment', 'user_paid', 'processing')
+                ORDER BY requested_at DESC LIMIT 1
                 """,
                 (user["id"],),
             ).fetchone()
             if existing:
-                return dict(existing), False
+                same_order = (
+                    existing["plan_code"] == plan_code
+                    and existing["payment_method"] == method
+                    and existing["trial_language"] == language_value
+                )
+                if same_order:
+                    return self.payment_request_payload(existing), False
+                raise AccountError(
+                    "已有未完成订单，请先取消原订单；已确认付款的订单不能更换支付方式",
+                    409,
+                    "payment_order_conflict",
+                )
             connection.execute(
                 """
                 INSERT INTO payment_requests (
                     id, order_number, user_id, username, plan_code, amount_cents, currency,
-                    contact, payment_note, status, requested_at, updated_at, trial_language
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?, ?)
+                    contact, payment_note, status, requested_at, updated_at, trial_language,
+                    plan_name_snapshot, payment_method, qr_resource_id, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 'pending_payment', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -1595,18 +1806,32 @@ class AccountStore:
                     plan_code,
                     plan_data["price_cents"],
                     plan_data["currency"],
-                    WECHAT_CONTACT,
                     payment_note,
                     now,
                     now,
                     language_value,
+                    plan_data["name"],
+                    method,
+                    resource_id,
+                    expires_at,
                 ),
             )
+            self._record_payment_event(
+                connection,
+                request_id,
+                "",
+                "pending_payment",
+                actor=user,
+                note="用户确认套餐与支付方式，订单金额已锁定",
+                created_at=now,
+            )
             record = connection.execute("SELECT * FROM payment_requests WHERE id = ?", (request_id,)).fetchone()
-        return dict(record), True
+        return self.payment_request_payload(record), True
 
     def confirm_recharge_payment(self, user, request_id):
         with self.lock, self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_pending_payment_requests(connection, user["id"])
             request = connection.execute(
                 "SELECT * FROM payment_requests WHERE id = ? AND user_id = ?",
                 (str(request_id or ""), user["id"]),
@@ -1614,23 +1839,95 @@ class AccountStore:
             if not request:
                 raise AccountError("充值订单不存在", 404, "payment_not_found")
             if request["status"] == "user_paid":
-                return dict(request)
+                return self.payment_request_payload(request)
             if request["status"] != "pending_payment":
                 raise AccountError("该订单不能再确认付款", 409, "payment_status_invalid")
             now = iso_now()
             connection.execute(
                 """
                 UPDATE payment_requests SET status = 'user_paid', user_confirmed_at = ?,
-                    updated_at = ? WHERE id = ?
+                    updated_at = ? WHERE id = ? AND status = 'pending_payment'
                 """,
                 (now, now, request["id"]),
             )
-            return dict(connection.execute("SELECT * FROM payment_requests WHERE id = ?", (request["id"],)).fetchone())
+            self._record_payment_event(
+                connection,
+                request["id"],
+                "pending_payment",
+                "user_paid",
+                actor=user,
+                note="用户声明已完成付款",
+                created_at=now,
+            )
+            record = connection.execute(
+                "SELECT * FROM payment_requests WHERE id = ?", (request["id"],)
+            ).fetchone()
+            return self.payment_request_payload(record)
+
+    def cancel_recharge_request(self, user, request_id):
+        with self.lock, self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_pending_payment_requests(connection, user["id"])
+            request = connection.execute(
+                "SELECT * FROM payment_requests WHERE id = ? AND user_id = ?",
+                (str(request_id or ""), user["id"]),
+            ).fetchone()
+            if not request:
+                raise AccountError("充值订单不存在", 404, "payment_not_found")
+            if request["status"] == "cancelled":
+                return self.payment_request_payload(request)
+            if request["status"] != "pending_payment":
+                raise AccountError("该订单已确认付款，不能取消或更换支付方式", 409, "payment_status_invalid")
+            now = iso_now()
+            changed = connection.execute(
+                """
+                UPDATE payment_requests
+                SET status = 'cancelled', cancelled_at = ?, handled_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending_payment'
+                """,
+                (now, now, now, request["id"]),
+            ).rowcount
+            if changed != 1:
+                raise AccountError("订单状态已变化，请刷新后重试", 409, "payment_status_invalid")
+            self._record_payment_event(
+                connection,
+                request["id"],
+                "pending_payment",
+                "cancelled",
+                actor=user,
+                note="用户取消订单",
+                created_at=now,
+            )
+            record = connection.execute(
+                "SELECT * FROM payment_requests WHERE id = ?", (request["id"],)
+            ).fetchone()
+            return self.payment_request_payload(record)
+
+    def payment_request_for_qr(self, user, request_id):
+        with self.lock, self.connect() as connection:
+            self._expire_pending_payment_requests(connection, user["id"])
+            request = connection.execute(
+                "SELECT * FROM payment_requests WHERE id = ? AND user_id = ?",
+                (str(request_id or ""), user["id"]),
+            ).fetchone()
+            if not request:
+                raise AccountError("充值订单不存在", 404, "payment_not_found")
+            if request["status"] not in PAYMENT_QR_STATUSES:
+                raise AccountError("该订单当前不能查看收款二维码", 409, "payment_qr_status_invalid")
+            try:
+                method = normalize_payment_method(request["payment_method"])
+                expected_id = qr_resource_id_for(method, request["plan_code"])
+            except PaymentAssetError as exc:
+                raise self._payment_asset_account_error(exc) from exc
+            if request["qr_resource_id"] != expected_id:
+                raise AccountError("订单二维码资源不匹配", 409, "payment_qr_mismatch")
+            return self.payment_request_payload(request)
 
     def list_user_payment_requests(self, user):
-        with self.connect() as connection:
+        with self.lock, self.connect() as connection:
+            self._expire_pending_payment_requests(connection, user["id"])
             return [
-                dict(row)
+                self.payment_request_payload(row)
                 for row in connection.execute(
                     "SELECT * FROM payment_requests WHERE user_id = ? ORDER BY requested_at DESC LIMIT 50",
                     (user["id"],),
@@ -1640,57 +1937,234 @@ class AccountStore:
     def list_recharge_requests(self, actor):
         if not self.is_super_admin(actor):
             raise AccountError("无管理员权限", 403, "forbidden")
-        with self.connect() as connection:
-            return [dict(row) for row in connection.execute(
-                "SELECT * FROM payment_requests ORDER BY requested_at DESC"
-            ).fetchall()]
+        with self.lock, self.connect() as connection:
+            self._expire_pending_payment_requests(connection)
+            requests = [
+                self.payment_request_payload(row)
+                for row in connection.execute(
+                    "SELECT * FROM payment_requests ORDER BY requested_at DESC"
+                ).fetchall()
+            ]
+            history = {}
+            for row in connection.execute(
+                """
+                SELECT payment_request_id, from_status, to_status,
+                       actor_username, note, created_at
+                FROM payment_request_events
+                ORDER BY created_at, rowid
+                """
+            ).fetchall():
+                history.setdefault(row["payment_request_id"], []).append(
+                    {
+                        "from_status": row["from_status"],
+                        "to_status": row["to_status"],
+                        "actor_username": row["actor_username"],
+                        "note": row["note"],
+                        "created_at": row["created_at"],
+                    }
+                )
+        for item in requests:
+            item["history"] = history.get(item["id"], [])
+        return requests
 
-    def process_recharge_request(self, actor, request_id, action):
+    def _fulfill_payment_in_transaction(self, connection, request, target, actor, now):
+        plan_code = request["plan_code"]
+        plan = MEMBERSHIP_PLANS.get(plan_code)
+        if not plan:
+            raise AccountError("订单会员方案已不存在", 409, "plan_invalid")
+        existing_fulfillment = connection.execute(
+            "SELECT id FROM payment_fulfillments WHERE payment_request_id = ?",
+            (request["id"],),
+        ).fetchone()
+        if existing_fulfillment:
+            raise AccountError("充值申请已履约", 409, "request_already_processed")
+        language_value = str(request["trial_language"] or "").strip().lower()
+        if plan_code == "trial_single_language" and language_value not in LANGUAGES:
+            raise AccountError("订单缺少有效的单语言选择", 409, "trial_language_invalid")
+
+        memberships = connection.execute(
+            """
+            SELECT * FROM user_memberships
+            WHERE user_id = ? AND plan_code = ? AND status = 'active'
+            ORDER BY is_lifetime DESC, expires_at DESC, created_at DESC
+            """,
+            (target["id"], plan_code),
+        ).fetchall()
+        if plan_code == "trial_single_language":
+            matching = []
+            for membership in memberships:
+                try:
+                    metadata = json.loads(membership["metadata_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+                if metadata.get("language") == language_value:
+                    matching.append(membership)
+            memberships = matching
+
+        source_ref = f"payment:{request['id']}"
+        membership_id = ""
+        starts_at = now
+        expires_at = ""
+        if plan["lifetime"] and memberships:
+            membership_id = memberships[0]["id"]
+        else:
+            if not plan["lifetime"]:
+                base = utc_now()
+                for membership in memberships:
+                    current_expiry = parse_time(membership["expires_at"])
+                    if current_expiry and current_expiry > base:
+                        base = current_expiry
+                expires_at = default_plan_expiry(plan_code, base)
+            membership_id = str(uuid.uuid4())
+            metadata_json = (
+                json.dumps({"language": language_value}, ensure_ascii=False, separators=(",", ":"))
+                if plan_code == "trial_single_language"
+                else "{}"
+            )
+            connection.execute(
+                """
+                INSERT INTO user_memberships (
+                    id, user_id, plan_code, starts_at, expires_at, is_lifetime,
+                    status, source, source_ref, created_by, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'active', 'payment', ?, ?, ?, ?, ?)
+                """,
+                (
+                    membership_id,
+                    target["id"],
+                    plan_code,
+                    starts_at,
+                    expires_at,
+                    int(plan["lifetime"]),
+                    source_ref,
+                    actor["username"],
+                    metadata_json,
+                    now,
+                    now,
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO payment_fulfillments (
+                id, payment_request_id, user_id, plan_code, user_membership_id,
+                source, source_ref, fulfilled_at
+            ) VALUES (?, ?, ?, ?, ?, 'payment', ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                request["id"],
+                target["id"],
+                plan_code,
+                membership_id,
+                source_ref,
+                now,
+            ),
+        )
+        self._sync_legacy_membership_snapshot_in_connection(connection, target["id"], now)
+        return {
+            "membership_id": membership_id,
+            "plan_code": plan_code,
+            "starts_at": starts_at,
+            "expires_at": expires_at,
+            "source": "payment",
+            "source_ref": source_ref,
+        }
+
+    def process_recharge_request(self, actor, request_id, action, admin_note=""):
         if not self.is_super_admin(actor):
             raise AccountError("无管理员权限", 403, "forbidden")
         action = str(action or "").strip().lower()
         if action not in {"approve", "reject"}:
             raise AccountError("处理操作无效", 400, "action_invalid")
-        with self.lock:
-            with self.connect() as connection:
-                request = connection.execute(
-                    "SELECT * FROM payment_requests WHERE id = ?", (request_id,)
-                ).fetchone()
+        admin_note = str(admin_note or "").strip()[:500]
+        should_sync = False
+        with self.lock, self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            request = connection.execute(
+                "SELECT * FROM payment_requests WHERE id = ?", (str(request_id or ""),)
+            ).fetchone()
             if not request:
                 raise AccountError("充值申请不存在", 404, "request_not_found")
-            if request["status"] not in OPEN_PAYMENT_STATUSES:
-                raise AccountError("充值申请已处理", 409, "request_already_processed")
-            if action == "approve":
-                self.admin_manage_membership(
-                    actor,
-                    request["user_id"],
-                    "grant",
-                    request["plan_code"],
-                    note=f"确认订单 {request['order_number']}",
-                    trial_language=request["trial_language"],
-                )
-            status = "approved" if action == "approve" else "rejected"
+            if request["status"] != "user_paid":
+                raise AccountError("只有用户已确认付款的订单可以处理", 409, "request_already_processed")
+            target = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (request["user_id"],)
+            ).fetchone()
+            if not target or target["deleted"] or target["banned"]:
+                raise AccountError("订单用户不存在或账户不可用", 409, "payment_user_invalid")
+            if target["username_normalized"] == ADMIN_USERNAME and target["role"] == "super_admin":
+                raise AccountError("管理员账户不能购买会员", 409, "payment_user_invalid")
+            if request["plan_code"] not in MEMBERSHIP_PLANS:
+                raise AccountError("订单会员方案无效", 409, "plan_invalid")
+            if not request["order_number"].startswith("LEGACY-"):
+                try:
+                    method = normalize_payment_method(request["payment_method"])
+                    expected_resource = qr_resource_id_for(method, request["plan_code"])
+                except PaymentAssetError as exc:
+                    raise self._payment_asset_account_error(exc) from exc
+                if request["qr_resource_id"] != expected_resource:
+                    raise AccountError("订单二维码资源不匹配", 409, "payment_qr_mismatch")
             now = iso_now()
-            target = self.get_user(request["user_id"])
-            with self.connect() as connection:
-                changed = connection.execute(
-                    """
-                    UPDATE payment_requests SET status = ?, updated_at = ?, handled_at = ?, handled_by = ?
-                    WHERE id = ? AND status IN ('pending_payment', 'user_paid')
-                    """,
-                    (status, now, now, actor["username"], request_id),
-                ).rowcount
-                if changed != 1:
-                    raise AccountError("充值申请已处理", 409, "request_already_processed")
-                self._audit(
-                    connection,
-                    actor,
-                    "payment_approve" if action == "approve" else "payment_reject",
-                    target=target,
-                    before={"order_number": request["order_number"], "status": request["status"]},
-                    after={"order_number": request["order_number"], "status": status},
+            changed = connection.execute(
+                """
+                UPDATE payment_requests
+                SET status = 'processing', processing_at = ?, updated_at = ?,
+                    handled_by = ?, admin_note = ?
+                WHERE id = ? AND status = 'user_paid'
+                """,
+                (now, now, actor["username"], admin_note, request["id"]),
+            ).rowcount
+            if changed != 1:
+                raise AccountError("充值申请已处理", 409, "request_already_processed")
+            self._record_payment_event(
+                connection,
+                request["id"],
+                "user_paid",
+                "processing",
+                actor=actor,
+                note=admin_note or "管理员开始核对订单",
+                created_at=now,
+            )
+            fulfillment = {}
+            if action == "approve":
+                fulfillment = self._fulfill_payment_in_transaction(
+                    connection, request, target, actor, now
                 )
-            return status
+                should_sync = True
+            status = "approved" if action == "approve" else "rejected"
+            connection.execute(
+                """
+                UPDATE payment_requests
+                SET status = ?, updated_at = ?, handled_at = ?, handled_by = ?, admin_note = ?
+                WHERE id = ? AND status = 'processing'
+                """,
+                (status, now, now, actor["username"], admin_note, request["id"]),
+            )
+            self._record_payment_event(
+                connection,
+                request["id"],
+                "processing",
+                status,
+                actor=actor,
+                note=admin_note or ("付款核对通过" if action == "approve" else "付款核对未通过"),
+                created_at=now,
+            )
+            self._audit(
+                connection,
+                actor,
+                "payment_approve" if action == "approve" else "payment_reject",
+                target=target,
+                before={"order_number": request["order_number"], "status": request["status"]},
+                after={
+                    "order_number": request["order_number"],
+                    "status": status,
+                    "fulfillment": fulfillment,
+                },
+                note=admin_note,
+            )
+        if should_sync:
+            self._sync_after_write()
+        return status
 
     @staticmethod
     def _validate_tool_id(tool_id):

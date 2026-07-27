@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const BASE_URL = process.env.WYJ_TEST_BASE || "http://127.0.0.1:8892";
 const CDP_URL = process.env.WYJ_CDP_URL || "http://127.0.0.1:9223";
-const ADMIN_SECRET = process.env.WYJ_TEST_ADMIN_SECRET || "ToolMatrix-Admin-2026!";
+const ADMIN_SECRET = process.env.WYJ_TEST_ADMIN_SECRET || "";
 const TEST_ROOT = path.join(ROOT, ".tool-e2e");
 const RUN_ID = Date.now().toString(36);
 const DOWNLOAD_ROOT = path.join(TEST_ROOT, `app-downloads-${RUN_ID}`);
@@ -117,6 +117,7 @@ async function connectBrowser() {
 }
 
 async function main() {
+  assert.ok(ADMIN_SECRET, "WYJ_TEST_ADMIN_SECRET is required for the isolated browser test server");
   const browser = await connectBrowser();
   const { client, send, targetId } = browser;
   const runtimeErrors = [];
@@ -295,13 +296,14 @@ async function main() {
       await waitFor("!document.querySelector('#membershipModal')?.classList.contains('hidden')", 12_000, "membership modal");
       assert.equal(await evaluate("location.pathname"), "/select");
       const plans = await evaluate(`[...document.querySelectorAll('#membershipPlanList [data-plan]')].map(node => ({ code: node.dataset.plan, text: node.textContent }))`);
-      assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"]);
+      assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "dual_language_lifetime", "all_access_lifetime"]);
       assert.ok(plans.find((item) => item.code === "trial_single_language").text.includes("8"));
       assert.ok(plans.find((item) => item.code === "dual_language_monthly").text.includes("20"));
       assert.ok(plans.find((item) => item.code === "tools_monthly").text.includes("20"));
-      assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("70"));
       assert.ok(plans.find((item) => item.code === "all_access_monthly").text.includes("30"));
+      assert.ok(plans.find((item) => item.code === "dual_language_lifetime").text.includes("70"));
       assert.ok(plans.find((item) => item.code === "all_access_lifetime").text.includes("100"));
+      assert.equal(await evaluate("document.querySelectorAll('#paymentMethodList input[name=\"paymentMethod\"]').length"), 2);
       await click('[data-plan="trial_single_language"]');
       assert.equal(await evaluate("document.querySelector('#trialLanguageField').classList.contains('hidden')"), false);
       await click('[data-plan="all_access_monthly"]');
@@ -310,9 +312,24 @@ async function main() {
       await waitFor("!document.querySelector('#paymentOrderBox')?.classList.contains('hidden')", 12_000, "payment order");
       assert.ok((await evaluate("document.querySelector('#paymentAmount').textContent")).includes("30.00 CNY"));
       assert.ok((await evaluate("document.querySelector('#paymentNote').textContent")).includes(USERNAME));
+      assert.equal(await evaluate("document.querySelector('#paymentMethodList input:checked')?.value"), "wechat");
+      assert.ok((await evaluate("document.querySelector('#paymentMethod').textContent.trim()")).length > 1);
+      await waitFor("document.querySelector('#paymentQrImage')?.src.startsWith('blob:')", 12_000, "protected payment QR");
+      await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      const mobilePayment = await evaluate(`({
+        viewport: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        modalWidth: document.querySelector('#membershipModal .modal-panel').getBoundingClientRect().width,
+        qrRight: document.querySelector('#paymentQrImage').getBoundingClientRect().right,
+      })`);
+      assert.ok(mobilePayment.scrollWidth <= mobilePayment.viewport + 1, JSON.stringify(mobilePayment));
+      assert.ok(mobilePayment.modalWidth <= mobilePayment.viewport, JSON.stringify(mobilePayment));
+      assert.ok(mobilePayment.qrRight <= mobilePayment.viewport + 1, JSON.stringify(mobilePayment));
+      await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
       await click("#confirmPaymentBtn");
       await waitFor("document.querySelector('#paymentStatus')?.textContent.includes('等待确认')", 12_000, "payment confirmation");
       await click('[data-close-modal="membershipModal"]');
+      await waitFor("paymentQrObjectUrl === '' && !document.querySelector('#paymentQrImage').getAttribute('src')", 3_000, "payment QR object URL revoked");
       await evaluate("location.href = '/tools'; true");
       await waitFor("location.pathname === '/select' && !document.querySelector('#membershipModal')?.classList.contains('hidden')", 12_000, "direct tools guard");
       await click('[data-close-modal="membershipModal"]');
@@ -551,9 +568,9 @@ async function main() {
       await waitFor("!document.querySelector('#adminEditModal')?.classList.contains('hidden')", 3_000, "admin editor");
       assert.deepEqual(
         await evaluate("[...document.querySelector('#adminMembershipSelect').options].map(option => option.value).filter(Boolean)"),
-        ["trial_single_language", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"],
+        ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "dual_language_lifetime", "all_access_lifetime", "japanese_lifetime"],
       );
-      assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("全功能月度会员"));
+      assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("全功能包月会员"));
       await setFields({ "#adminMembershipAction": "grant", "#adminMembershipSelect": "japanese_lifetime", "#adminMembershipStart": "2026.07.16", "#adminMembershipNote": "browser matrix" });
       await click("#saveAdminMembershipBtn");
       await click("#acceptConfirmBtn");
@@ -652,7 +669,7 @@ async function main() {
     await check("full member toolbox, AI vocabulary and account secret/logout draft cleanup", async () => {
       await useSession(userSession, "/select");
       await waitFor("!document.querySelector('#modulePicker')?.classList.contains('hidden')", 8_000, "member module picker");
-      assert.ok((await evaluate("document.querySelector('#moduleMembershipStatus').textContent")).includes("全功能月度会员"));
+      assert.ok((await evaluate("document.querySelector('#moduleMembershipStatus').textContent")).includes("全功能包月会员"));
       await click('[data-module="tools"]');
       await waitFor("location.pathname === '/tools' && !document.querySelector('#toolsPanel')?.classList.contains('hidden')", 12_000, "member tools access");
       await click("#leaveToolsBtn");

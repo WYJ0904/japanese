@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260716-quality15" />
-    <link rel="stylesheet" href="/styles.css?v=20260716-quality15" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260727-payment-search" />
+    <link rel="stylesheet" href="/styles.css?v=20260727-payment-search" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -110,8 +110,8 @@
           </form>
           <form id="registerForm" class="login-form hidden">
             <input id="registerUsernameInput" autocomplete="username" maxlength="40" placeholder="用户名" required />
-            <input id="registerSecretInput" type="password" autocomplete="new-password" maxlength="128" placeholder="登录密钥" required />
-            <input id="registerConfirmInput" type="password" autocomplete="new-password" maxlength="128" placeholder="确认登录密钥" required />
+            <input id="registerSecretInput" type="password" autocomplete="new-password" minlength="7" maxlength="128" placeholder="登录密钥（至少 7 个字符）" required />
+            <input id="registerConfirmInput" type="password" autocomplete="new-password" minlength="7" maxlength="128" placeholder="确认登录密钥" required />
             <button class="primary" id="registerSubmitBtn" type="submit">创建账户</button>
           </form>
           <button class="hidden" id="offlineReviewBtn" type="button">进入本地复习</button>
@@ -161,10 +161,14 @@
 
               <section class="ai-suggest-section" aria-labelledby="aiSuggestTitle">
                 <div class="ai-suggest-heading">
-                  <h3 id="aiSuggestTitle">AI 联网选词</h3>
+                  <h3 id="aiSuggestTitle">分级智能选词</h3>
                   <span id="aiSuggestLanguage">英语</span>
                 </div>
                 <div class="ai-suggest-grid">
+                  <label class="field-label ai-search-field">
+                    <span>快速搜索</span>
+                    <input id="aiSearchInput" type="search" maxlength="64" autocomplete="off" placeholder="输入单词或前缀" />
+                  </label>
                   <label class="field-label">
                     <span>学习等级</span>
                     <select id="aiLevelSelect"></select>
@@ -182,6 +186,7 @@
                   </label>
                   <button class="primary ai-suggest-button" id="aiSuggestBtn" type="button">生成词表</button>
                 </div>
+                <div class="ai-search-results hidden" id="aiSearchResults" aria-live="polite"></div>
                 <p class="meta-line ai-suggest-message" id="aiSuggestMessage" aria-live="polite"></p>
               </section>
 
@@ -408,15 +413,24 @@
           <button id="retryMembershipPlansBtn" type="button">重新加载套餐</button>
         </div>
         <label class="field-label hidden" id="trialLanguageField"><span>选择单语言</span><select id="trialLanguageSelect"><option value="english">英语</option><option value="japanese">日语</option></select></label>
+        <fieldset class="payment-method-field" id="paymentMethodField">
+          <legend>选择支付方式</legend>
+          <div class="payment-method-list" id="paymentMethodList" aria-live="polite"></div>
+        </fieldset>
         <div class="purchase-summary" id="purchaseSummary">请选择套餐</div>
-        <p class="membership-warning">8 CNY 单语言包月仅包含所选语言；20 CNY 双语言测试包月包含英语和日语测试；20 CNY 工具箱包月仅包含在线工具箱；70 CNY 日语永久仅包含日语。需要语言测试与工具箱全部功能，请购买 30 CNY 全功能月度会员或 100 CNY 全功能永久会员。</p>
-        <div class="wechat-row"><span>微信号：<strong id="wechatId">W2009Y94J</strong></span><button id="copyWechatBtn" type="button">复制微信号</button></div>
+        <p class="membership-warning">8 CNY 单语言包月仅包含所选语言；20 CNY 双语言包月包含英语和日语测试；20 CNY 工具箱包月仅包含在线工具箱；70 CNY 双语言永久包含英语和日语测试。需要语言测试与工具箱全部功能，请购买 30 CNY 全功能包月会员或 100 CNY 全功能永久会员。</p>
         <div class="payment-order hidden" id="paymentOrderBox">
-          <dl><dt>用户名</dt><dd id="paymentUsername">-</dd><dt>会员方案</dt><dd id="paymentPlan">-</dd><dt class="hidden" id="paymentLanguageTerm">所选语言</dt><dd class="hidden" id="paymentLanguage">-</dd><dt>应付金额</dt><dd id="paymentAmount">-</dd><dt>订单编号</dt><dd><code id="paymentOrderNumber">-</code> <button id="copyOrderBtn" type="button">复制</button></dd><dt>付款备注</dt><dd><span id="paymentNote">-</span> <button id="copyPaymentNoteBtn" type="button">复制</button></dd><dt>订单状态</dt><dd id="paymentStatus">-</dd></dl>
+          <dl><dt>用户名</dt><dd id="paymentUsername">-</dd><dt>会员方案</dt><dd id="paymentPlan">-</dd><dt class="hidden" id="paymentLanguageTerm">所选语言</dt><dd class="hidden" id="paymentLanguage">-</dd><dt>支付方式</dt><dd id="paymentMethod">-</dd><dt>应付金额</dt><dd id="paymentAmount">-</dd><dt>订单编号</dt><dd><code id="paymentOrderNumber">-</code> <button id="copyOrderBtn" type="button">复制</button></dd><dt>付款备注</dt><dd><span id="paymentNote">-</span> <button id="copyPaymentNoteBtn" type="button">复制</button></dd><dt>订单状态</dt><dd id="paymentStatus">-</dd></dl>
+          <div class="payment-qr-wrap hidden" id="paymentQrWrap">
+            <p id="paymentQrLabel">请使用所选支付方式扫码付款</p>
+            <img id="paymentQrImage" alt="当前订单的私有收款二维码" />
+            <p class="meta-line" id="paymentQrMessage" aria-live="polite"></p>
+          </div>
         </div>
-        <p>选择方案后生成订单，付款时使用页面中的备注；点击“我已付款”只会通知管理员，不会自动开通。</p>
+        <p>确认套餐和支付方式后才会生成并显示对应二维码。付款时请核对金额并填写订单备注；点击“我已付款”只会通知管理员，不会自动开通。</p>
+        <p class="payment-review-note">付款后不会立即自动开通会员。管理员将在 24 小时内核对付款并确认订单；管理员确认到账后，会员权益才会生效。未付款订单 24 小时后自动失效。</p>
         <p class="danger-note">注销账户后，账户数据、当前会员资格、剩余会员时间以及永久会员资格都将被清除，且无法恢复。</p>
-        <div class="action-row"><button class="primary" id="submitRechargeBtn" type="button" disabled>生成付款订单</button><button class="hidden" id="confirmPaymentBtn" type="button">我已付款</button></div>
+        <div class="action-row"><button class="primary" id="submitRechargeBtn" type="button" disabled>确认订单并显示二维码</button><button class="hidden" id="confirmPaymentBtn" type="button">我已付款</button><button class="hidden" id="cancelPaymentOrderBtn" type="button">取消并更换</button></div>
         <p class="meta-line" id="rechargeMessage" aria-live="polite"></p>
       </section>
     </div>
@@ -429,9 +443,9 @@
         <dl class="account-details" id="accountDetails"></dl>
         <form id="changeSecretForm" class="stack-form">
           <h3>修改登录密钥</h3>
-          <div class="secret-input-row"><input id="currentSecretInput" type="password" autocomplete="current-password" minlength="6" maxlength="128" placeholder="当前登录密钥" required /><button id="toggleCurrentSecretBtn" type="button" aria-pressed="false">显示</button></div>
-          <div class="secret-input-row"><input id="newSecretInput" type="password" autocomplete="new-password" minlength="6" maxlength="128" placeholder="新登录密钥（至少 6 个字符）" required /><button id="toggleNewSecretBtn" type="button" aria-pressed="false">显示</button></div>
-          <input id="newSecretConfirmInput" type="password" autocomplete="new-password" minlength="6" maxlength="128" placeholder="再次输入新登录密钥" required />
+          <div class="secret-input-row"><input id="currentSecretInput" type="password" autocomplete="current-password" maxlength="128" placeholder="当前登录密钥" required /><button id="toggleCurrentSecretBtn" type="button" aria-pressed="false">显示</button></div>
+          <div class="secret-input-row"><input id="newSecretInput" type="password" autocomplete="new-password" minlength="7" maxlength="128" placeholder="新登录密钥（至少 7 个字符）" required /><button id="toggleNewSecretBtn" type="button" aria-pressed="false">显示</button></div>
+          <input id="newSecretConfirmInput" type="password" autocomplete="new-password" minlength="7" maxlength="128" placeholder="再次输入新登录密钥" required />
           <div class="account-secret-actions"><button id="generateOwnSecretBtn" type="button">生成安全密钥</button><button class="primary" type="submit">保存并退出全部会话</button></div>
         </form>
         <div class="danger-zone">
@@ -465,7 +479,7 @@
           <div class="admin-current-memberships" id="adminCurrentMemberships"></div>
           <div class="admin-membership-grid">
             <label class="field-label"><span>操作</span><select id="adminMembershipAction"><option value="grant">开通或覆盖</option><option value="extend">续期一个月</option><option value="cancel">取消所选会员</option><option value="cancel_all">降级为普通用户</option></select></label>
-            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="trial_single_language">单语言包月体验会员</option><option value="dual_language_monthly">双语言测试包月会员</option><option value="tools_monthly">工具箱包月会员</option><option value="japanese_lifetime">日语单项永久会员</option><option value="all_access_monthly">全功能月度会员</option><option value="all_access_lifetime">全功能永久会员</option></select></label>
+            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="trial_single_language">单语言包月体验会员</option><option value="dual_language_monthly">双语言测试包月会员</option><option value="tools_monthly">工具箱包月会员</option><option value="all_access_monthly">全功能包月会员</option><option value="dual_language_lifetime">双语言双项永久会员</option><option value="all_access_lifetime">全功能永久会员</option><option value="japanese_lifetime">历史日语单项永久会员</option></select></label>
             <label class="field-label hidden" id="adminTrialLanguageField"><span>体验语言</span><select id="adminTrialLanguageSelect"><option value="">请选择</option><option value="english">英语</option><option value="japanese">日语</option></select></label>
           </div>
           <div class="admin-date-grid">
@@ -485,7 +499,7 @@
             <div class="field-label admin-secret-field">
               <label for="adminNewSecretInput">设置新登录密钥</label>
               <span class="admin-secret-input-wrap">
-                <input id="adminNewSecretInput" type="password" autocomplete="new-password" minlength="6" maxlength="128" aria-describedby="adminSecretHelp" placeholder="输入或生成新密钥（至少 6 个字符）" />
+                <input id="adminNewSecretInput" type="password" autocomplete="new-password" minlength="7" maxlength="128" aria-describedby="adminSecretHelp" placeholder="输入或生成新密钥（至少 7 个字符）" />
                 <button id="toggleAdminSecretBtn" type="button" aria-pressed="false">显示</button>
               </span>
             </div>
@@ -546,7 +560,7 @@
     </template>
 
     <script src="/vendor/qrcode.js?v=2.0.4"></script>
-    <script src="/tools.js?v=20260716-quality15"></script>
-    <script src="/app.js?v=20260716-quality15"></script>
+    <script src="/tools.js?v=20260727-payment-search"></script>
+    <script src="/app.js?v=20260727-payment-search"></script>
   </body>
 </html>

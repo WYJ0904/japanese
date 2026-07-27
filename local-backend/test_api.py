@@ -16,6 +16,23 @@ TEMPORARY = tempfile.TemporaryDirectory()
 ROOT = Path(TEMPORARY.name)
 os.environ["VOCAB_USERS_DB"] = str(ROOT / "data" / "users.sqlite3")
 os.environ["VOCAB_USERS_TXT"] = str(ROOT / "users.txt")
+PAYMENT_QR_ROOT = ROOT / "payment-qrs"
+PAYMENT_QR_ROOT.mkdir(parents=True, exist_ok=True)
+os.environ["VOCAB_PAYMENT_QR_DIR"] = str(PAYMENT_QR_ROOT)
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+PAYMENT_PLAN_CODES = (
+    "trial_single_language",
+    "dual_language_monthly",
+    "tools_monthly",
+    "all_access_monthly",
+    "dual_language_lifetime",
+    "all_access_lifetime",
+)
+for payment_method in ("wechat", "alipay"):
+    for payment_plan_code in PAYMENT_PLAN_CODES:
+        (PAYMENT_QR_ROOT / f"{payment_method}_{payment_plan_code}.png").write_bytes(TINY_PNG)
 
 import server  # noqa: E402
 from account_store import ADMIN_SECRET  # noqa: E402
@@ -72,10 +89,10 @@ class AccountApiTests(unittest.TestCase):
         status, data = self.request(
             "POST",
             "/api/register",
-            {"username": username, "secret": "ABC123", "confirm_secret": "ABC123"},
+            {"username": username, "secret": "ABC1234", "confirm_secret": "ABC1234"},
         )
         self.assertEqual(status, 201, data)
-        status, login = self.request("POST", "/api/login", {"username": username, "secret": "ABC123"})
+        status, login = self.request("POST", "/api/login", {"username": username, "secret": "ABC1234"})
         self.assertEqual(status, 200, login)
         return username, login["account"], login["session"]
 
@@ -199,7 +216,7 @@ class AccountApiTests(unittest.TestCase):
         target = next(item for item in users["users"] if item["username"] == username)
         self.assertNotIn("secret", target)
         serialized = json.dumps(users, ensure_ascii=False)
-        self.assertNotIn("ABC123", serialized)
+        self.assertNotIn("ABC1234", serialized)
         self.assertNotIn(replacement, serialized)
 
     def test_login_audit_records_network_context_and_is_admin_only(self):
@@ -241,13 +258,13 @@ class AccountApiTests(unittest.TestCase):
         status, _ = self.request(
             "POST",
             "/api/register",
-            {"username": username.upper(), "secret": "SECOND", "confirm_secret": "SECOND"},
+            {"username": username.upper(), "secret": "SECOND7", "confirm_secret": "SECOND7"},
         )
         self.assertEqual(status, 409)
         status, _ = self.request(
             "POST",
             "/api/register",
-            {"username": "WyJ", "secret": "SECOND", "confirm_secret": "SECOND"},
+            {"username": "WyJ", "secret": "SECOND7", "confirm_secret": "SECOND7"},
         )
         self.assertEqual(status, 409)
 
@@ -276,14 +293,21 @@ class AccountApiTests(unittest.TestCase):
 
         _, _, session = self.new_user()
         status, invalid = self.request(
-            "POST", "/api/recharge/request", {"plan": "trial_single_language"}, session
+            "POST",
+            "/api/recharge/request",
+            {"plan": "trial_single_language", "payment_method": "wechat"},
+            session,
         )
         self.assertEqual(status, 400, invalid)
         self.assertEqual(invalid["code"], "trial_language_invalid")
         status, created = self.request(
             "POST",
             "/api/recharge/request",
-            {"plan": "trial_single_language", "trial_language": "english"},
+            {
+                "plan": "trial_single_language",
+                "payment_method": "wechat",
+                "trial_language": "english",
+            },
             session,
         )
         self.assertEqual(status, 201, created)
@@ -309,7 +333,11 @@ class AccountApiTests(unittest.TestCase):
             "snippets": [{"title": "初一词汇", "description": "school study future careful important"}],
             "sources": [{"title": "课程词汇", "url": "https://example.test/words"}],
         }
-        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+        with mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "search", return_value=[]
+        ), mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "accepts_stage", return_value=True
+        ), mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
             "server.call_ollama",
             return_value=json.dumps({"words": ["school", "study", "future", "careful", "important"]}),
         ):
@@ -344,7 +372,11 @@ class AccountApiTests(unittest.TestCase):
             json.dumps({"words": ["school", "study", "future"]}),
             json.dumps({"words": ["future", "careful", "important"]}),
         ]
-        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+        with mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "search", return_value=[]
+        ), mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "accepts_stage", return_value=True
+        ), mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
             "server.call_ollama", side_effect=responses
         ):
             status, data = self.request(
@@ -372,7 +404,11 @@ class AccountApiTests(unittest.TestCase):
             available = [word for word in pool if word.casefold() not in excluded]
             return available[:count]
 
-        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+        with mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "search", return_value=[]
+        ), mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "accepts_stage", return_value=True
+        ), mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
             "server.ai_vocabulary_batch", side_effect=batch
         ) as generate:
             status, data = self.request(
@@ -394,7 +430,9 @@ class AccountApiTests(unittest.TestCase):
             "snippets": [],
             "sources": [{"title": "Jisho JLPT N5", "url": "https://jisho.org/search/%23jlpt-n5"}],
         }
-        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+        with mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "search", return_value=[]
+        ), mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
             "server.call_ollama", return_value=json.dumps({"words": ["食べる", "東京", "見る"]})
         ):
             status, data = self.request(
@@ -416,7 +454,9 @@ class AccountApiTests(unittest.TestCase):
             "snippets": [],
             "sources": [{"title": "Jisho JLPT N5", "url": "https://jisho.org/search/%23jlpt-n5"}],
         }
-        with mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
+        with mock.patch.object(
+            server.LOCAL_VOCABULARY_INDEX, "search", return_value=[]
+        ), mock.patch("server.search_vocabulary_sources", return_value=source), mock.patch(
             "server.call_ollama", return_value=json.dumps({"words": ["学校", "食べる"]})
         ):
             status, data = self.request(
@@ -613,21 +653,21 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         status, _ = self.request("GET", "/api/me", session=session)
         self.assertEqual(status, 401)
-        status, _ = self.request("POST", "/api/login", {"username": username, "secret": "ABC123"})
+        status, _ = self.request("POST", "/api/login", {"username": username, "secret": "ABC1234"})
         self.assertEqual(status, 403)
         self.request("POST", "/api/admin/ban", {"user_id": account["id"], "banned": False}, self.admin_session)
-        _, login = self.request("POST", "/api/login", {"username": username, "secret": "ABC123"})
+        _, login = self.request("POST", "/api/login", {"username": username, "secret": "ABC1234"})
         session = login["session"]
         status, _ = self.request(
-            "POST", "/api/admin/secret", {"user_id": account["id"], "secret": "NEW789"}, self.admin_session
+            "POST", "/api/admin/secret", {"user_id": account["id"], "secret": "NEW7890"}, self.admin_session
         )
         self.assertEqual(status, 200)
         status, _ = self.request("GET", "/api/me", session=session)
         self.assertEqual(status, 401)
-        status, login = self.request("POST", "/api/login", {"username": username, "secret": "NEW789"})
+        status, login = self.request("POST", "/api/login", {"username": username, "secret": "NEW7890"})
         self.assertEqual(status, 200)
         status, _ = self.request(
-            "POST", "/api/account/delete", {"secret": "NEW789"}, login["session"]
+            "POST", "/api/account/delete", {"secret": "NEW7890"}, login["session"]
         )
         self.assertEqual(status, 200)
         text = (ROOT / "users.txt").read_text(encoding="utf-8")
@@ -635,7 +675,7 @@ class AccountApiTests(unittest.TestCase):
 
     def test_recharge_requires_manual_admin_processing_and_deduplicates(self):
         _, account, session = self.new_user()
-        payload = {"plan": "all_access_monthly"}
+        payload = {"plan": "all_access_monthly", "payment_method": "wechat"}
         status, first = self.request("POST", "/api/recharge/request", payload, session)
         self.assertEqual(status, 201, first)
         status, second = self.request("POST", "/api/recharge/request", payload, session)
@@ -643,6 +683,21 @@ class AccountApiTests(unittest.TestCase):
         self.assertFalse(second["created"])
         status, me = self.request("GET", "/api/me", session=session)
         self.assertEqual(me["account"]["membership"], "free")
+        status, processed = self.request(
+            "POST",
+            "/api/admin/recharge/process",
+            {"request_id": first["request"]["id"], "action": "approve"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 409, processed)
+        self.assertEqual(processed["code"], "request_already_processed")
+        status, confirmed = self.request(
+            "POST",
+            "/api/recharge/confirm",
+            {"request_id": first["request"]["id"]},
+            session,
+        )
+        self.assertEqual(status, 200, confirmed)
         status, processed = self.request(
             "POST",
             "/api/admin/recharge/process",
@@ -673,25 +728,40 @@ class AccountApiTests(unittest.TestCase):
         status, plans = self.request("GET", "/api/membership/plans")
         self.assertEqual(status, 200, plans)
         by_code = {item["code"]: item for item in plans["plans"]}
-        self.assertEqual(by_code["japanese_lifetime"]["price_cents"], 7000)
         self.assertEqual(by_code["trial_single_language"]["price_cents"], 800)
         self.assertEqual(by_code["tools_monthly"]["price_cents"], 2000)
         self.assertEqual(by_code["dual_language_monthly"]["price_cents"], 2000)
         self.assertEqual(by_code["all_access_monthly"]["price_cents"], 3000)
+        self.assertEqual(by_code["dual_language_lifetime"]["price_cents"], 7000)
         self.assertEqual(by_code["all_access_lifetime"]["price_cents"], 10000)
-        self.assertNotIn("tools_access", by_code["japanese_lifetime"]["entitlements"])
         self.assertIn("tools_access", by_code["tools_monthly"]["entitlements"])
         self.assertNotIn("language_all_access", by_code["tools_monthly"]["entitlements"])
         self.assertIn("language_all_access", by_code["dual_language_monthly"]["entitlements"])
         self.assertNotIn("tools_access", by_code["dual_language_monthly"]["entitlements"])
+        self.assertIn("language_all_access", by_code["dual_language_lifetime"]["entitlements"])
+        self.assertNotIn("tools_access", by_code["dual_language_lifetime"]["entitlements"])
+        self.assertEqual(
+            {item["code"] for item in plans["payment_methods"]},
+            {"wechat", "alipay"},
+        )
         self.assertEqual(
             set(by_code),
-            {"trial_single_language", "tools_monthly", "dual_language_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"},
+            {
+                "trial_single_language",
+                "tools_monthly",
+                "dual_language_monthly",
+                "all_access_monthly",
+                "dual_language_lifetime",
+                "all_access_lifetime",
+            },
         )
 
         _, _, session = self.new_user()
         status, order = self.request(
-            "POST", "/api/recharge/request", {"plan": "all_access_lifetime"}, session
+            "POST",
+            "/api/recharge/request",
+            {"plan": "all_access_lifetime", "payment_method": "alipay"},
+            session,
         )
         self.assertEqual(status, 201, order)
         self.assertEqual(order["request"]["amount_cents"], 10000)
@@ -704,6 +774,186 @@ class AccountApiTests(unittest.TestCase):
         status, legacy = self.request("POST", "/api/recharge/request", {"plan": "monthly"}, session)
         self.assertEqual(status, 400, legacy)
         self.assertEqual(legacy["code"], "plan_invalid")
+
+    def test_payment_order_uses_server_locked_snapshots_and_public_fields(self):
+        _, _, session = self.new_user()
+        status, invalid = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "all_access_monthly", "payment_method": "cash"},
+            session,
+        )
+        self.assertEqual(status, 400, invalid)
+        self.assertEqual(invalid["code"], "payment_method_invalid")
+
+        status, created = self.request(
+            "POST",
+            "/api/recharge/request",
+            {
+                "plan": "all_access_monthly",
+                "payment_method": "wechat",
+                "amount_cents": 1,
+                "currency": "USD",
+                "plan_name": "tampered",
+                "qr_resource_id": "../../private.png",
+                "contact": "attacker-controlled",
+            },
+            session,
+        )
+        self.assertEqual(status, 201, created)
+        order = created["request"]
+        self.assertEqual(order["amount_cents"], 3000)
+        self.assertEqual(order["currency"], "CNY")
+        self.assertEqual(order["payment_method"], "wechat")
+        self.assertEqual(
+            order["qr_resource_id"],
+            "qr-v1:wechat:all_access_monthly",
+        )
+        serialized = json.dumps(order, ensure_ascii=False)
+        for forbidden in (
+            "contact",
+            "attacker-controlled",
+            "../../",
+            str(PAYMENT_QR_ROOT),
+            "private.png",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_payment_qr_is_authenticated_owned_status_gated_and_private(self):
+        _, _, session = self.new_user()
+        _, _, other_session = self.new_user()
+        status, created = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "tools_monthly", "payment_method": "alipay"},
+            session,
+        )
+        self.assertEqual(status, 201, created)
+        request_id = created["request"]["id"]
+        qr_path = f"/api/recharge/qr?request_id={request_id}"
+
+        status, _headers, _body = self.request_raw("GET", qr_path)
+        self.assertEqual(status, 401)
+        status, _headers, _body = self.request_raw(
+            "GET", qr_path, session=other_session
+        )
+        self.assertEqual(status, 404)
+
+        status, headers, body = self.request_raw("GET", qr_path, session=session)
+        self.assertEqual(status, 200)
+        normalized_headers = {key.lower(): value for key, value in headers.items()}
+        self.assertEqual(normalized_headers["content-type"], "image/png")
+        self.assertIn("private", normalized_headers["cache-control"])
+        self.assertIn("no-store", normalized_headers["cache-control"])
+        self.assertEqual(normalized_headers["pragma"], "no-cache")
+        self.assertEqual(
+            normalized_headers["cross-origin-resource-policy"],
+            "same-origin",
+        )
+        self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+
+        status, _confirmed = self.request(
+            "POST",
+            "/api/recharge/confirm",
+            {"request_id": request_id},
+            session,
+        )
+        self.assertEqual(status, 200)
+        status, _headers, body = self.request_raw("GET", qr_path, session=session)
+        self.assertEqual(status, 200)
+        self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+        status, _processed = self.request(
+            "POST",
+            "/api/admin/recharge/process",
+            {"request_id": request_id, "action": "reject", "admin_note": "test"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200)
+        status, _headers, body = self.request_raw("GET", qr_path, session=session)
+        self.assertEqual(status, 409)
+        self.assertEqual(json.loads(body.decode("utf-8"))["code"], "payment_qr_status_invalid")
+
+    def test_payment_method_change_requires_pending_order_cancellation(self):
+        _, _, session = self.new_user()
+        status, first = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "dual_language_monthly", "payment_method": "wechat"},
+            session,
+        )
+        self.assertEqual(status, 201, first)
+        status, conflict = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "dual_language_monthly", "payment_method": "alipay"},
+            session,
+        )
+        self.assertEqual(status, 409, conflict)
+        self.assertEqual(conflict["code"], "payment_order_conflict")
+        status, cancelled = self.request(
+            "POST",
+            "/api/recharge/cancel",
+            {"request_id": first["request"]["id"]},
+            session,
+        )
+        self.assertEqual(status, 200, cancelled)
+        self.assertEqual(cancelled["request"]["status"], "cancelled")
+        status, replacement = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "dual_language_monthly", "payment_method": "alipay"},
+            session,
+        )
+        self.assertEqual(status, 201, replacement)
+        self.assertNotEqual(first["request"]["id"], replacement["request"]["id"])
+
+    def test_qr_resource_mismatch_is_rejected_without_path_disclosure(self):
+        _, _, session = self.new_user()
+        status, created = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "all_access_lifetime", "payment_method": "wechat"},
+            session,
+        )
+        self.assertEqual(status, 201, created)
+        request_id = created["request"]["id"]
+        with server.ACCOUNT_STORE.connect() as connection:
+            connection.execute(
+                "UPDATE payment_requests SET qr_resource_id = ? WHERE id = ?",
+                ("qr-v1:wechat:tools_monthly", request_id),
+            )
+        status, _headers, body = self.request_raw(
+            "GET",
+            f"/api/recharge/qr?request_id={request_id}",
+            session=session,
+        )
+        self.assertEqual(status, 409)
+        error = json.loads(body.decode("utf-8"))
+        self.assertEqual(error["code"], "payment_qr_mismatch")
+        self.assertNotIn(str(PAYMENT_QR_ROOT), json.dumps(error, ensure_ascii=False))
+
+    def test_local_search_query_never_calls_network_or_ollama(self):
+        with mock.patch("server.search_vocabulary_sources") as online, mock.patch(
+            "server.call_ollama"
+        ) as ollama:
+            status, data = self.request(
+                "POST",
+                "/api/vocabulary/suggest",
+                {
+                    "language": "english",
+                    "level": "primary_3",
+                    "query": "apples",
+                    "count": 5,
+                },
+                self.admin_session,
+            )
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["selection_source"], "local")
+        self.assertFalse(data["online"])
+        self.assertEqual(data["words"][0], "apple")
+        self.assertEqual(data["matches"][0]["match_type"], "morphology")
+        online.assert_not_called()
+        ollama.assert_not_called()
 
     def test_tools_access_uses_merged_server_entitlements(self):
         _, account, session = self.new_user()
@@ -795,12 +1045,12 @@ class AccountApiTests(unittest.TestCase):
         status, data = self.request(
             "POST",
             "/api/account/secret",
-            {"current_secret": "ABC123", "new_secret": "Changed123", "confirm_secret": "Different123"},
+            {"current_secret": "ABC1234", "new_secret": "Changed123", "confirm_secret": "Different123"},
             session,
         )
         self.assertEqual(status, 400, data)
         self.assertEqual(data["code"], "secret_mismatch")
-        status, _ = self.request("POST", "/api/login", {"username": username, "secret": "ABC123"})
+        status, _ = self.request("POST", "/api/login", {"username": username, "secret": "ABC1234"})
         self.assertEqual(status, 200)
 
     def test_tool_history_handles_concurrent_writes(self):

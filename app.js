@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-16-quality15";
+const APP_VERSION = "2026-07-27-payment-search";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -104,8 +104,15 @@ let currentProject = "";
 let selectedRechargePlan = "";
 let currentPaymentOrder = null;
 let membershipPlans = [];
+let paymentMethods = [];
+let selectedPaymentMethod = "";
+let paymentQrObjectUrl = "";
+let paymentQrController = null;
 let membershipPlansPromise = null;
 let membershipModalLoadSequence = 0;
+let vocabularySearchTimer = null;
+let vocabularySearchController = null;
+let vocabularySearchSequence = 0;
 let toolsInitialized = false;
 let routeBusy = false;
 let adminUsers = [];
@@ -558,6 +565,8 @@ function setActiveWrongBook(scope, book) {
 }
 
 function clearSession() {
+  releasePaymentQr();
+  cancelVocabularySearch();
   state.session = "";
   state.account = null;
   state.quizSession = "";
@@ -583,10 +592,11 @@ function membershipLabel(value) {
     lifetime: "历史双语言永久会员",
     legacy_all_monthly: "历史双语言包月会员",
     legacy_all_lifetime: "历史双语言永久会员",
-    japanese_lifetime: "日语单项永久会员",
+    japanese_lifetime: "历史日语单项永久会员",
     tools_monthly: "工具箱包月会员",
     dual_language_monthly: "双语言测试包月会员",
-    all_access_monthly: "全功能月度会员",
+    dual_language_lifetime: "双语言双项永久会员",
+    all_access_monthly: "全功能包月会员",
     all_access_lifetime: "全功能永久会员",
     super_admin: "超级管理员",
   }[value] || "普通用户";
@@ -789,6 +799,7 @@ function closeModal(id, immediate = false) {
     modal.setAttribute("aria-hidden", "true");
     if (id === "accountModal") clearOwnSecretEditor();
     if (id === "adminEditModal") clearAdminSecretEditor();
+    if (id === "membershipModal") releasePaymentQr();
     if (!document.querySelector(".modal-layer:not(.hidden)")) {
       document.body.classList.remove("modal-open");
       if ($("appShell")) $("appShell").inert = false;
@@ -867,6 +878,113 @@ function planDetails(plan) {
     : ["请选择套餐", "", ""];
 }
 
+function paymentMethodLabel(value) {
+  return paymentMethods.find((item) => item.code === value)?.name || {
+    wechat: "微信支付",
+    alipay: "支付宝",
+  }[value] || value || "未选择";
+}
+
+function renderPaymentMethods() {
+  const list = $("paymentMethodList");
+  if (!list) return;
+  const methods = paymentMethods.length ? paymentMethods : [
+    { code: "wechat", name: "微信支付" },
+    { code: "alipay", name: "支付宝" },
+  ];
+  if (!methods.some((item) => item.code === selectedPaymentMethod)) {
+    selectedPaymentMethod = methods[0]?.code || "";
+  }
+  list.innerHTML = methods.map((item) => `<label>
+    <input type="radio" name="paymentMethod" value="${escapeHtml(item.code)}" ${item.code === selectedPaymentMethod ? "checked" : ""} />
+    <span>${escapeHtml(item.name)}</span>
+  </label>`).join("");
+  list.querySelectorAll('input[name="paymentMethod"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      selectedPaymentMethod = input.value;
+      const [name, price, description] = planDetails(selectedRechargePlan);
+      $("purchaseSummary").textContent = `${name} · ${price} · ${paymentMethodLabel(selectedPaymentMethod)} · ${description}`;
+      $("submitRechargeBtn").disabled = !selectedRechargePlan || !selectedPaymentMethod;
+    });
+  });
+}
+
+function setPaymentControlsLocked(locked) {
+  document.querySelectorAll("[data-plan]").forEach((button) => {
+    button.disabled = locked;
+  });
+  document.querySelectorAll('input[name="paymentMethod"]').forEach((input) => {
+    input.disabled = locked;
+  });
+  if ($("trialLanguageSelect")) $("trialLanguageSelect").disabled = locked;
+}
+
+function releasePaymentQr() {
+  if (paymentQrController) {
+    paymentQrController.abort();
+    paymentQrController = null;
+  }
+  if (paymentQrObjectUrl) {
+    URL.revokeObjectURL(paymentQrObjectUrl);
+    paymentQrObjectUrl = "";
+  }
+  const image = $("paymentQrImage");
+  if (image) image.removeAttribute("src");
+  $("paymentQrWrap")?.classList.add("hidden");
+  if ($("paymentQrMessage")) $("paymentQrMessage").textContent = "";
+}
+
+async function loadPaymentQr(record) {
+  releasePaymentQr();
+  if (!record?.id || !["pending_payment", "user_paid", "processing"].includes(record.status)) return;
+  const wrap = $("paymentQrWrap");
+  const image = $("paymentQrImage");
+  const message = $("paymentQrMessage");
+  wrap.classList.remove("hidden");
+  image.classList.add("hidden");
+  message.textContent = "正在安全加载当前订单二维码…";
+  const controller = new AbortController();
+  paymentQrController = controller;
+  try {
+    const response = await fetchWithTimeout(
+      `/api/recharge/qr?request_id=${encodeURIComponent(record.id)}`,
+      {
+        method: "GET",
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { "X-Session-Token": state.session },
+        controller,
+      },
+      API_GET_TIMEOUT_MS,
+    );
+    if (response.status === 401) {
+      clearSession();
+      showAuth("登录已失效，请重新登录", { replace: true });
+      return;
+    }
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || "二维码暂时无法加载");
+    }
+    const contentType = response.headers.get("Content-Type") || "";
+    if (!contentType.startsWith("image/png")) throw new Error("二维码资源格式无效");
+    const blob = await response.blob();
+    if (!blob.size || blob.size > 3 * 1024 * 1024) throw new Error("二维码资源大小无效");
+    if (currentPaymentOrder?.id !== record.id || controller.signal.aborted) return;
+    paymentQrObjectUrl = URL.createObjectURL(blob);
+    image.src = paymentQrObjectUrl;
+    await image.decode();
+    image.classList.remove("hidden");
+    message.textContent = "请核对金额、套餐和支付方式后扫码。";
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      message.textContent = error.message;
+    }
+  } finally {
+    if (paymentQrController === controller) paymentQrController = null;
+  }
+}
+
 function renderMembershipPlans() {
   const list = $("membershipPlanList");
   if (list) {
@@ -875,6 +993,7 @@ function renderMembershipPlans() {
     </button>`).join("");
     list.querySelectorAll("[data-plan]").forEach((button) => button.addEventListener("click", () => selectRechargePlan(button.dataset.plan)));
   }
+  renderPaymentMethods();
   $("membershipPlanRecovery")?.classList.add("hidden");
 }
 
@@ -898,7 +1017,8 @@ async function loadMembershipPlans(force = false) {
   membershipPlansPromise = (async () => {
     const data = await requestJsonGet("/api/membership/plans", { timeoutMs: STATUS_TIMEOUT_MS });
     if (!Array.isArray(data.plans) || !data.plans.length) throw new Error("服务器没有返回可购买的会员方案");
-    const order = ["trial_single_language", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "all_access_monthly", "all_access_lifetime"];
+    paymentMethods = Array.isArray(data.payment_methods) ? data.payment_methods.filter((item) => ["wechat", "alipay"].includes(item.code)) : [];
+    const order = ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "dual_language_lifetime", "all_access_lifetime"];
     const rank = (code) => {
       const index = order.indexOf(code);
       return index < 0 ? order.length : index;
@@ -937,7 +1057,8 @@ async function openMembershipModal(options = {}) {
     return;
   }
   const sequence = ++membershipModalLoadSequence;
-  $("copyWechatBtn").textContent = "复制微信号";
+  releasePaymentQr();
+  currentPaymentOrder = null;
   selectRechargePlan("");
   $("rechargeMessage").textContent = "正在加载套餐与订单状态…";
   openModal("membershipModal");
@@ -948,7 +1069,7 @@ async function openMembershipModal(options = {}) {
     if (sequence !== membershipModalLoadSequence) return membershipPlans;
     const orders = await apiGet("/api/recharge/mine");
     if (sequence !== membershipModalLoadSequence) return membershipPlans;
-    openOrder = (orders.requests || []).find((item) => ["pending_payment", "user_paid"].includes(item.status)) || null;
+    openOrder = (orders.requests || []).find((item) => ["pending_payment", "user_paid", "processing"].includes(item.status)) || null;
   } catch (error) {
     if (sequence !== membershipModalLoadSequence) return membershipPlans;
     loadError = error.message;
@@ -964,9 +1085,11 @@ async function openMembershipModal(options = {}) {
   selectRechargePlan(planCode);
   if (openOrder) {
     renderPaymentOrder(openOrder);
-    $("rechargeMessage").textContent = openOrder.status === "user_paid"
-      ? "已通知管理员，正在等待人工核对付款。"
-      : "你有一个尚未付款的订单。请按订单备注付款后点击“我已付款”。";
+    $("rechargeMessage").textContent = {
+      pending_payment: "订单金额和支付方式已锁定。请扫码付款，再点击“我已付款”。",
+      user_paid: "已通知管理员，正在等待人工核对付款。",
+      processing: "管理员正在核对付款，请稍候。",
+    }[openOrder.status] || "订单处理中。";
   } else if (loadError) {
     $("rechargeMessage").textContent = loadError;
   } else {
@@ -976,8 +1099,10 @@ async function openMembershipModal(options = {}) {
 }
 
 function selectRechargePlan(plan) {
+  releasePaymentQr();
   selectedRechargePlan = plan;
   currentPaymentOrder = null;
+  setPaymentControlsLocked(false);
   document.querySelectorAll("[data-plan]").forEach((button) => {
     button.classList.toggle("selected", button.dataset.plan === plan);
   });
@@ -985,10 +1110,11 @@ function selectRechargePlan(plan) {
   $("trialLanguageField")?.classList.toggle("hidden", !isSingleLanguage);
   $("trialLanguageSelect").required = isSingleLanguage;
   const [name, price, description] = planDetails(plan);
-  $("purchaseSummary").textContent = `${name} · ${price} · ${description}`;
-  $("submitRechargeBtn").disabled = !plan;
-  $("submitRechargeBtn").textContent = "生成付款订单";
+  $("purchaseSummary").textContent = `${name} · ${price} · ${paymentMethodLabel(selectedPaymentMethod)} · ${description}`;
+  $("submitRechargeBtn").disabled = !plan || !selectedPaymentMethod;
+  $("submitRechargeBtn").textContent = "确认订单并显示二维码";
   $("confirmPaymentBtn").classList.add("hidden");
+  $("cancelPaymentOrderBtn").classList.add("hidden");
   $("paymentOrderBox").classList.add("hidden");
   $("rechargeMessage").textContent = "";
 }
@@ -997,32 +1123,48 @@ function paymentStatusLabel(status) {
   return {
     pending_payment: "等待付款",
     user_paid: "已通知管理员，等待确认",
+    processing: "管理员核对中",
     approved: "已开通",
     rejected: "已拒绝",
+    expired: "订单已过期",
+    cancelled: "已取消",
   }[status] || status || "未知";
 }
 
 function renderPaymentOrder(record) {
   if (!record) return;
   currentPaymentOrder = record;
+  selectedRechargePlan = record.plan_code;
+  selectedPaymentMethod = record.payment_method;
+  renderPaymentMethods();
+  setPaymentControlsLocked(true);
+  document.querySelectorAll("[data-plan]").forEach((button) => {
+    button.classList.toggle("selected", button.dataset.plan === record.plan_code);
+  });
   const plan = membershipPlans.find((item) => item.code === record.plan_code);
   $("paymentUsername").textContent = record.username || state.account?.username || "-";
-  $("paymentPlan").textContent = plan?.name || membershipLabel(record.plan_code);
+  $("paymentPlan").textContent = record.plan_name || plan?.name || membershipLabel(record.plan_code);
   const languageLabel = { english: "英语", japanese: "日语" }[record.trial_language] || "";
   $("paymentLanguageTerm").classList.toggle("hidden", !languageLabel);
   $("paymentLanguage").classList.toggle("hidden", !languageLabel);
   $("paymentLanguage").textContent = languageLabel || "-";
   if (languageLabel) $("trialLanguageSelect").value = record.trial_language;
+  $("paymentMethod").textContent = paymentMethodLabel(record.payment_method);
   $("paymentAmount").textContent = `${(Number(record.amount_cents || 0) / 100).toFixed(2)} ${record.currency || "CNY"}`;
   $("paymentOrderNumber").textContent = record.order_number || "-";
   $("paymentNote").textContent = record.payment_note || "-";
   $("paymentStatus").textContent = paymentStatusLabel(record.status);
+  $("paymentQrLabel").textContent = `请使用${paymentMethodLabel(record.payment_method)}扫码付款`;
   $("paymentOrderBox").classList.remove("hidden");
   $("confirmPaymentBtn").classList.toggle("hidden", record.status !== "pending_payment");
-  $("submitRechargeBtn").textContent = record.status === "pending_payment"
-    ? "订单已生成"
-    : record.status === "user_paid" ? "等待管理员确认" : "生成付款订单";
-  $("submitRechargeBtn").disabled = record.status === "pending_payment" || record.status === "user_paid";
+  $("cancelPaymentOrderBtn").classList.toggle("hidden", record.status !== "pending_payment");
+  $("submitRechargeBtn").textContent = {
+    pending_payment: "订单已锁定",
+    user_paid: "等待管理员确认",
+    processing: "管理员核对中",
+  }[record.status] || "确认订单并显示二维码";
+  $("submitRechargeBtn").disabled = ["pending_payment", "user_paid", "processing"].includes(record.status);
+  loadPaymentQr(record);
 }
 
 async function submitRechargeRequest() {
@@ -1037,16 +1179,35 @@ async function submitRechargeRequest() {
   try {
     const data = await api("/api/recharge/request", {
       plan: selectedRechargePlan,
+      payment_method: selectedPaymentMethod,
       trial_language: selectedRechargePlan === "trial_single_language" ? $("trialLanguageSelect").value : "",
     });
     renderPaymentOrder(data.request);
     $("rechargeMessage").textContent = data.created
-      ? "订单已生成。付款时请填写页面中的备注，付款后再点“我已付款”。"
+      ? "订单已生成并锁定。请核对二维码、金额与备注，付款后再点“我已付款”。"
       : "你已有未完成订单，已为你显示原订单。";
   } catch (error) {
     $("rechargeMessage").textContent = error.message;
   } finally {
-    button.disabled = !selectedRechargePlan || ["pending_payment", "user_paid"].includes(currentPaymentOrder?.status);
+    button.disabled = !selectedRechargePlan || !selectedPaymentMethod || ["pending_payment", "user_paid", "processing"].includes(currentPaymentOrder?.status);
+  }
+}
+
+async function cancelRechargeOrder() {
+  if (!currentPaymentOrder?.id || currentPaymentOrder.status !== "pending_payment") return;
+  const button = $("cancelPaymentOrderBtn");
+  button.disabled = true;
+  try {
+    await api("/api/recharge/cancel", { request_id: currentPaymentOrder.id });
+    const retainedPlan = currentPaymentOrder.plan_code;
+    releasePaymentQr();
+    currentPaymentOrder = null;
+    selectRechargePlan(retainedPlan);
+    $("rechargeMessage").textContent = "原订单已取消。现在可以更换套餐或支付方式并创建新订单。";
+  } catch (error) {
+    $("rechargeMessage").textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1295,9 +1456,12 @@ function rechargeStatusLabel(status) {
     pending: "待处理",
     pending_payment: "等待用户付款",
     user_paid: "用户已确认付款",
+    processing: "核对处理中",
     activated: "已开通",
     approved: "已开通",
     rejected: "已拒绝",
+    expired: "已过期",
+    cancelled: "用户已取消",
   }[status] || status || "未知";
 }
 
@@ -1339,15 +1503,19 @@ function renderAdminRecharge(requests) {
   const list = $("adminRechargeList");
   list.innerHTML = (requests || []).map((request) => `<article class="admin-user-card" data-request-id="${escapeHtml(request.id)}">
     <div class="admin-user-identity"><h3>${escapeHtml(request.username)}</h3><p class="admin-user-id">${escapeHtml(request.order_number || request.id)}</p><p class="admin-last-login">申请：${escapeHtml(formatLocalDateTime(request.requested_at, "未知"))}</p></div>
-    <div class="admin-user-facts"><p><span>套餐</span><strong>${escapeHtml(membershipLabel(request.plan_code || request.plan))}</strong></p><p><span>金额</span><strong>${escapeHtml(`${(Number(request.amount_cents || 0) / 100).toFixed(2)} ${request.currency || "CNY"}`)}</strong></p><p><span>付款备注</span><strong>${escapeHtml(request.payment_note || "-")}</strong></p></div>
+    <div class="admin-user-facts"><p><span>套餐</span><strong>${escapeHtml(request.plan_name || membershipLabel(request.plan_code || request.plan))}</strong></p><p><span>支付方式</span><strong>${escapeHtml(paymentMethodLabel(request.payment_method))}</strong></p><p><span>金额</span><strong>${escapeHtml(`${(Number(request.amount_cents || 0) / 100).toFixed(2)} ${request.currency || "CNY"}`)}</strong></p><p><span>付款备注</span><strong>${escapeHtml(request.payment_note || "-")}</strong></p></div>
     <div class="admin-request-status"><span>状态</span><strong>${escapeHtml(rechargeStatusLabel(request.status))}</strong>${request.user_confirmed_at ? `<small>用户确认：${escapeHtml(formatLocalDateTime(request.user_confirmed_at))}</small>` : ""}</div>
-    <div class="action-row compact admin-user-actions">${["pending_payment", "user_paid", "pending"].includes(request.status) ? '<button data-recharge-approve type="button">确认付款并开通</button><button data-recharge-reject type="button">拒绝</button>' : ""}</div>
+    <div class="action-row compact admin-user-actions">${request.status === "user_paid" ? '<button data-recharge-approve type="button">确认付款并开通</button><button data-recharge-reject type="button">拒绝</button>' : ""}</div>
   </article>`).join("") || "<p>暂无充值申请</p>";
   list.querySelectorAll("[data-recharge-approve], [data-recharge-reject]").forEach((button) => button.addEventListener("click", () => {
     const requestId = button.closest("[data-request-id]").dataset.requestId;
     const action = button.hasAttribute("data-recharge-approve") ? "approve" : "reject";
     askConfirmation(action === "approve" ? "确认开通该会员套餐？" : "确认拒绝该充值申请？", async () => {
-      await api("/api/admin/recharge/process", { request_id: requestId, action });
+      await api("/api/admin/recharge/process", {
+        request_id: requestId,
+        action,
+        admin_note: action === "approve" ? "管理员人工核对付款通过" : "管理员人工核对未通过",
+      });
       await loadAdminData();
     });
   }));
@@ -1491,7 +1659,7 @@ function updateAdminMembershipFields(fillDefaults = true) {
   const action = $("adminMembershipAction").value;
   const membership = $("adminMembershipSelect").value;
   const cancelling = action === "cancel" || action === "cancel_all";
-  const lifetime = ["japanese_lifetime", "all_access_lifetime"].includes(membership);
+  const lifetime = ["japanese_lifetime", "dual_language_lifetime", "all_access_lifetime"].includes(membership);
   const singleLanguage = membership === "trial_single_language";
   const fieldsDisabled = cancelling;
   $("adminTrialLanguageField")?.classList.toggle("hidden", cancelling || !singleLanguage);
@@ -1533,10 +1701,10 @@ function openAdminEditor(userId) {
   $("adminEditUserId").value = user.id;
   $("adminEditTitle").textContent = `编辑 ${user.username}`;
   const preferred = (user.memberships || [])
-    .filter((item) => ["all_access_lifetime", "all_access_monthly", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "trial_single_language"].includes(item.plan_code))
+    .filter((item) => ["all_access_lifetime", "dual_language_lifetime", "all_access_monthly", "dual_language_monthly", "tools_monthly", "japanese_lifetime", "trial_single_language"].includes(item.plan_code))
     .sort((left, right) => Number(right.priority || 0) - Number(left.priority || 0))[0];
   $("adminMembershipAction").value = "grant";
-  $("adminMembershipSelect").value = preferred?.plan_code || "japanese_lifetime";
+  $("adminMembershipSelect").value = preferred?.plan_code || "trial_single_language";
   $("adminMembershipStart").value = membershipDateValue(preferred?.starts_at);
   $("adminMembershipExpires").value = membershipDateValue(preferred?.expires_at);
   $("adminTrialLanguageSelect").value = preferred?.metadata?.language || "";
@@ -2144,6 +2312,11 @@ function updateLanguageUi() {
     ? "输入日语词表，每行一个词；汉字或假名都可以"
     : "输入英语词表，每行一个词";
   updateAiSuggestionControls();
+  const searchInput = $("aiSearchInput");
+  if (searchInput) {
+    searchInput.placeholder = language === "japanese" ? "输入日语词或假名前缀" : "输入英语单词或前缀";
+    if (searchInput.value.trim()) scheduleVocabularySearch();
+  }
 }
 
 function aiSuggestionSettingsKey(language = state.quizLanguage) {
@@ -3204,6 +3377,105 @@ function formatWordsForInput(words) {
   return words.map(formatWordInputEntry).join("\n");
 }
 
+function cancelVocabularySearch() {
+  if (vocabularySearchTimer) {
+    window.clearTimeout(vocabularySearchTimer);
+    vocabularySearchTimer = null;
+  }
+  if (vocabularySearchController) {
+    vocabularySearchController.abort();
+    vocabularySearchController = null;
+  }
+  vocabularySearchSequence += 1;
+}
+
+function addVocabularySearchWord(word) {
+  const language = ensureQuizLanguage();
+  if (!language) return;
+  const current = analyzeWordList(parseWords(), language).valid;
+  const seen = new Set(current.map((item) => wordIdentity(item, language)));
+  if (seen.has(wordIdentity(word, language))) {
+    $("aiSuggestMessage").textContent = `“${word}”已在词表中`;
+    return;
+  }
+  current.push(word);
+  $("wordInput").value = formatWordsForInput(current);
+  saveCurrentWordDraft();
+  updateStats();
+  $("aiSuggestMessage").classList.remove("error");
+  $("aiSuggestMessage").textContent = `已将“${word}”加入词表`;
+}
+
+function renderVocabularySearchResults(matches, query) {
+  const target = $("aiSearchResults");
+  if (!target) return;
+  const values = Array.isArray(matches) ? matches : [];
+  if (!query || !values.length) {
+    target.replaceChildren();
+    target.classList.add("hidden");
+    if (query) $("aiSuggestMessage").textContent = "当前等级没有匹配词，可尝试缩短关键词";
+    return;
+  }
+  target.innerHTML = values.map((item) => `<button type="button" data-vocabulary-word="${escapeHtml(item.word)}" title="${escapeHtml(item.match_type || "匹配")}">${escapeHtml(item.word)}</button>`).join("");
+  target.querySelectorAll("[data-vocabulary-word]").forEach((button) => {
+    button.addEventListener("click", () => addVocabularySearchWord(button.dataset.vocabularyWord));
+  });
+  target.classList.remove("hidden");
+}
+
+async function runVocabularySearch() {
+  const input = $("aiSearchInput");
+  const query = input?.value.trim() || "";
+  if (!query) {
+    cancelVocabularySearch();
+    renderVocabularySearchResults([], "");
+    return;
+  }
+  const language = ensureQuizLanguage();
+  if (!language || !state.session || !state.account) return;
+  if (!backendAvailable && !(await ensureBackendConnection())) return;
+  if (vocabularySearchController) vocabularySearchController.abort();
+  const controller = new AbortController();
+  const sequence = ++vocabularySearchSequence;
+  vocabularySearchController = controller;
+  $("aiSuggestMessage").classList.remove("error");
+  $("aiSuggestMessage").textContent = "正在本地分级索引中搜索…";
+  try {
+    const data = await api(
+      "/api/vocabulary/suggest",
+      {
+        language,
+        level: $("aiLevelSelect").value,
+        count: 12,
+        query,
+        exclude: [],
+      },
+      { controller, timeoutMs: 5000 },
+    );
+    if (sequence !== vocabularySearchSequence || controller.signal.aborted) return;
+    renderVocabularySearchResults(data.matches || (data.words || []).map((word) => ({ word })), query);
+    $("aiSuggestMessage").textContent = data.words?.length
+      ? `找到 ${data.words.length} 个分级匹配词，点击即可加入词表`
+      : "当前等级没有匹配词，可尝试缩短关键词";
+  } catch (error) {
+    if (error.name !== "AbortError" && sequence === vocabularySearchSequence) {
+      $("aiSuggestMessage").textContent = error.message;
+      $("aiSuggestMessage").classList.add("error");
+    }
+  } finally {
+    if (vocabularySearchController === controller) vocabularySearchController = null;
+  }
+}
+
+function scheduleVocabularySearch() {
+  if (vocabularySearchTimer) window.clearTimeout(vocabularySearchTimer);
+  if (vocabularySearchController) vocabularySearchController.abort();
+  vocabularySearchTimer = window.setTimeout(() => {
+    vocabularySearchTimer = null;
+    runVocabularySearch();
+  }, 200);
+}
+
 async function generateAiVocabulary() {
   const language = ensureQuizLanguage();
   if (!language) return;
@@ -3221,11 +3493,6 @@ async function generateAiVocabulary() {
       message.classList.add("error");
       return;
     }
-  }
-  if (!aiAvailable) {
-    message.textContent = "本地 AI 尚未启动，请运行桌面启动程序";
-    message.classList.add("error");
-    return;
   }
   const level = $("aiLevelSelect").value;
   const count = Number($("aiSuggestCount").value);
@@ -3251,12 +3518,12 @@ async function generateAiVocabulary() {
   button.disabled = true;
   button.textContent = "搜索中…";
   message.classList.remove("error");
-  message.textContent = "正在联网搜索并由本地 AI 整理词汇…";
+  message.textContent = "正在从本地分级索引选词；不足时才会联网并调用本地 AI…";
   saveAiSuggestionSettings();
   try {
     const data = await api(
       "/api/vocabulary/suggest",
-      { language, level, count, exclude: existingLanguageWords },
+      { language, level, count, exclude: existingLanguageWords, query: "" },
       { timeoutMs: 240000 },
     );
     rememberJapaneseVocabularyData(data.readings || {}, data.written_forms || {});
@@ -3274,7 +3541,7 @@ async function generateAiVocabulary() {
     $("wordInput").value = formatWordsForInput(words);
     saveCurrentWordDraft();
     updateStats();
-    const sourceText = data.online ? "联网资料与本地 AI" : "本地 AI（联网资料暂不可用）";
+    const sourceText = data.selection_source === "local" ? "本地分级索引" : "本地索引、联网资料与本地 AI";
     message.textContent = `${sourceText} 已${mode === "append" ? "追加" : "生成"} ${added.length} 个${data.level_label || ""}词汇`;
   } catch (error) {
     message.textContent = error.message;
@@ -4271,8 +4538,8 @@ async function boot() {
   $("logoutBtn").addEventListener("click", logoutAccount);
   $("submitRechargeBtn").addEventListener("click", submitRechargeRequest);
   $("confirmPaymentBtn").addEventListener("click", confirmRechargePayment);
+  $("cancelPaymentOrderBtn").addEventListener("click", cancelRechargeOrder);
   $("retryMembershipPlansBtn").addEventListener("click", reloadMembershipPlans);
-  $("copyWechatBtn").addEventListener("click", () => copyTextWithFeedback("W2009Y94J", $("copyWechatBtn")));
   $("copyOrderBtn").addEventListener("click", () => copyTextWithFeedback(currentPaymentOrder?.order_number || "", $("copyOrderBtn")));
   $("copyPaymentNoteBtn").addEventListener("click", () => copyTextWithFeedback(currentPaymentOrder?.payment_note || "", $("copyPaymentNoteBtn")));
   document.querySelectorAll("[data-close-modal]").forEach((button) => button.addEventListener("click", () => closeModal(button.dataset.closeModal)));
@@ -4334,8 +4601,12 @@ async function boot() {
   $("answerInput").addEventListener("input", clearAnswerValidation);
   $("startBtn").addEventListener("click", () => startQuiz(parseWords()));
   $("aiSuggestBtn").addEventListener("click", generateAiVocabulary);
+  $("aiSearchInput").addEventListener("input", scheduleVocabularySearch);
   ["aiLevelSelect", "aiSuggestCount", "aiSuggestMode"].forEach((id) => {
-    $(id).addEventListener("change", saveAiSuggestionSettings);
+    $(id).addEventListener("change", () => {
+      saveAiSuggestionSettings();
+      if (id === "aiLevelSelect" && $("aiSearchInput").value.trim()) scheduleVocabularySearch();
+    });
   });
   $("shuffleBtn").addEventListener("click", () => {
     $("wordInput").value = formatWordsForInput(shuffle(analyzeWordList(parseWords(), state.quizLanguage).valid));

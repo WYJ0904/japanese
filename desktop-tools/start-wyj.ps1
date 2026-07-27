@@ -7,11 +7,15 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "8.3.1"
+$LauncherVersion = "9.0.0"
 
-$FrontendRoot = "C:\Users\78252\Documents\Codex\2026-07-05\cloudflare-pages-1-zip-2-html"
+$FrontendRoot = Split-Path -Parent $PSScriptRoot
 $BackendSourceRoot = Join-Path $FrontendRoot "local-backend"
-$BackendRoot = "C:\Users\78252\Documents\Codex\2026-06-27\presentations-plugin-presentations-openai-primary-runtime\outputs\vocab-website"
+$BackendRoot = if ([string]::IsNullOrWhiteSpace($env:VOCAB_BACKEND_ROOT)) {
+    Join-Path $env:LOCALAPPDATA "WYJJapanese\backend"
+} else {
+    [Environment]::ExpandEnvironmentVariables($env:VOCAB_BACKEND_ROOT)
+}
 $DesktopToolRoot = Split-Path -Parent $PSScriptRoot
 $SiteUrl = "https://thewyj.uk"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
@@ -131,7 +135,15 @@ function Sync-BackendSource {
         New-Item -ItemType Directory -Path $BackendRoot -Force | Out-Null
     }
     $changed = $false
-    foreach ($fileName in @("server.py", "account_store.py", "membership.py", "temporary_store.py", "run.ps1")) {
+    foreach ($fileName in @(
+        "server.py",
+        "account_store.py",
+        "membership.py",
+        "payment_assets.py",
+        "temporary_store.py",
+        "vocabulary_index.py",
+        "run.ps1"
+    )) {
         $source = Join-Path $BackendSourceRoot $fileName
         $destination = Join-Path $BackendRoot $fileName
         if (-not (Test-Path -LiteralPath $source)) {
@@ -367,10 +379,13 @@ try {
         (Join-Path $BackendRoot "server.py"),
         (Join-Path $BackendRoot "account_store.py"),
         (Join-Path $BackendRoot "membership.py"),
+        (Join-Path $BackendRoot "payment_assets.py"),
         (Join-Path $BackendRoot "temporary_store.py"),
+        (Join-Path $BackendRoot "vocabulary_index.py"),
         (Join-Path $BackendRoot "migrations\001_entitlements_up.sql"),
         (Join-Path $BackendRoot "migrations\002_single_language_orders_up.sql"),
-        (Join-Path $BackendRoot "migrations\003_login_audit_up.sql")
+        (Join-Path $BackendRoot "migrations\003_login_audit_up.sql"),
+        (Join-Path $BackendRoot "migrations\004_payment_flow_up.sql")
     )) {
         if (-not (Test-Path -LiteralPath $backendPath)) {
             throw "后端同步后仍缺少文件: $backendPath"
