@@ -54,7 +54,7 @@
 | `dual_language_monthly` | 20 CNY/月 | 英语和日语全部测试会员功能，不包含工具箱 |
 | `tools_monthly` | 20 CNY/月 | 在线工具箱、批量处理、临时分享和配置保存，不包含语言测试会员功能 |
 | `all_access_monthly` | 30 CNY/月 | 全部语言会员功能、工具箱、批量处理、临时分享、配置保存 |
-| `dual_language_lifetime` | 70 CNY | 英语和日语全部测试会员功能永久有效，不包含工具箱 |
+| `japanese_lifetime` | 70 CNY | 日语测试会员功能永久有效，不包含英语或工具箱 |
 | `all_access_lifetime` | 100 CNY | 全功能永久有效 |
 
 权益代码：
@@ -68,7 +68,7 @@
 - `save_tool_config`
 - `all_features_access`
 
-权限按有效会员记录合并，不使用单一 `isVip`。全功能永久和全功能包月覆盖全部模块；20 CNY 双语言包月与 20 CNY 工具箱包月互不越权；70 CNY 双语言永久不包含工具箱；单语言体验和其他有效会员可以叠加。包月会员到期后立即失去对应权益，但同时存在的其他会员权益仍会保留。超级管理员拥有全部权益。
+权限按有效会员记录合并，不使用单一 `isVip`。全功能永久和全功能包月覆盖全部模块；20 CNY 双语言包月与 20 CNY 工具箱包月互不越权；70 CNY 日语永久不包含英语或工具箱；单语言体验和其他有效会员可以叠加。包月会员到期后立即失去对应权益，但同时存在的其他会员权益仍会保留。超级管理员拥有全部权益。
 
 ### 老会员兼容
 
@@ -77,10 +77,11 @@
 - 旧 `trial_single_language` 保持原语言和剩余时间；新订单按 8 CNY/月销售，旧待处理订单仍保留原 5 CNY 金额
 - 旧 `monthly` 迁移为 `legacy_all_monthly`，保持原双语言包月权限，不新增工具权限
 - 旧 `lifetime` 迁移为 `legacy_all_lifetime`，保持原双语言永久权限，不新增工具权限
-- 旧 `japanese_lifetime` 记录保持日语单项永久权益，不会静默增加英语；该方案停止销售，仅供历史记录和管理员兼容
+- 旧 `japanese_lifetime` 记录保持日语永久权益，不会静默增加英语；该方案现在也是 70 CNY 日语永久会员的新订单代码
+- 已存在的 `dual_language_lifetime` 记录和待处理订单继续保持原双语言永久权益，但该历史方案不再接受新订单
 - 旧待处理充值按原价格和原权益迁移，不会被静默改成新方案
 
-旧兼容方案不可由新用户购买。新 70 CNY 订单只能使用 `dual_language_lifetime`；旧缓存页面提交 `monthly`、`lifetime` 或 `japanese_lifetime` 会被服务端拒绝，避免价格或权益误开。
+旧兼容方案不可由新用户购买。新 70 CNY 订单只能使用 `japanese_lifetime`；旧缓存页面提交 `monthly`、`lifetime` 或 `dual_language_lifetime` 会被服务端拒绝，避免价格或权益误开。
 
 ## 充值与管理员
 
@@ -243,11 +244,11 @@ Pages Functions：
 
 ## 手动启动
 
-本项目不配置开机自启动。电脑重启后可双击仓库内的 `desktop-tools/启动WYJ网站.cmd`。CMD 入口会直接调用同目录的 `start-wyj.ps1`，不再依赖不存在的中间文件夹。
+本项目不配置开机自启动。电脑重启后可双击 `启动WYJ网站.cmd`。CMD 既支持脚本与入口放在同一目录，也支持桌面入口配合 `_wyj-tools` 子目录，不会因部署布局不同找不到启动器。
 
-V10 启动器把仓库源码和私有运行目录分开。运行目录按 `-RuntimeRoot`、`VOCAB_BACKEND_ROOT`、本机 `launcher.json`、现有旧版目录、当前账户本地应用数据目录的顺序选择；首次识别到旧目录后会保存到本机配置，继续使用原数据库、管理员账户和 Tunnel 工具，不搬移或覆盖私有数据。配置与日志位于当前 Windows 账户的本地应用数据目录，不写入 Git。
+V10.1 启动器把仓库源码和私有运行目录分开。源码按 `-SourceRoot`、`VOCAB_SOURCE_ROOT`、入口附近、本机 `launcher.json`、受限范围自动发现的顺序选择；运行目录按 `-RuntimeRoot`、`VOCAB_BACKEND_ROOT`、本机配置、现有旧版目录、当前账户本地应用数据目录的顺序选择。首次识别后会保存本机配置，继续使用原数据库、管理员账户和 Tunnel 工具，不搬移或覆盖私有数据。
 
-启动时只原子同步白名单中的 Python 文件和 SQL 迁移，保留 `data/`、`tools/`、数据库和配置。若仓库私有目录中存在 12 张已清理支付二维码，启动器会按固定文件名复制到运行目录，不接触原始收款截图。随后依次恢复账户与支付后端、Cloudflare Tunnel 和本地 AI；AI 启动失败只会降级 AI 选词与首次释义判卷，不会阻塞登录、会员或支付。守护程序分别统计网站和 AI 故障，带冷却时间恢复，避免反复重启。
+启动时只原子同步白名单中的 Python 文件和 SQL 迁移，保留 `data/`、`tools/`、数据库和配置。若仓库私有目录中存在 12 张已清理支付二维码，启动器会按固定文件名复制到运行目录，不接触原始收款截图；旧的 70 CNY 付款码文件名可作为日语永久方案的本机兼容来源。随后依次恢复账户与支付后端、Cloudflare Tunnel 和本地 AI。Python 提前退出会立刻停止等待并捕获末尾错误；AI 启动失败只降级 AI 功能，不会阻塞登录、会员或支付。守护程序在连续三次修复失败后暂停 30 分钟，避免后台无限重启。
 
 常用诊断与重新配置：
 
@@ -259,7 +260,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop-tools\start-wyj.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop-tools\start-wyj.ps1 -Configure -RuntimeRoot "你的私有运行目录"
 ```
 
-启动器会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏守护程序，电脑关机后自然停止。启动日志为本机应用数据目录中的 `launcher.log`，守护日志为 `watchdog.log`。
+启动器会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏守护程序，电脑关机后自然停止。`启动日志.txt`、`守护日志.txt`、`后台启动错误.txt` 和失败时自动生成的 `启动错误报告.txt` 均放在 `启动WYJ网站.cmd` 同一目录；报告不包含数据库内容、登录密钥、Tunnel 凭据或付款码。
 
 源码中对应文件：
 

@@ -27,7 +27,7 @@ PAYMENT_PLAN_CODES = (
     "dual_language_monthly",
     "tools_monthly",
     "all_access_monthly",
-    "dual_language_lifetime",
+    "japanese_lifetime",
     "all_access_lifetime",
 )
 for payment_method in ("wechat", "alipay"):
@@ -732,14 +732,15 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(by_code["tools_monthly"]["price_cents"], 2000)
         self.assertEqual(by_code["dual_language_monthly"]["price_cents"], 2000)
         self.assertEqual(by_code["all_access_monthly"]["price_cents"], 3000)
-        self.assertEqual(by_code["dual_language_lifetime"]["price_cents"], 7000)
+        self.assertEqual(by_code["japanese_lifetime"]["price_cents"], 7000)
         self.assertEqual(by_code["all_access_lifetime"]["price_cents"], 10000)
         self.assertIn("tools_access", by_code["tools_monthly"]["entitlements"])
         self.assertNotIn("language_all_access", by_code["tools_monthly"]["entitlements"])
         self.assertIn("language_all_access", by_code["dual_language_monthly"]["entitlements"])
         self.assertNotIn("tools_access", by_code["dual_language_monthly"]["entitlements"])
-        self.assertIn("language_all_access", by_code["dual_language_lifetime"]["entitlements"])
-        self.assertNotIn("tools_access", by_code["dual_language_lifetime"]["entitlements"])
+        self.assertIn("language_japanese_access", by_code["japanese_lifetime"]["entitlements"])
+        self.assertNotIn("language_english_access", by_code["japanese_lifetime"]["entitlements"])
+        self.assertNotIn("tools_access", by_code["japanese_lifetime"]["entitlements"])
         self.assertEqual(
             {item["code"] for item in plans["payment_methods"]},
             {"wechat", "alipay"},
@@ -751,10 +752,19 @@ class AccountApiTests(unittest.TestCase):
                 "tools_monthly",
                 "dual_language_monthly",
                 "all_access_monthly",
-                "dual_language_lifetime",
+                "japanese_lifetime",
                 "all_access_lifetime",
             },
         )
+
+        status, rejected = self.request(
+            "POST",
+            "/api/recharge/request",
+            {"plan": "dual_language_lifetime", "payment_method": "wechat"},
+            self.new_user()[2],
+        )
+        self.assertEqual(status, 400, rejected)
+        self.assertEqual(rejected["code"], "plan_invalid")
 
         _, _, session = self.new_user()
         status, order = self.request(

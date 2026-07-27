@@ -1,14 +1,14 @@
-const CACHE = "wyj-shell-20260727-payment-search";
+const CACHE = "wyj-shell-20260728-launcher-stability";
 const CORE_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260727-payment-search",
-  "/app.js?v=20260727-payment-search",
-  "/tools.js?v=20260727-payment-search",
+  "/styles.css?v=20260728-launcher-stability",
+  "/app.js?v=20260728-launcher-stability",
+  "/tools.js?v=20260728-launcher-stability",
   "/vendor/qrcode.js?v=2.0.4",
   "/vendor/opencc-st-characters.txt",
   "/vendor/opencc-ts-characters.txt",
-  "/manifest.webmanifest?v=20260727-payment-search",
+  "/manifest.webmanifest?v=20260728-launcher-stability",
   "/icon-192.png",
   "/icon-512.png",
 ];

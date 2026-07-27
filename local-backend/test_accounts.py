@@ -686,7 +686,7 @@ class AccountStoreTests(unittest.TestCase):
         request_ids = []
         for method in ("wechat", "alipay"):
             request, _created = self.store.create_recharge_request(
-                user, "dual_language_lifetime", method
+                user, "japanese_lifetime", method
             )
             request_ids.append(request["id"])
             self.store.confirm_recharge_payment(user, request["id"])
@@ -696,12 +696,14 @@ class AccountStoreTests(unittest.TestCase):
             for item in self.store.memberships_for(
                 self.store.get_user(user["id"]), include_inactive=True
             )
-            if item["plan_code"] == "dual_language_lifetime"
+            if item["plan_code"] == "japanese_lifetime"
             and item["status"] == "active"
         ]
         self.assertEqual(len(active), 1)
         payload = self.store.user_payload(self.store.get_user(user["id"]))
-        self.assertIn("language_all_access", payload["entitlements"])
+        self.assertIn("language_japanese_access", payload["entitlements"])
+        self.assertNotIn("language_english_access", payload["entitlements"])
+        self.assertNotIn("language_all_access", payload["entitlements"])
         self.assertNotIn("tools_access", payload["entitlements"])
         with self.store.connect() as connection:
             fulfillments = connection.execute(

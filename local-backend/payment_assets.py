@@ -15,6 +15,7 @@ _PLAN_FILENAMES = {
     "dual_language_monthly": "dual_language_monthly.png",
     "tools_monthly": "tools_monthly.png",
     "all_access_monthly": "all_access_monthly.png",
+    "japanese_lifetime": "japanese_lifetime.png",
     "dual_language_lifetime": "dual_language_lifetime.png",
     "all_access_lifetime": "all_access_lifetime.png",
 }

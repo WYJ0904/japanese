@@ -18,14 +18,14 @@ ALL_ACCESS_ENTITLEMENTS = tuple(ENTITLEMENT_LABELS)
 # This is the only price and entitlement source used by the backend and the UI.
 MEMBERSHIP_PLANS = {
     "japanese_lifetime": {
-        "name": "日语单项永久会员",
+        "name": "日语永久会员",
         "price_cents": 7000,
         "currency": "CNY",
         "lifetime": True,
         "duration_months": 0,
-        "purchasable": False,
-        "priority": 30,
-        "description": "历史方案：仅限日语语言测试会员功能，永久有效，不包含英语或在线工具箱。",
+        "purchasable": True,
+        "priority": 70,
+        "description": "仅限日语语言测试会员功能，永久有效，不包含英语或在线工具箱。",
         "entitlements": ("language_japanese_access",),
     },
     "tools_monthly": {
@@ -71,14 +71,14 @@ MEMBERSHIP_PLANS = {
         "entitlements": ALL_ACCESS_ENTITLEMENTS,
     },
     "dual_language_lifetime": {
-        "name": "双语言双项永久会员",
+        "name": "历史双语言双项永久会员",
         "price_cents": 7000,
         "currency": "CNY",
         "lifetime": True,
         "duration_months": 0,
-        "purchasable": True,
-        "priority": 70,
-        "description": "英语和日语测试会员功能，永久有效，不包含在线工具箱。",
+        "purchasable": False,
+        "priority": 69,
+        "description": "历史兼容方案：保留既有英语和日语测试永久权益，不再接受新订单。",
         "entitlements": (
             "language_english_access",
             "language_japanese_access",

@@ -296,12 +296,13 @@ async function main() {
       await waitFor("!document.querySelector('#membershipModal')?.classList.contains('hidden')", 12_000, "membership modal");
       assert.equal(await evaluate("location.pathname"), "/select");
       const plans = await evaluate(`[...document.querySelectorAll('#membershipPlanList [data-plan]')].map(node => ({ code: node.dataset.plan, text: node.textContent }))`);
-      assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "dual_language_lifetime", "all_access_lifetime"]);
+      assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "japanese_lifetime", "all_access_lifetime"]);
       assert.ok(plans.find((item) => item.code === "trial_single_language").text.includes("8"));
       assert.ok(plans.find((item) => item.code === "dual_language_monthly").text.includes("20"));
       assert.ok(plans.find((item) => item.code === "tools_monthly").text.includes("20"));
       assert.ok(plans.find((item) => item.code === "all_access_monthly").text.includes("30"));
-      assert.ok(plans.find((item) => item.code === "dual_language_lifetime").text.includes("70"));
+      assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("70"));
+      assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("日语"));
       assert.ok(plans.find((item) => item.code === "all_access_lifetime").text.includes("100"));
       assert.equal(await evaluate("document.querySelectorAll('#paymentMethodList input[name=\"paymentMethod\"]').length"), 2);
       await click('[data-plan="trial_single_language"]');
@@ -568,14 +569,14 @@ async function main() {
       await waitFor("!document.querySelector('#adminEditModal')?.classList.contains('hidden')", 3_000, "admin editor");
       assert.deepEqual(
         await evaluate("[...document.querySelector('#adminMembershipSelect').options].map(option => option.value).filter(Boolean)"),
-        ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "dual_language_lifetime", "all_access_lifetime", "japanese_lifetime"],
+        ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "japanese_lifetime", "all_access_lifetime", "dual_language_lifetime"],
       );
       assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("全功能包月会员"));
       await setFields({ "#adminMembershipAction": "grant", "#adminMembershipSelect": "japanese_lifetime", "#adminMembershipStart": "2026.07.16", "#adminMembershipNote": "browser matrix" });
       await click("#saveAdminMembershipBtn");
       await click("#acceptConfirmBtn");
       await waitFor("document.querySelector('#adminEditMessage')?.textContent.includes('立即生效')", 12_000, "membership grant");
-      assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("日语单项永久会员"));
+      assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("日语永久会员"));
       await click("#adminDisableToolsBtn");
       await click("#acceptConfirmBtn");
       await waitFor("document.querySelector('#adminEditMessage')?.textContent.includes('取消工具权限')", 10_000, "tools override off");

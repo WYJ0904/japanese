@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-27-payment-search";
+const APP_VERSION = "2026-07-28-launcher-stability";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -592,10 +592,10 @@ function membershipLabel(value) {
     lifetime: "历史双语言永久会员",
     legacy_all_monthly: "历史双语言包月会员",
     legacy_all_lifetime: "历史双语言永久会员",
-    japanese_lifetime: "历史日语单项永久会员",
+    japanese_lifetime: "日语永久会员",
     tools_monthly: "工具箱包月会员",
     dual_language_monthly: "双语言测试包月会员",
-    dual_language_lifetime: "双语言双项永久会员",
+    dual_language_lifetime: "历史双语言双项永久会员",
     all_access_monthly: "全功能包月会员",
     all_access_lifetime: "全功能永久会员",
     super_admin: "超级管理员",
@@ -1018,7 +1018,7 @@ async function loadMembershipPlans(force = false) {
     const data = await requestJsonGet("/api/membership/plans", { timeoutMs: STATUS_TIMEOUT_MS });
     if (!Array.isArray(data.plans) || !data.plans.length) throw new Error("服务器没有返回可购买的会员方案");
     paymentMethods = Array.isArray(data.payment_methods) ? data.payment_methods.filter((item) => ["wechat", "alipay"].includes(item.code)) : [];
-    const order = ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "dual_language_lifetime", "all_access_lifetime"];
+    const order = ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "japanese_lifetime", "all_access_lifetime"];
     const rank = (code) => {
       const index = order.indexOf(code);
       return index < 0 ? order.length : index;

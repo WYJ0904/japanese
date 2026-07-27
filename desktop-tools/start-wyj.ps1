@@ -4,23 +4,33 @@
     [switch]$Unattended,
     [switch]$CheckOnly,
     [switch]$Configure,
-    [Alias("BackendRoot")][string]$RuntimeRoot
+    [Alias("BackendRoot")][string]$RuntimeRoot,
+    [Alias("FrontendRoot")][string]$SourceRoot
 )
 
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.0.0"
-$FrontendRoot = Split-Path -Parent $PSScriptRoot
-$BackendSourceRoot = Join-Path $FrontendRoot "local-backend"
+$LauncherVersion = "10.1.1"
+$FrontendRoot = ""
+$BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
+$LauncherEntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR)) {
+    [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($env:WYJ_LAUNCHER_ENTRY_DIR).Trim().Trim('"'))
+} else {
+    $PSScriptRoot
+}
 $LauncherConfigPath = Join-Path $StateRoot "launcher.json"
-$LauncherLog = Join-Path $StateRoot "launcher.log"
+$LauncherLog = Join-Path $LauncherEntryRoot "启动日志.txt"
+$ErrorReportPath = Join-Path $LauncherEntryRoot "启动错误报告.txt"
+$PreviousErrorReportPath = Join-Path $LauncherEntryRoot "启动错误报告-previous.txt"
+$BackendFailureLogPath = Join-Path $LauncherEntryRoot "后台启动错误.txt"
 $ProtocolStatePath = Join-Path $StateRoot "tunnel-protocol.txt"
 $BackendPidPath = Join-Path $StateRoot "backend.pid"
 $WatchdogScript = Join-Path $PSScriptRoot "watch-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$BackendStartupTimeoutSeconds = 90
 
 $SiteUrl = "https://thewyj.uk"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
@@ -36,23 +46,68 @@ $script:TunnelLog = ""
 $script:PythonExe = ""
 $script:ExpectedBackendBuild = ""
 $script:FileLoggingEnabled = $true
+$script:CurrentPhase = "初始化"
+$script:BackendLaunchProcess = $null
+$script:LaunchStartedAt = Get-Date
+$script:DuplicatePathWasRepaired = $false
+
+function Repair-DuplicatePathEnvironment {
+    try {
+        $pathNames = @(
+            [Environment]::GetEnvironmentVariables("Process").Keys |
+                Where-Object {
+                    [string]::Equals(
+                        [string]$_,
+                        "Path",
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                }
+        )
+        if ($pathNames.Count -le 1) { return $false }
+
+        $pathValue = @(
+            foreach ($pathName in $pathNames) {
+                [string][Environment]::GetEnvironmentVariable([string]$pathName, "Process")
+            }
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+        if ([string]::IsNullOrWhiteSpace($pathValue)) { return $false }
+
+        foreach ($pathName in $pathNames) {
+            [Environment]::SetEnvironmentVariable([string]$pathName, $null, "Process")
+        }
+        [Environment]::SetEnvironmentVariable("Path", [string]$pathValue, "Process")
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+$script:DuplicatePathWasRepaired = Repair-DuplicatePathEnvironment
 
 function Initialize-LauncherState {
     try {
-        if (-not (Test-Path -LiteralPath $StateRoot)) {
-            New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+        foreach ($directory in @($StateRoot, $LauncherEntryRoot)) {
+            if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+                New-Item -ItemType Directory -Path $directory -Force | Out-Null
+            }
         }
     } catch {
         if ($CheckOnly) {
             $script:FileLoggingEnabled = $false
             return
         }
-        throw "无法创建本机启动器配置目录。"
+        throw "无法创建启动器配置或报告目录。"
     }
     if ((Test-Path -LiteralPath $LauncherLog) -and ((Get-Item -LiteralPath $LauncherLog).Length -gt 1MB)) {
-        $previousLog = $LauncherLog + ".previous"
+        $previousLog = Join-Path $LauncherEntryRoot "启动日志-previous.txt"
         Remove-Item -LiteralPath $previousLog -Force -ErrorAction SilentlyContinue
         Move-Item -LiteralPath $LauncherLog -Destination $previousLog -Force
+    }
+    if (Test-Path -LiteralPath $ErrorReportPath -PathType Leaf) {
+        Remove-Item -LiteralPath $PreviousErrorReportPath -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $ErrorReportPath -Destination $PreviousErrorReportPath -Force
     }
 }
 
@@ -69,6 +124,114 @@ function Write-LaunchLog {
     } catch {
         # Logging must never prevent recovery.
     }
+}
+
+function Get-TextFileTail {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [ValidateRange(1, 500)][int]$Lines = 80
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    try {
+        return @(Get-Content -LiteralPath $Path -Encoding UTF8 -Tail $Lines -ErrorAction Stop)
+    } catch {
+        return @("[无法读取日志: $($_.Exception.Message)]")
+    }
+}
+
+function Get-BuildFromServerFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "文件缺失" }
+    try {
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
+        $match = [regex]::Match($source, 'APP_BUILD\s*=\s*"([^"]+)"')
+        if ($match.Success) { return $match.Groups[1].Value }
+    } catch { }
+    return "无法识别"
+}
+
+function Write-LauncherErrorReport {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+    $report = New-Object System.Collections.Generic.List[string]
+    $report.Add("WYJ 启动错误报告")
+    $report.Add(("生成时间: " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz")))
+    $report.Add(("启动器版本: " + $LauncherVersion))
+    $report.Add(("失败阶段: " + $script:CurrentPhase))
+    $report.Add(("运行时长: {0:N1} 秒" -f ((Get-Date) - $script:LaunchStartedAt).TotalSeconds))
+    $report.Add(("错误类型: " + $ErrorRecord.Exception.GetType().FullName))
+    $report.Add(("错误信息: " + $ErrorRecord.Exception.Message))
+    if ($ErrorRecord.ScriptStackTrace) {
+        $report.Add(("脚本位置: " + (($ErrorRecord.ScriptStackTrace -replace "`r?`n", " | ").Trim())))
+    }
+    $report.Add("")
+    $report.Add("=== 组件状态 ===")
+    $report.Add(("源码目录: " + $(if ($FrontendRoot) { $FrontendRoot } else { "尚未识别" })))
+    $report.Add(("私有运行目录: " + $(if ($script:BackendRoot) { $script:BackendRoot } else { "尚未识别" })))
+    $report.Add(("预期后端版本: " + $(if ($script:ExpectedBackendBuild) { $script:ExpectedBackendBuild } else { "尚未读取" })))
+    $runtimeServer = if ($script:BackendRoot) { Join-Path $script:BackendRoot "server.py" } else { "" }
+    $report.Add(("运行目录后端版本: " + $(if ($runtimeServer) { Get-BuildFromServerFile -Path $runtimeServer } else { "尚未识别" })))
+    $pythonVersion = "不可用"
+    if ($script:PythonExe -and (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
+        try { $pythonVersion = (& $script:PythonExe --version 2>&1 | Select-Object -First 1).ToString().Trim() } catch { }
+    }
+    $report.Add(("Python: " + $pythonVersion))
+    $report.Add(("本地后端在线: " + [bool](Test-BackendReady)))
+    $listenerIds = @(Get-ListeningProcessIds)
+    $report.Add(("8765 监听进程: " + $(if ($listenerIds.Count) { $listenerIds -join ", " } else { "无" })))
+    if ($null -ne $script:BackendLaunchProcess) {
+        try { $script:BackendLaunchProcess.Refresh() } catch { }
+        $exitDescription = if ($script:BackendLaunchProcess.HasExited) {
+            "已退出，退出码 " + $script:BackendLaunchProcess.ExitCode
+        } else {
+            "仍在运行，进程 " + $script:BackendLaunchProcess.Id
+        }
+        $report.Add(("后台启动进程: " + $exitDescription))
+    }
+    $report.Add("")
+    $report.Add("=== 运行目录依赖 ===")
+    foreach ($relativePath in @(
+        "server.py",
+        "account_store.py",
+        "membership.py",
+        "payment_assets.py",
+        "temporary_store.py",
+        "vocabulary_index.py",
+        "run.ps1",
+        "migrations\004_payment_flow_up.sql"
+    )) {
+        $present = $script:BackendRoot -and (Test-Path -LiteralPath (Join-Path $script:BackendRoot $relativePath) -PathType Leaf)
+        $report.Add(("[{0}] {1}" -f $(if ($present) { "存在" } else { "缺失" }), $relativePath))
+    }
+    $report.Add("")
+    $report.Add("=== 后台启动错误（末尾） ===")
+    $backendLines = @(Get-TextFileTail -Path $BackendFailureLogPath -Lines 120)
+    if ($backendLines.Count) {
+        foreach ($line in $backendLines) { $report.Add([string]$line) }
+    } else {
+        $report.Add("[没有捕获到后台 stderr；请查看下方启动日志。]")
+    }
+    $report.Add("")
+    $report.Add("=== 启动日志（末尾） ===")
+    foreach ($line in @(Get-TextFileTail -Path $LauncherLog -Lines 100)) {
+        $report.Add([string]$line)
+    }
+    $report.Add("")
+    $report.Add("报告不包含数据库内容、登录密钥、Tunnel 凭据或付款码。")
+
+    $target = $ErrorReportPath
+    try {
+        $temporary = $target + ".tmp-" + [Guid]::NewGuid().ToString("N")
+        try {
+            [IO.File]::WriteAllLines($temporary, $report, (New-Object System.Text.UTF8Encoding($true)))
+            Move-Item -LiteralPath $temporary -Destination $target -Force
+        } finally {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        $target = Join-Path $StateRoot "启动错误报告.txt"
+        [IO.File]::WriteAllLines($target, $report, (New-Object System.Text.UTF8Encoding($true)))
+    }
+    return $target
 }
 
 function ConvertTo-AbsolutePath {
@@ -91,6 +254,20 @@ function ConvertTo-QuotedNativePath {
     return '"' + $PathValue + '"'
 }
 
+function Test-SourceRoot {
+    param([Parameter(Mandatory = $true)][string]$Candidate)
+    try {
+        $root = ConvertTo-AbsolutePath -PathValue $Candidate
+        return (
+            (Test-Path -LiteralPath (Join-Path $root "index.html") -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $root "local-backend\server.py") -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $root "desktop-tools\start-wyj.ps1") -PathType Leaf)
+        )
+    } catch {
+        return $false
+    }
+}
+
 function Get-LauncherConfig {
     if (-not (Test-Path -LiteralPath $LauncherConfigPath -PathType Leaf)) {
         return $null
@@ -105,10 +282,14 @@ function Get-LauncherConfig {
 }
 
 function Save-LauncherConfig {
-    param([Parameter(Mandatory = $true)][string]$BackendRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [string]$SourceRootValue = $FrontendRoot
+    )
     $payload = [ordered]@{
         version = 1
         backend_root = (ConvertTo-AbsolutePath -PathValue $BackendRoot)
+        source_root = if ($SourceRootValue) { ConvertTo-AbsolutePath -PathValue $SourceRootValue } else { "" }
         updated_at = (Get-Date).ToUniversalTime().ToString("o")
     } | ConvertTo-Json
     $temporary = $LauncherConfigPath + ".tmp-" + [Guid]::NewGuid().ToString("N")
@@ -118,6 +299,95 @@ function Save-LauncherConfig {
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Find-SourceRoot {
+    $candidates = @()
+    foreach ($candidate in @(
+        $PSScriptRoot,
+        (Split-Path -Parent $PSScriptRoot),
+        (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+    )) {
+        if ($candidate -and (Test-SourceRoot -Candidate $candidate)) {
+            $candidates += (ConvertTo-AbsolutePath -PathValue $candidate)
+        }
+    }
+
+    $documents = [Environment]::GetFolderPath("MyDocuments")
+    $codexRoot = if ($documents) { Join-Path $documents "Codex" } else { "" }
+    if ($codexRoot -and (Test-Path -LiteralPath $codexRoot -PathType Container)) {
+        $queue = New-Object "System.Collections.Generic.Queue[object]"
+        $queue.Enqueue([pscustomobject]@{ Path = $codexRoot; Depth = 0 })
+        $visited = 0
+        $skipNames = @(".git", ".agents", ".codex", ".venv", "venv", "node_modules", "__pycache__", "data", "tools", "outputs")
+        while ($queue.Count -gt 0 -and $visited -lt 4000) {
+            $entry = $queue.Dequeue()
+            $visited++
+            if (Test-SourceRoot -Candidate $entry.Path) {
+                $candidates += (ConvertTo-AbsolutePath -PathValue $entry.Path)
+            }
+            if ($entry.Depth -ge 4) { continue }
+            foreach ($directory in @(Get-ChildItem -LiteralPath $entry.Path -Directory -ErrorAction SilentlyContinue)) {
+                if ($directory.Name -in $skipNames) { continue }
+                if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                $queue.Enqueue([pscustomobject]@{
+                    Path = $directory.FullName
+                    Depth = $entry.Depth + 1
+                })
+            }
+        }
+    }
+
+    $unique = @($candidates | Sort-Object -Unique)
+    if ($unique.Count -eq 0) { return "" }
+    $ranked = foreach ($candidate in $unique) {
+        [pscustomobject]@{
+            Path = $candidate
+            LastWriteTimeUtc = (Get-Item -LiteralPath (Join-Path $candidate "local-backend\server.py")).LastWriteTimeUtc
+        }
+    }
+    return ($ranked | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).Path
+}
+
+function Resolve-SourceRoot {
+    if (-not [string]::IsNullOrWhiteSpace($SourceRoot)) {
+        $resolved = ConvertTo-AbsolutePath -PathValue $SourceRoot
+        if (-not (Test-SourceRoot -Candidate $resolved)) {
+            throw "-SourceRoot 不是完整的网站源码目录。"
+        }
+        return $resolved
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:VOCAB_SOURCE_ROOT)) {
+        $resolved = ConvertTo-AbsolutePath -PathValue $env:VOCAB_SOURCE_ROOT
+        if (-not (Test-SourceRoot -Candidate $resolved)) {
+            throw "VOCAB_SOURCE_ROOT 不是完整的网站源码目录。"
+        }
+        return $resolved
+    }
+
+    $localCandidate = Split-Path -Parent $PSScriptRoot
+    if (Test-SourceRoot -Candidate $localCandidate) {
+        return ConvertTo-AbsolutePath -PathValue $localCandidate
+    }
+
+    $config = Get-LauncherConfig
+    if ($null -ne $config -and $config.PSObject.Properties["source_root"] -and [string]$config.source_root) {
+        $configured = ConvertTo-AbsolutePath -PathValue ([string]$config.source_root)
+        if (Test-SourceRoot -Candidate $configured) {
+            return $configured
+        }
+    }
+
+    $discovered = Find-SourceRoot
+    if ($discovered) { return $discovered }
+    throw "找不到完整的网站源码。请使用 -SourceRoot 指定包含 local-backend 的目录。"
+}
+
+function Set-ResolvedSourcePaths {
+    param([Parameter(Mandatory = $true)][string]$ResolvedSourceRoot)
+    $script:FrontendRoot = ConvertTo-AbsolutePath -PathValue $ResolvedSourceRoot
+    $script:BackendSourceRoot = Join-Path $script:FrontendRoot "local-backend"
+    $env:VOCAB_SOURCE_ROOT = $script:FrontendRoot
 }
 
 function Test-LegacyRuntimeRoot {
@@ -268,8 +538,16 @@ function Resolve-CloudflaredExecutable {
 function Test-ApiOk {
     param([Parameter(Mandatory = $true)][string]$Url, [int]$TimeoutSec = 6)
     try {
-        $result = Invoke-RestMethod -Uri $Url -TimeoutSec $TimeoutSec -Headers @{ "Cache-Control" = "no-cache" }
-        return ($result.ok -eq $true)
+        $separator = if ($Url.Contains("?")) { "&" } else { "?" }
+        $probeUrl = $Url + $separator + "launcher_probe=" + [Guid]::NewGuid().ToString("N")
+        $result = Invoke-RestMethod -Uri $probeUrl -TimeoutSec $TimeoutSec -Headers @{
+            "Cache-Control" = "no-store, no-cache"
+        }
+        if ($result.ok -ne $true) { return $false }
+        if ($script:ExpectedBackendBuild -and ([string]$result.build -ne $script:ExpectedBackendBuild)) {
+            return $false
+        }
+        return $true
     } catch {
         return $false
     }
@@ -320,6 +598,44 @@ function Wait-ForCondition {
     Write-Host ""
     Write-LaunchLog "$Label 在 $Seconds 秒内没有就绪。" "Yellow"
     return $false
+}
+
+function Wait-ForBackendStartup {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [ValidateRange(1, 600)][int]$Seconds
+    )
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        if (Test-BackendReady) {
+            Write-Host ""
+            return $true
+        }
+        try {
+            $Process.Refresh()
+            if ($Process.HasExited) {
+                Write-Host ""
+                Write-LaunchLog "本地后端进程已提前退出，不再等待超时。" "Red"
+                return $false
+            }
+        } catch { }
+        Write-Host "." -NoNewline
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    Write-Host ""
+    Write-LaunchLog "本地后端在 $Seconds 秒内没有就绪。" "Yellow"
+    return $false
+}
+
+function Get-BackendFailureSummary {
+    $lines = @(
+        Get-TextFileTail -Path $BackendFailureLogPath -Lines 40 |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    )
+    if (-not $lines.Count) { return "" }
+    $preferred = @($lines | Where-Object { $_ -match 'ModuleNotFoundError|ImportError|SyntaxError|Error:|Exception:' })
+    $selected = if ($preferred.Count) { [string]$preferred[-1] } else { [string]$lines[-1] }
+    return ($selected -replace '\s+', ' ').Trim()
 }
 
 function Disable-LegacyAutoStart {
@@ -453,19 +769,22 @@ function Sync-PrivatePaymentAssets {
     $sourceRoot = Join-Path $BackendSourceRoot "data\payment\qrcodes"
     $destinationRoot = Join-Path $script:BackendRoot "data\payment\qrcodes"
     $plans = @(
-        "trial_single_language",
-        "dual_language_monthly",
-        "tools_monthly",
-        "all_access_monthly",
-        "dual_language_lifetime",
-        "all_access_lifetime"
+        [pscustomobject]@{ Code = "trial_single_language"; LegacyCode = "" },
+        [pscustomobject]@{ Code = "dual_language_monthly"; LegacyCode = "" },
+        [pscustomobject]@{ Code = "tools_monthly"; LegacyCode = "" },
+        [pscustomobject]@{ Code = "all_access_monthly"; LegacyCode = "" },
+        [pscustomobject]@{ Code = "japanese_lifetime"; LegacyCode = "dual_language_lifetime" },
+        [pscustomobject]@{ Code = "all_access_lifetime"; LegacyCode = "" }
     )
     $validCount = 0
     $copiedCount = 0
     foreach ($method in @("wechat", "alipay")) {
         foreach ($plan in $plans) {
-            $fileName = "${method}_${plan}.png"
+            $fileName = "${method}_$($plan.Code).png"
             $source = Join-Path $sourceRoot $fileName
+            if ((-not (Test-PngFile -Path $source)) -and $plan.LegacyCode) {
+                $source = Join-Path $sourceRoot "${method}_$($plan.LegacyCode).png"
+            }
             $destination = Join-Path $destinationRoot $fileName
             if (Test-PngFile -Path $source) {
                 $validCount++
@@ -473,6 +792,11 @@ function Sync-PrivatePaymentAssets {
                     $copiedCount++
                 }
             }
+        }
+        $legacySource = Join-Path $sourceRoot "${method}_dual_language_lifetime.png"
+        $legacyDestination = Join-Path $destinationRoot "${method}_dual_language_lifetime.png"
+        if (Test-PngFile -Path $legacySource) {
+            $null = Copy-FileIfChanged -Source $legacySource -Destination $legacyDestination
         }
     }
     if ($validCount -eq 12) {
@@ -539,16 +863,25 @@ function Ensure-Backend {
 
     $runScript = Join-Path $script:BackendRoot "run.ps1"
     $env:VOCAB_PYTHON_EXE = $script:PythonExe
+    $env:VOCAB_BACKEND_FAILURE_LOG = $BackendFailureLogPath
+    if (Test-Path -LiteralPath $BackendFailureLogPath -PathType Leaf) {
+        Remove-Item -LiteralPath ($BackendFailureLogPath + ".previous") -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $BackendFailureLogPath -Destination ($BackendFailureLogPath + ".previous") -Force
+    }
     Write-LaunchLog "正在启动本地账户与支付后端..." "Yellow"
     $quotedRunScript = ConvertTo-QuotedNativePath -PathValue $runScript
-    $process = Start-Process -FilePath $PowerShellExe -ArgumentList @(
+    $script:BackendLaunchProcess = Start-Process -FilePath $PowerShellExe -ArgumentList @(
         "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $quotedRunScript
     ) -WorkingDirectory $script:BackendRoot -WindowStyle Hidden -PassThru
-    if (-not (Wait-ForCondition -Seconds 50 -Label "本地后端" -Check { Test-BackendReady })) {
-        if ($process.HasExited) {
-            throw "本地后端启动失败，退出码 $($process.ExitCode)。请查看运行目录 data 下的错误日志。"
+    if (-not (Wait-ForBackendStartup -Seconds $BackendStartupTimeoutSeconds -Process $script:BackendLaunchProcess)) {
+        try { $script:BackendLaunchProcess.Refresh() } catch { }
+        if ($script:BackendLaunchProcess.HasExited) {
+            $summary = Get-BackendFailureSummary
+            $detail = if ($summary) { "：$summary" } else { "" }
+            throw "本地后端启动后立即退出（退出码 $($script:BackendLaunchProcess.ExitCode)）$detail"
         }
-        throw "本地后端启动超时。"
+        try { Stop-Process -Id $script:BackendLaunchProcess.Id -Force -ErrorAction SilentlyContinue } catch { }
+        throw "本地后端启动超时，已停止本次启动进程。"
     }
     $listenerIds = @(Get-ListeningProcessIds)
     if ($listenerIds.Count -gt 0) {
@@ -559,9 +892,54 @@ function Ensure-Backend {
 
 function Test-PublicBackendReady {
     return (
-        (Test-ApiOk -Url $ApiStatusUrl -TimeoutSec 8) -and
-        (Test-ApiOk -Url $PagesStatusUrl -TimeoutSec 8)
+        (Test-ApiOk -Url $ApiStatusUrl -TimeoutSec 4) -and
+        (Test-ApiOk -Url $PagesStatusUrl -TimeoutSec 4)
     )
+}
+
+function Wait-ForStablePublicBackend {
+    param(
+        [ValidateRange(1, 600)][int]$Seconds,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [ValidateRange(1, 20)][int]$StableSuccesses = 5,
+        [ValidateRange(100, 10000)][int]$IntervalMilliseconds = 3000,
+        $Process = $null
+    )
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    $consecutiveSuccesses = 0
+    do {
+        if ($null -ne $Process) {
+            try {
+                $Process.Refresh()
+                if ($Process.HasExited) {
+                    Write-Host ""
+                    Write-LaunchLog ("$Label 进程已提前退出（退出码 $($Process.ExitCode)）。") "Yellow"
+                    return $false
+                }
+            } catch { }
+        }
+
+        if (Test-PublicBackendReady) {
+            $consecutiveSuccesses++
+            if ($consecutiveSuccesses -ge $StableSuccesses) {
+                Write-Host ""
+                return $true
+            }
+        } else {
+            $consecutiveSuccesses = 0
+        }
+
+        Write-Host "." -NoNewline
+        $remainingMilliseconds = [Math]::Max(
+            0,
+            [int](($deadline - (Get-Date)).TotalMilliseconds)
+        )
+        if ($remainingMilliseconds -le 0) { break }
+        Start-Sleep -Milliseconds ([Math]::Min($IntervalMilliseconds, $remainingMilliseconds))
+    } while ((Get-Date) -lt $deadline)
+    Write-Host ""
+    Write-LaunchLog "$Label 在 $Seconds 秒内没有连续稳定就绪。" "Yellow"
+    return $false
 }
 
 function Get-PreferredTunnelProtocol {
@@ -612,8 +990,11 @@ function Get-ManagedTunnelProcesses {
 
 function Ensure-Tunnel {
     if (Test-PublicBackendReady) {
-        Write-LaunchLog "固定 Tunnel 与 Pages 代理正常。" "Green"
-        return
+        if (Wait-ForStablePublicBackend -Seconds 20 -Label "现有固定 Tunnel" -StableSuccesses 5 -IntervalMilliseconds 3000) {
+            Write-LaunchLog "固定 Tunnel 与 Pages 代理连续稳定。" "Green"
+            return
+        }
+        Write-LaunchLog "现有 Tunnel 响应不稳定，准备主动重连。" "Yellow"
     }
     $script:CloudflaredExe = Resolve-CloudflaredExecutable
     if (-not $script:CloudflaredExe) {
@@ -636,7 +1017,7 @@ function Ensure-Tunnel {
     foreach ($protocol in @($preferred, $fallback)) {
         $lastProcess = Start-TunnelProcess -Protocol $protocol
         $waitSeconds = if ($protocol -eq $preferred) { 40 } else { 55 }
-        if (Wait-ForCondition -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -Check { Test-PublicBackendReady }) {
+        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -Process $lastProcess) {
             Save-PreferredTunnelProtocol -Protocol $protocol
             Write-LaunchLog ("固定 Tunnel 已恢复并记住 " + $protocol.ToUpperInvariant() + "。") "Green"
             return
@@ -705,9 +1086,31 @@ function Ensure-Ollama {
     Ensure-OllamaModel
 }
 
+function Get-ManagedWatchdogProcesses {
+    $managed = @()
+    $watchdogFullPath = [IO.Path]::GetFullPath($WatchdogScript)
+    foreach ($process in @(Get-Process -Name "powershell" -ErrorAction SilentlyContinue)) {
+        $commandLine = ""
+        try {
+            $commandLine = [string](Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction Stop).CommandLine
+        } catch { }
+        if ($commandLine -and
+            $commandLine.IndexOf($watchdogFullPath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $managed += $process
+        }
+    }
+    return @($managed)
+}
+
 function Ensure-Watchdog {
     if (-not (Test-Path -LiteralPath $WatchdogScript -PathType Leaf)) {
         throw "找不到网络守护程序。"
+    }
+    $existing = @(Get-ManagedWatchdogProcesses)
+    if ($existing.Count) {
+        Write-LaunchLog "正在替换旧版或已存在的守护程序..." "Yellow"
+        $existing | Stop-Process -Force -ErrorAction SilentlyContinue
+        $existing | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
     }
     $quotedWatchdogScript = ConvertTo-QuotedNativePath -PathValue $WatchdogScript
     Start-Process -FilePath $PowerShellExe -ArgumentList @(
@@ -731,6 +1134,7 @@ function Show-ConfigurationReport {
     Write-Host ""
     Write-Host "WYJ 启动器检查 V$LauncherVersion" -ForegroundColor Cyan
     Write-Host ("源码完整: " + $sourceOk)
+    Write-Host ("源码定位方式: " + $(if ($SourceRoot -or $env:VOCAB_SOURCE_ROOT) { "显式配置" } else { "自动识别" }))
     Write-Host ("私有运行目录存在: " + $runtimeExists)
     Write-Host ("运行配置存在: " + $settingsExists)
     Write-Host ("Python 可用: " + [bool]$script:PythonExe)
@@ -739,35 +1143,59 @@ function Show-ConfigurationReport {
     Write-Host ("私有支付二维码: $qrCount/12")
     Write-Host ("本地后端在线: " + (Test-BackendReady))
     Write-Host ("公网后端在线: " + (Test-PublicBackendReady))
+    Write-Host ("启动日志: " + $LauncherLog)
+    Write-Host ("失败报告: " + $ErrorReportPath)
     Write-Host ""
     return ($sourceOk -and [bool]$script:PythonExe)
 }
 
 function Invoke-WyjLauncher {
+    $script:LaunchStartedAt = Get-Date
+    $script:CurrentPhase = "初始化启动器"
     Initialize-LauncherState
     $createdNew = $false
     $mutex = New-Object System.Threading.Mutex($true, "Local\WYJWebsiteLauncherV3", [ref]$createdNew)
-    if (-not $createdNew) {
-        Write-LaunchLog "另一个启动程序正在运行，请稍候。" "Yellow"
-        $mutex.Dispose()
-        return 0
-    }
-
+    $ownsMutex = $createdNew
     try {
+        if (-not $ownsMutex) {
+            Write-LaunchLog "另一个启动程序正在运行，最多等待 15 秒..." "Yellow"
+            try {
+                $ownsMutex = $mutex.WaitOne(15000)
+            } catch [Threading.AbandonedMutexException] {
+                $ownsMutex = $true
+            }
+            if (-not $ownsMutex) {
+                throw "另一个启动程序仍在运行；已停止本次重复启动。"
+            }
+        }
+        if ($script:DuplicatePathWasRepaired) {
+            Write-LaunchLog "已修复当前进程中重复的 Path/PATH 环境变量。" "Green"
+        }
         Write-LaunchLog ("=== WYJ 网站启动与自修复 V" + $LauncherVersion + " ===") "Cyan"
+        $script:CurrentPhase = "定位网站源码"
+        $resolvedSource = Resolve-SourceRoot
+        Set-ResolvedSourcePaths -ResolvedSourceRoot $resolvedSource
+        $script:CurrentPhase = "定位私有运行目录"
         $resolvedRoot = Resolve-RuntimeRoot
         Set-ResolvedRuntimePaths -BackendRoot $resolvedRoot
+        if (-not $CheckOnly) {
+            Save-LauncherConfig -BackendRoot $resolvedRoot -SourceRootValue $resolvedSource
+        }
+        $script:CurrentPhase = "检查 Python 与源码"
         $script:PythonExe = Resolve-PythonExecutable
         Test-SourceLayout
         Read-ExpectedBackendBuild
 
         if ($CheckOnly) {
+            $script:CurrentPhase = "只读组件检查"
             if (Show-ConfigurationReport) { return 0 }
             return 2
         }
 
+        $script:CurrentPhase = "准备私有运行目录"
         Disable-LegacyAutoStart
         Ensure-RuntimeLayout
+        $script:CurrentPhase = "同步后端代码与付款资源"
         $sourceChanged = Sync-BackendSource
         $null = Sync-PrivatePaymentAssets
         if ($sourceChanged) {
@@ -776,10 +1204,13 @@ function Invoke-WyjLauncher {
             Write-LaunchLog "后端代码与数据库迁移已是最新版本。" "Green"
         }
 
+        $script:CurrentPhase = "启动本地账户与支付后端"
         Ensure-Backend -RestartRequired:$sourceChanged
+        $script:CurrentPhase = "恢复固定 Tunnel"
         Ensure-Tunnel
 
         $aiReady = $true
+        $script:CurrentPhase = "启动可选本地 AI"
         try {
             Ensure-Ollama
         } catch {
@@ -787,27 +1218,36 @@ function Invoke-WyjLauncher {
             Write-LaunchLog ("本地 AI 暂未就绪: " + $_.Exception.Message) "Yellow"
         }
 
+        $script:CurrentPhase = "检查正式网站"
         if (-not (Test-HttpOk -Url $SiteUrl -TimeoutSec 12)) {
             throw "正式网站首页暂时无法访问。"
+        }
+        if (-not (Wait-ForStablePublicBackend -Seconds 12 -Label "正式账户与支付接口" -StableSuccesses 3 -IntervalMilliseconds 2000)) {
+            throw "固定 Tunnel 在启动完成前再次失去连接。"
         }
         Write-LaunchLog "网站、账户、会员与支付服务均已就绪。" "Green"
         if (-not $aiReady) {
             Write-LaunchLog "AI 选词与首次释义判卷稍后可由守护程序继续恢复。" "Yellow"
         }
         if (-not $SkipWatchdog) {
+            $script:CurrentPhase = "刷新持续在线守护"
             Ensure-Watchdog
         }
         if (-not $NoBrowser) {
             Start-Process $SiteUrl
         }
+        $script:CurrentPhase = "完成"
         Write-LaunchLog "启动完成。" "Cyan"
         return 0
     } catch {
-        Write-LaunchLog ("启动失败: " + $_.Exception.Message) "Red"
-        Write-LaunchLog ("可运行 -CheckOnly 查看组件状态；日志位于本机应用数据目录。") "Yellow"
+        $failure = $_
+        Write-LaunchLog ("启动失败: " + $failure.Exception.Message) "Red"
+        $reportPath = Write-LauncherErrorReport -ErrorRecord $failure
+        Write-LaunchLog ("已自动导出错误报告: " + $reportPath) "Yellow"
+        Write-LaunchLog ("修复后可重新双击启动；也可使用 -CheckOnly 只检查组件。") "Yellow"
         return 1
     } finally {
-        if ($createdNew) {
+        if ($ownsMutex) {
             $mutex.ReleaseMutex()
         }
         $mutex.Dispose()

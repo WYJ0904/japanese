@@ -11,6 +11,10 @@ __pycache__/
 *.pyc
 *.log
 desktop-tools/启动日志.txt
+desktop-tools/启动日志-previous.txt
+desktop-tools/启动错误报告*.txt
+desktop-tools/后台启动错误*.txt
+desktop-tools/守护日志*.txt
 *.pdf
 latest-url.txt
 

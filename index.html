@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#050a12" />
     <title>WYJ的网站</title>
     <link rel="icon" href="/icon-192.png" type="image/png" />
-    <link rel="manifest" href="/manifest.webmanifest?v=20260727-payment-search" />
-    <link rel="stylesheet" href="/styles.css?v=20260727-payment-search" />
+    <link rel="manifest" href="/manifest.webmanifest?v=20260728-launcher-stability" />
+    <link rel="stylesheet" href="/styles.css?v=20260728-launcher-stability" />
   </head>
   <body>
     <div class="entry-screen" id="entryScreen" aria-hidden="false">
@@ -418,7 +418,7 @@
           <div class="payment-method-list" id="paymentMethodList" aria-live="polite"></div>
         </fieldset>
         <div class="purchase-summary" id="purchaseSummary">请选择套餐</div>
-        <p class="membership-warning">8 CNY 单语言包月仅包含所选语言；20 CNY 双语言包月包含英语和日语测试；20 CNY 工具箱包月仅包含在线工具箱；70 CNY 双语言永久包含英语和日语测试。需要语言测试与工具箱全部功能，请购买 30 CNY 全功能包月会员或 100 CNY 全功能永久会员。</p>
+        <p class="membership-warning">8 CNY 单语言包月仅包含所选语言；20 CNY 双语言包月包含英语和日语测试；20 CNY 工具箱包月仅包含在线工具箱；70 CNY 日语永久会员仅包含日语测试。需要语言测试与工具箱全部功能，请购买 30 CNY 全功能包月会员或 100 CNY 全功能永久会员。</p>
         <div class="payment-order hidden" id="paymentOrderBox">
           <dl><dt>用户名</dt><dd id="paymentUsername">-</dd><dt>会员方案</dt><dd id="paymentPlan">-</dd><dt class="hidden" id="paymentLanguageTerm">所选语言</dt><dd class="hidden" id="paymentLanguage">-</dd><dt>支付方式</dt><dd id="paymentMethod">-</dd><dt>应付金额</dt><dd id="paymentAmount">-</dd><dt>订单编号</dt><dd><code id="paymentOrderNumber">-</code> <button id="copyOrderBtn" type="button">复制</button></dd><dt>付款备注</dt><dd><span id="paymentNote">-</span> <button id="copyPaymentNoteBtn" type="button">复制</button></dd><dt>订单状态</dt><dd id="paymentStatus">-</dd></dl>
           <div class="payment-qr-wrap hidden" id="paymentQrWrap">
@@ -479,7 +479,7 @@
           <div class="admin-current-memberships" id="adminCurrentMemberships"></div>
           <div class="admin-membership-grid">
             <label class="field-label"><span>操作</span><select id="adminMembershipAction"><option value="grant">开通或覆盖</option><option value="extend">续期一个月</option><option value="cancel">取消所选会员</option><option value="cancel_all">降级为普通用户</option></select></label>
-            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="trial_single_language">单语言包月体验会员</option><option value="dual_language_monthly">双语言测试包月会员</option><option value="tools_monthly">工具箱包月会员</option><option value="all_access_monthly">全功能包月会员</option><option value="dual_language_lifetime">双语言双项永久会员</option><option value="all_access_lifetime">全功能永久会员</option><option value="japanese_lifetime">历史日语单项永久会员</option></select></label>
+            <label class="field-label"><span>会员方案</span><select id="adminMembershipSelect"><option value="trial_single_language">单语言包月体验会员</option><option value="dual_language_monthly">双语言测试包月会员</option><option value="tools_monthly">工具箱包月会员</option><option value="all_access_monthly">全功能包月会员</option><option value="japanese_lifetime">日语永久会员</option><option value="all_access_lifetime">全功能永久会员</option><option value="dual_language_lifetime">历史双语言双项永久会员</option></select></label>
             <label class="field-label hidden" id="adminTrialLanguageField"><span>体验语言</span><select id="adminTrialLanguageSelect"><option value="">请选择</option><option value="english">英语</option><option value="japanese">日语</option></select></label>
           </div>
           <div class="admin-date-grid">
@@ -560,7 +560,7 @@
     </template>
 
     <script src="/vendor/qrcode.js?v=2.0.4"></script>
-    <script src="/tools.js?v=20260727-payment-search"></script>
-    <script src="/app.js?v=20260727-payment-search"></script>
+    <script src="/tools.js?v=20260728-launcher-stability"></script>
+    <script src="/app.js?v=20260728-launcher-stability"></script>
   </body>
 </html>

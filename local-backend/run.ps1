@@ -1,9 +1,66 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DataRoot = Join-Path $Root "data"
 $SettingsPath = Join-Path $DataRoot "settings.json"
+$FailureLogPath = if (-not [string]::IsNullOrWhiteSpace($env:VOCAB_BACKEND_FAILURE_LOG)) {
+    [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($env:VOCAB_BACKEND_FAILURE_LOG).Trim().Trim('"'))
+} else {
+    Join-Path $DataRoot "后台启动错误.txt"
+}
+$CapturedOutput = New-Object "System.Collections.Generic.Queue[string]"
+$CapturedOutputLimit = 120
+
+function Add-CapturedOutputLine {
+    param($Value)
+    $line = ([string]$Value -replace "`0", "").TrimEnd()
+    if ($line.Length -gt 2000) {
+        $line = $line.Substring(0, 2000) + " [已截断]"
+    }
+    $CapturedOutput.Enqueue($line)
+    while ($CapturedOutput.Count -gt $CapturedOutputLimit) {
+        $null = $CapturedOutput.Dequeue()
+    }
+}
+
+function Write-BackendFailureLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Summary,
+        [string[]]$Lines = @()
+    )
+    try {
+        $directory = Split-Path -Parent $FailureLogPath
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        }
+        $content = New-Object System.Collections.Generic.List[string]
+        $content.Add("WYJ 本地后端启动错误")
+        $content.Add(("生成时间: " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz")))
+        $content.Add(("摘要: " + $Summary))
+        $content.Add("")
+        foreach ($line in $Lines) {
+            $content.Add([string]$line)
+        }
+        $temporary = $FailureLogPath + ".tmp-" + [Guid]::NewGuid().ToString("N")
+        try {
+            [IO.File]::WriteAllLines($temporary, $content, (New-Object System.Text.UTF8Encoding($true)))
+            Move-Item -LiteralPath $temporary -Destination $FailureLogPath -Force
+        } finally {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # A secondary logging failure must not hide the original process exit.
+    }
+}
+
+trap {
+    $message = $_.Exception.Message
+    Add-CapturedOutputLine -Value $_
+    Write-BackendFailureLog -Summary ("PowerShell 启动阶段失败: " + $message) -Lines @($CapturedOutput)
+    [Console]::Error.WriteLine($message)
+    exit 1
+}
 
 if (-not (Test-Path -LiteralPath $DataRoot)) {
     New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
@@ -58,5 +115,20 @@ if (-not $python) {
 
 Set-Location -LiteralPath $Root
 $serverPath = Join-Path $Root "server.py"
-& $python $serverPath --host 0.0.0.0 --port 8765
-exit $LASTEXITCODE
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    # Windows PowerShell 5 represents native stderr as non-terminating
+    # ErrorRecord objects. Continue keeps them in the bounded capture pipeline.
+    $ErrorActionPreference = "Continue"
+    & $python $serverPath --host 0.0.0.0 --port 8765 2>&1 |
+        ForEach-Object { Add-CapturedOutputLine -Value $_ }
+    $pythonExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($pythonExitCode -ne 0) {
+    Write-BackendFailureLog -Summary ("Python 后端退出，退出码 " + $pythonExitCode) -Lines @($CapturedOutput)
+    $lastLine = if ($CapturedOutput.Count) { [string]$CapturedOutput.ToArray()[-1] } else { "没有捕获到 Python 输出。" }
+    [Console]::Error.WriteLine($lastLine)
+}
+exit $pythonExitCode

@@ -19,7 +19,7 @@ PLAN_CODES = (
     "dual_language_monthly",
     "tools_monthly",
     "all_access_monthly",
-    "dual_language_lifetime",
+    "japanese_lifetime",
     "all_access_lifetime",
 )
 
@@ -60,6 +60,10 @@ class PaymentAssetTests(unittest.TestCase):
         self.assertEqual(
             qr_resource_id_for("wechat", "tools_monthly"),
             "qr-v1:wechat:tools_monthly",
+        )
+        self.assertEqual(
+            qr_resource_id_for("alipay", "japanese_lifetime"),
+            "qr-v1:alipay:japanese_lifetime",
         )
 
     def test_resource_id_mismatch_and_unknown_plan_are_rejected(self):
