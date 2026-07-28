@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.5.0"
+$LauncherVersion = "10.6.0"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -29,7 +29,8 @@ $BackendFailureLogPath = Join-Path $LauncherEntryRoot "后台启动错误.txt"
 $BackendStandardInputPath = Join-Path $StateRoot "backend-stdin.empty"
 $BackendStandardOutputPath = Join-Path $LauncherEntryRoot "后台标准输出.txt"
 $BackendStandardErrorPath = Join-Path $LauncherEntryRoot "后台标准错误.txt"
-$PythonProbeScriptPath = Join-Path $StateRoot "launcher-http-health-probe.py"
+$ProbeTempRoot = [IO.Path]::GetTempPath()
+$PythonProbeScriptPath = Join-Path $ProbeTempRoot "wyj-launcher-http-health-probe.py"
 $ProtocolStatePath = Join-Path $StateRoot "tunnel-protocol.txt"
 $BackendPidPath = Join-Path $StateRoot "backend.pid"
 $WatchdogScript = Join-Path $PSScriptRoot "watch-wyj.ps1"
@@ -566,6 +567,7 @@ function Test-UrlWithPython {
     $probeCode = @'
 import json
 import os
+import sys
 import urllib.request
 
 url = os.environ['WYJ_PROBE_URL']
@@ -592,12 +594,13 @@ try:
                 raise RuntimeError('API is not ready')
             if expected and str(payload.get('build', '')) != expected:
                 raise RuntimeError('backend build mismatch')
-except Exception:
+except Exception as error:
+    print(type(error).__name__ + ': ' + str(error), file=sys.stderr)
     raise SystemExit(1)
 print('OK')
 '@
-    if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
-        New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $ProbeTempRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $ProbeTempRoot -Force | Out-Null
     }
     [IO.File]::WriteAllText(
         $PythonProbeScriptPath,
@@ -605,54 +608,38 @@ print('OK')
         (New-Object System.Text.UTF8Encoding($false))
     )
 
-    $probeId = [Guid]::NewGuid().ToString("N")
-    $probeInput = Join-Path $StateRoot ("probe-" + $probeId + ".stdin")
-    $probeOutput = Join-Path $StateRoot ("probe-" + $probeId + ".stdout")
-    $probeError = Join-Path $StateRoot ("probe-" + $probeId + ".stderr")
-    New-Item -ItemType File -Path $probeInput -Force | Out-Null
-    $environmentNames = @(
-        "WYJ_PROBE_URL",
-        "WYJ_PROBE_TIMEOUT",
-        "WYJ_PROBE_MODE",
-        "WYJ_PROBE_EXPECTED",
-        "WYJ_PROBE_USER_AGENT"
-    )
-    $previousEnvironment = @{}
-    foreach ($name in $environmentNames) {
-        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $script:PythonExe
+    $startInfo.Arguments = ConvertTo-QuotedNativePath -PathValue $PythonProbeScriptPath
+    $startInfo.WorkingDirectory = $ProbeTempRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["WYJ_PROBE_URL"] = $Url
+    $startInfo.EnvironmentVariables["WYJ_PROBE_TIMEOUT"] = [string]$TimeoutSec
+    $startInfo.EnvironmentVariables["WYJ_PROBE_MODE"] = $Mode
+    $startInfo.EnvironmentVariables["WYJ_PROBE_EXPECTED"] = $ExpectedBuild
+    $startInfo.EnvironmentVariables["WYJ_PROBE_USER_AGENT"] = $HealthProbeUserAgent
     $probeProcess = $null
     try {
-        $env:WYJ_PROBE_URL = $Url
-        $env:WYJ_PROBE_TIMEOUT = [string]$TimeoutSec
-        $env:WYJ_PROBE_MODE = $Mode
-        $env:WYJ_PROBE_EXPECTED = $ExpectedBuild
-        $env:WYJ_PROBE_USER_AGENT = $HealthProbeUserAgent
-        $probeProcess = Start-Process -FilePath $script:PythonExe -ArgumentList @(
-            (ConvertTo-QuotedNativePath -PathValue $PythonProbeScriptPath)
-        ) -WorkingDirectory $StateRoot -WindowStyle Hidden -PassThru `
-            -RedirectStandardInput $probeInput `
-            -RedirectStandardOutput $probeOutput `
-            -RedirectStandardError $probeError
+        $probeProcess = New-Object System.Diagnostics.Process
+        $probeProcess.StartInfo = $startInfo
+        if (-not $probeProcess.Start()) { return $false }
+        $probeProcess.StandardInput.Close()
         if (-not $probeProcess.WaitForExit($TimeoutSec * 1000)) {
-            Stop-Process -Id $probeProcess.Id -Force -ErrorAction SilentlyContinue
+            try { $probeProcess.Kill() } catch { }
             return $false
         }
-        $probeProcess.WaitForExit()
-        $probeResult = [IO.File]::ReadAllText($probeOutput).Trim()
-        return ($probeResult -eq "OK")
+        $probeResult = $probeProcess.StandardOutput.ReadToEnd().Trim()
+        $null = $probeProcess.StandardError.ReadToEnd()
+        return ($probeProcess.ExitCode -eq 0 -and $probeResult -eq "OK")
     } catch {
         return $false
     } finally {
-        foreach ($name in $environmentNames) {
-            [Environment]::SetEnvironmentVariable(
-                $name,
-                $previousEnvironment[$name],
-                "Process"
-            )
-        }
-        foreach ($path in @($probeInput, $probeOutput, $probeError)) {
-            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -ne $probeProcess) {
+            try { $probeProcess.Dispose() } catch { }
         }
     }
 }
@@ -1232,7 +1219,7 @@ function Ensure-Tunnel {
     foreach ($protocol in $protocols) {
         $lastProcess = Start-TunnelProcess -Protocol $protocol
         $waitSeconds = if ($protocol -eq "auto") { 65 } else { 45 }
-        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -StableSuccesses 3 -IntervalMilliseconds 2500 -Process $lastProcess) {
+        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -StableSuccesses 1 -IntervalMilliseconds 2500 -Process $lastProcess) {
             Save-PreferredTunnelProtocol -Protocol $protocol
             Write-LaunchLog ("固定 Tunnel 已恢复并记住 " + $protocol.ToUpperInvariant() + "。") "Green"
             return

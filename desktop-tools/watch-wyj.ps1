@@ -15,7 +15,7 @@ public static class WYJPowerState {
 }
 "@
 
-$WatchdogVersion = "3.3.0"
+$WatchdogVersion = "3.4.0"
 $Launcher = Join-Path $PSScriptRoot "start-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR)) {
@@ -24,8 +24,8 @@ $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR))
     $PSScriptRoot
 }
 $LogPath = Join-Path $EntryRoot "守护日志.txt"
-$ProbeStateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
-$PythonProbeScriptPath = Join-Path $ProbeStateRoot "watchdog-http-health-probe.py"
+$ProbeTempRoot = [IO.Path]::GetTempPath()
+$PythonProbeScriptPath = Join-Path $ProbeTempRoot "wyj-watchdog-http-health-probe.py"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $PublicStatusUrls = @(
@@ -89,6 +89,7 @@ function Test-EndpointWithPython {
     $probeCode = @'
 import json
 import os
+import sys
 import urllib.request
 
 url = os.environ['WYJ_PROBE_URL']
@@ -110,12 +111,13 @@ try:
         payload = json.load(response)
         if require_ok == '1' and payload.get('ok') is not True:
             raise RuntimeError('API is not ready')
-except Exception:
+except Exception as error:
+    print(type(error).__name__ + ': ' + str(error), file=sys.stderr)
     raise SystemExit(1)
 print('OK')
 '@
-    if (-not (Test-Path -LiteralPath $ProbeStateRoot -PathType Container)) {
-        New-Item -ItemType Directory -Path $ProbeStateRoot -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $ProbeTempRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $ProbeTempRoot -Force | Out-Null
     }
     [IO.File]::WriteAllText(
         $PythonProbeScriptPath,
@@ -124,51 +126,36 @@ print('OK')
     )
 
     $required = if ($RequireOk) { "1" } else { "0" }
-    $probeId = [Guid]::NewGuid().ToString("N")
-    $probeInput = Join-Path $ProbeStateRoot ("watch-probe-" + $probeId + ".stdin")
-    $probeOutput = Join-Path $ProbeStateRoot ("watch-probe-" + $probeId + ".stdout")
-    $probeError = Join-Path $ProbeStateRoot ("watch-probe-" + $probeId + ".stderr")
-    New-Item -ItemType File -Path $probeInput -Force | Out-Null
-    $environmentNames = @(
-        "WYJ_PROBE_URL",
-        "WYJ_PROBE_REQUIRE_OK",
-        "WYJ_PROBE_USER_AGENT"
-    )
-    $previousEnvironment = @{}
-    foreach ($name in $environmentNames) {
-        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $PythonExe
+    $startInfo.Arguments = '"' + $PythonProbeScriptPath + '"'
+    $startInfo.WorkingDirectory = $ProbeTempRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["WYJ_PROBE_URL"] = $Url
+    $startInfo.EnvironmentVariables["WYJ_PROBE_REQUIRE_OK"] = $required
+    $startInfo.EnvironmentVariables["WYJ_PROBE_USER_AGENT"] = $HealthProbeUserAgent
     $probeProcess = $null
     try {
-        $env:WYJ_PROBE_URL = $Url
-        $env:WYJ_PROBE_REQUIRE_OK = $required
-        $env:WYJ_PROBE_USER_AGENT = $HealthProbeUserAgent
-        $quotedProbeScript = '"' + $PythonProbeScriptPath + '"'
-        $probeProcess = Start-Process -FilePath $PythonExe -ArgumentList @(
-            $quotedProbeScript
-        ) -WorkingDirectory $ProbeStateRoot -WindowStyle Hidden -PassThru `
-            -RedirectStandardInput $probeInput `
-            -RedirectStandardOutput $probeOutput `
-            -RedirectStandardError $probeError
+        $probeProcess = New-Object System.Diagnostics.Process
+        $probeProcess.StartInfo = $startInfo
+        if (-not $probeProcess.Start()) { return $false }
+        $probeProcess.StandardInput.Close()
         if (-not $probeProcess.WaitForExit(8000)) {
-            Stop-Process -Id $probeProcess.Id -Force -ErrorAction SilentlyContinue
+            try { $probeProcess.Kill() } catch { }
             return $false
         }
-        $probeProcess.WaitForExit()
-        $probeResult = [IO.File]::ReadAllText($probeOutput).Trim()
-        return ($probeResult -eq "OK")
+        $probeResult = $probeProcess.StandardOutput.ReadToEnd().Trim()
+        $null = $probeProcess.StandardError.ReadToEnd()
+        return ($probeProcess.ExitCode -eq 0 -and $probeResult -eq "OK")
     } catch {
         return $false
     } finally {
-        foreach ($name in $environmentNames) {
-            [Environment]::SetEnvironmentVariable(
-                $name,
-                $previousEnvironment[$name],
-                "Process"
-            )
-        }
-        foreach ($path in @($probeInput, $probeOutput, $probeError)) {
-            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -ne $probeProcess) {
+            try { $probeProcess.Dispose() } catch { }
         }
     }
 }

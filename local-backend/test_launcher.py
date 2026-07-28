@@ -139,12 +139,12 @@ class LauncherStabilityTests(unittest.TestCase):
         )
         self.run_powershell(script)
 
-    def test_tunnel_candidate_uses_three_consecutive_public_checks(self):
+    def test_tunnel_candidate_keeps_first_end_to_end_success(self):
         launcher = (
             ROOT / "desktop-tools" / "start-wyj.ps1"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            '-StableSuccesses 3 -IntervalMilliseconds 2500 -Process $lastProcess',
+            '-StableSuccesses 1 -IntervalMilliseconds 2500 -Process $lastProcess',
             launcher,
         )
         self.assertIn(
@@ -159,19 +159,25 @@ class LauncherStabilityTests(unittest.TestCase):
         watchdog = (
             ROOT / "desktop-tools" / "watch-wyj.ps1"
         ).read_text(encoding="utf-8")
-        self.assertIn("launcher-http-health-probe.py", launcher)
+        self.assertIn("wyj-launcher-http-health-probe.py", launcher)
+        self.assertIn("$ProbeTempRoot = [IO.Path]::GetTempPath()", launcher)
         self.assertIn("$probeProcess.WaitForExit($TimeoutSec * 1000)", launcher)
         self.assertNotIn("$null = & $script:PythonExe -c", launcher)
-        self.assertIn("watchdog-http-health-probe.py", watchdog)
+        self.assertIn("wyj-watchdog-http-health-probe.py", watchdog)
+        self.assertIn("$ProbeTempRoot = [IO.Path]::GetTempPath()", watchdog)
         self.assertIn("$probeProcess.WaitForExit(8000)", watchdog)
         self.assertNotIn("$null = & $PythonExe -c", watchdog)
         for script in (launcher, watchdog):
-            self.assertIn("-RedirectStandardInput $probeInput", script)
-            self.assertIn("-RedirectStandardOutput $probeOutput", script)
-            self.assertIn("-RedirectStandardError $probeError", script)
-            self.assertIn("Stop-Process -Id $probeProcess.Id -Force", script)
+            self.assertIn("System.Diagnostics.ProcessStartInfo", script)
+            self.assertIn("$startInfo.UseShellExecute = $false", script)
+            self.assertIn("$startInfo.RedirectStandardInput = $true", script)
+            self.assertIn("$startInfo.RedirectStandardOutput = $true", script)
+            self.assertIn("$startInfo.RedirectStandardError = $true", script)
+            self.assertIn("$probeProcess.StandardInput.Close()", script)
+            self.assertIn("$probeProcess.Kill()", script)
+            self.assertIn("$probeProcess.Dispose()", script)
             self.assertIn("print('OK')", script)
-            self.assertIn("[IO.File]::ReadAllText($probeOutput).Trim()", script)
+            self.assertIn("$probeProcess.StandardOutput.ReadToEnd().Trim()", script)
 
     def test_saved_protocol_is_preserved_without_new_health_evidence(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
