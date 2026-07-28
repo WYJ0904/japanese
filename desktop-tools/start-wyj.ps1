@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.1.2"
+$LauncherVersion = "10.2.0"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -36,6 +36,7 @@ $SiteUrl = "https://thewyj.uk"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
 $ApiStatusUrl = "https://api.thewyj.uk/api/status"
 $PagesStatusUrl = "https://thewyj.uk/api/status"
+$TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $OllamaModel = "qwen3:8b"
 
@@ -50,6 +51,7 @@ $script:CurrentPhase = "初始化"
 $script:BackendLaunchProcess = $null
 $script:LaunchStartedAt = Get-Date
 $script:DuplicatePathWasRepaired = $false
+$script:TunnelValidationDegraded = $false
 
 function Repair-DuplicatePathEnvironment {
     try {
@@ -178,6 +180,9 @@ function Write-LauncherErrorReport {
     $report.Add(("本地后端在线: " + [bool](Test-BackendReady)))
     $listenerIds = @(Get-ListeningProcessIds)
     $report.Add(("8765 监听进程: " + $(if ($listenerIds.Count) { $listenerIds -join ", " } else { "无" })))
+    $tunnelConnections = Get-TunnelHaConnections
+    $report.Add(("Tunnel 活动连接: " + $tunnelConnections))
+    $report.Add(("Tunnel 诊断: " + (Get-TunnelDiagnosticSummary)))
     if ($null -ne $script:BackendLaunchProcess) {
         try { $script:BackendLaunchProcess.Refresh() } catch { }
         $exitDescription = if ($script:BackendLaunchProcess.HasExited) {
@@ -897,12 +902,49 @@ function Test-PublicBackendReady {
     )
 }
 
+function Get-TunnelHaConnections {
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $TunnelMetricsUrl -TimeoutSec 2
+        $match = [regex]::Match(
+            [string]$response.Content,
+            '(?m)^cloudflared_tunnel_ha_connections\s+([0-9]+(?:\.[0-9]+)?)\s*$'
+        )
+        if ($match.Success) {
+            return [int][Math]::Floor([double]$match.Groups[1].Value)
+        }
+    } catch { }
+    return 0
+}
+
+function Get-TunnelDiagnosticSummary {
+    if (-not $script:TunnelLog -or
+        -not (Test-Path -LiteralPath $script:TunnelLog -PathType Leaf)) {
+        return "暂无 Tunnel 日志"
+    }
+    try {
+        $tail = (Get-Content -LiteralPath $script:TunnelLog -Encoding UTF8 -Tail 500) -join "`n"
+        $findings = New-Object System.Collections.Generic.List[string]
+        if ($tail -match 'HTTP/2 connection is blocked or unreachable|TLS handshake with edge error') {
+            $findings.Add("HTTP/2 到 Cloudflare Edge 的连接不可用")
+        }
+        if ($tail -match 'timeout: no recent network activity|failed to dial to edge with quic') {
+            $findings.Add("QUIC 曾发生网络超时并由 cloudflared 自动重连")
+        }
+        if ($tail -match 'Registered tunnel connection') {
+            $findings.Add("日志中存在成功注册的 Tunnel 连接")
+        }
+        if ($findings.Count) { return ($findings -join "；") }
+    } catch { }
+    return "未识别到明确的 Tunnel 错误"
+}
+
 function Wait-ForStablePublicBackend {
     param(
         [ValidateRange(1, 600)][int]$Seconds,
         [Parameter(Mandatory = $true)][string]$Label,
         [ValidateRange(1, 20)][int]$StableSuccesses = 5,
         [ValidateRange(100, 10000)][int]$IntervalMilliseconds = 3000,
+        [switch]$AcceptHealthyConnector,
         $Process = $null
     )
     $deadline = (Get-Date).AddSeconds($Seconds)
@@ -927,6 +969,18 @@ function Wait-ForStablePublicBackend {
             }
         } else {
             $consecutiveSuccesses = 0
+            if ($AcceptHealthyConnector) {
+                $connections = Get-TunnelHaConnections
+                if ($connections -gt 0) {
+                    $script:TunnelValidationDegraded = $true
+                    Write-Host ""
+                    Write-LaunchLog (
+                        "$Label 的外部 HTTP 探测暂时波动，但 Tunnel 保持 $connections 条活动连接；" +
+                        "保留现有连接并交由 cloudflared 自动重连。"
+                    ) "Yellow"
+                    return $true
+                }
+            }
         }
 
         Write-Host "." -NoNewline
@@ -960,6 +1014,7 @@ function Start-TunnelProcess {
     $arguments = @(
         "tunnel", "--config", (ConvertTo-QuotedNativePath -PathValue $script:TunnelConfig),
         "--protocol", $Protocol, "--edge-ip-version", "4",
+        "--metrics", "127.0.0.1:20241",
         "--loglevel", "info", "--logfile", (ConvertTo-QuotedNativePath -PathValue $script:TunnelLog),
         "run", "japanese-local-backend"
     )
@@ -989,19 +1044,28 @@ function Get-ManagedTunnelProcesses {
 }
 
 function Ensure-Tunnel {
-    if (Test-PublicBackendReady) {
-        if (Wait-ForStablePublicBackend -Seconds 20 -Label "现有固定 Tunnel" -StableSuccesses 5 -IntervalMilliseconds 3000) {
-            Write-LaunchLog "固定 Tunnel 与 Pages 代理连续稳定。" "Green"
-            return
-        }
-        Write-LaunchLog "现有 Tunnel 响应不稳定，准备主动重连。" "Yellow"
-    }
     $script:CloudflaredExe = Resolve-CloudflaredExecutable
     if (-not $script:CloudflaredExe) {
         throw "找不到 cloudflared。请放入运行目录 tools，或设置 VOCAB_CLOUDFLARED_EXE。"
     }
     if (-not (Test-Path -LiteralPath $script:TunnelConfig -PathType Leaf)) {
         throw "找不到 Tunnel 配置。请设置 VOCAB_TUNNEL_CONFIG。"
+    }
+
+    $connectorConnections = Get-TunnelHaConnections
+    if (Test-PublicBackendReady) {
+        if (Wait-ForStablePublicBackend -Seconds 20 -Label "现有固定 Tunnel" -StableSuccesses 5 -IntervalMilliseconds 3000 -AcceptHealthyConnector) {
+            Write-LaunchLog "固定 Tunnel 与 Pages 代理连续稳定。" "Green"
+            return
+        }
+        Write-LaunchLog "现有 Tunnel 响应不稳定，准备主动重连。" "Yellow"
+    } elseif ($connectorConnections -gt 0) {
+        $script:TunnelValidationDegraded = $true
+        Write-LaunchLog (
+            "公网 HTTP 探测暂时波动，但现有 Tunnel 保持 $connectorConnections 条活动连接；" +
+            "为避免放大断线，本次不重启 cloudflared。"
+        ) "Yellow"
+        return
     }
 
     Write-LaunchLog "正在恢复固定 Tunnel..." "Yellow"
@@ -1017,7 +1081,7 @@ function Ensure-Tunnel {
     foreach ($protocol in @($preferred, $fallback)) {
         $lastProcess = Start-TunnelProcess -Protocol $protocol
         $waitSeconds = if ($protocol -eq $preferred) { 40 } else { 55 }
-        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -Process $lastProcess) {
+        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -Process $lastProcess -AcceptHealthyConnector) {
             Save-PreferredTunnelProtocol -Protocol $protocol
             Write-LaunchLog ("固定 Tunnel 已恢复并记住 " + $protocol.ToUpperInvariant() + "。") "Green"
             return
@@ -1228,10 +1292,14 @@ function Invoke-WyjLauncher {
         if (-not (Test-HttpOk -Url $SiteUrl -TimeoutSec 12)) {
             throw "正式网站首页暂时无法访问。"
         }
-        if (-not (Wait-ForStablePublicBackend -Seconds 12 -Label "正式账户与支付接口" -StableSuccesses 3 -IntervalMilliseconds 2000)) {
+        if (-not (Wait-ForStablePublicBackend -Seconds 12 -Label "正式账户与支付接口" -StableSuccesses 3 -IntervalMilliseconds 2000 -AcceptHealthyConnector)) {
             throw "固定 Tunnel 在启动完成前再次失去连接。"
         }
-        Write-LaunchLog "网站、账户、会员与支付服务均已就绪。" "Green"
+        if ($script:TunnelValidationDegraded) {
+            Write-LaunchLog "网站已启动；Tunnel 有活动连接，公网验证波动将由 cloudflared 在后台自动恢复。" "Yellow"
+        } else {
+            Write-LaunchLog "网站、账户、会员与支付服务均已就绪。" "Green"
+        }
         if (-not $aiReady) {
             Write-LaunchLog "AI 选词与首次释义判卷稍后可由守护程序继续恢复。" "Yellow"
         }

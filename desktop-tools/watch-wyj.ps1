@@ -15,7 +15,7 @@ public static class WYJPowerState {
 }
 "@
 
-$WatchdogVersion = "3.0.0"
+$WatchdogVersion = "3.1.0"
 $Launcher = Join-Path $PSScriptRoot "start-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR)) {
@@ -30,6 +30,7 @@ $PublicStatusUrls = @(
     "https://api.thewyj.uk/api/status",
     "https://thewyj.uk/api/status"
 )
+$TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $WebsiteRepairCooldownSeconds = 120
 $AiRepairCooldownSeconds = 600
 $RepairFailureLimit = 3
@@ -99,6 +100,20 @@ function Test-Endpoint {
     } catch {
         return $false
     }
+}
+
+function Get-TunnelHaConnections {
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $TunnelMetricsUrl -TimeoutSec 2
+        $match = [regex]::Match(
+            [string]$response.Content,
+            '(?m)^cloudflared_tunnel_ha_connections\s+([0-9]+(?:\.[0-9]+)?)\s*$'
+        )
+        if ($match.Success) {
+            return [int][Math]::Floor([double]$match.Groups[1].Value)
+        }
+    } catch { }
+    return 0
 }
 
 function Get-RepairDelaySeconds {
@@ -192,6 +207,7 @@ try {
     [WYJPowerState]::KeepSystemAwake()
     Write-WatchdogLog ("watchdog V" + $WatchdogVersion + " started")
     $websiteFailures = 0
+    $publicValidationFailures = 0
     $aiFailures = 0
     $websiteRepairFailureStreak = 0
     $aiRepairFailureStreak = 0
@@ -208,14 +224,31 @@ try {
                 break
             }
         }
+        $connectorConnections = Get-TunnelHaConnections
+        $connectorOk = ($connectorConnections -gt 0)
         $ollamaOk = Test-Endpoint -Url $OllamaStatusUrl
 
-        if ($localOk -and $publicOk) {
+        if ($localOk -and ($publicOk -or $connectorOk)) {
             $websiteFailures = 0
             $websiteRepairFailureStreak = 0
+            if ($publicOk) {
+                $publicValidationFailures = 0
+            } else {
+                $publicValidationFailures++
+                if ($publicValidationFailures -eq 1 -or ($publicValidationFailures % 12) -eq 0) {
+                    Write-WatchdogLog (
+                        "public HTTP validation is transiently unavailable; " +
+                        "cloudflared has $connectorConnections active connection(s), so it will not be restarted"
+                    )
+                }
+            }
         } else {
+            $publicValidationFailures = 0
             $websiteFailures++
-            Write-WatchdogLog ("website health failure {0}/2 local={1} public={2}" -f $websiteFailures, $localOk, $publicOk)
+            Write-WatchdogLog (
+                "website health failure {0}/2 local={1} public={2} tunnelConnections={3}" -f
+                $websiteFailures, $localOk, $publicOk, $connectorConnections
+            )
         }
 
         if ($ollamaOk) {

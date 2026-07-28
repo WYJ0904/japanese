@@ -168,6 +168,29 @@ class LauncherStabilityTests(unittest.TestCase):
         )
         self.run_powershell(script)
 
+    def test_tunnel_metrics_fallback_preserves_a_connected_connector(self):
+        launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
+        script = textwrap.dedent(
+            f"""
+            . '{launcher}'
+            function Test-PublicBackendReady {{ return $false }}
+            function Get-TunnelHaConnections {{ return 2 }}
+            $script:TunnelValidationDegraded = $false
+            $ready = Wait-ForStablePublicBackend -Seconds 2 -Label 'synthetic connector' -StableSuccesses 3 -IntervalMilliseconds 100 -AcceptHealthyConnector
+            if (-not $ready) {{ throw 'healthy connector fallback was rejected' }}
+            if (-not $script:TunnelValidationDegraded) {{ throw 'degraded validation was not recorded' }}
+            """
+        )
+        self.run_powershell(script)
+
+    def test_watchdog_does_not_restart_cloudflared_for_http_probe_jitter(self):
+        watchdog = (
+            ROOT / "desktop-tools" / "watch-wyj.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn('$connectorConnections = Get-TunnelHaConnections', watchdog)
+        self.assertIn('$localOk -and ($publicOk -or $connectorOk)', watchdog)
+        self.assertIn('so it will not be restarted', watchdog)
+
     def test_source_selection_and_legacy_seventy_yuan_qr_fallback(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
         with tempfile.TemporaryDirectory() as directory:
