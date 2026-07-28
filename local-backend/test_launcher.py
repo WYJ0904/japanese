@@ -1,3 +1,5 @@
+import base64
+import re
 import os
 import shutil
 import subprocess
@@ -168,6 +170,55 @@ class LauncherStabilityTests(unittest.TestCase):
         )
         self.run_powershell(script)
 
+    def test_public_readiness_uses_the_real_pages_path(self):
+        launcher = (ROOT / "desktop-tools" / "start-wyj.ps1").read_text(
+            encoding="utf-8"
+        )
+        readiness = re.search(
+            r"function Test-PublicBackendReady\s*\{(?P<body>.*?)\n\}",
+            launcher,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(readiness)
+        self.assertIn("$PagesStatusUrl", readiness.group("body"))
+        self.assertNotIn("$ApiStatusUrl", readiness.group("body"))
+
+        watchdog = (ROOT / "desktop-tools" / "watch-wyj.ps1").read_text(
+            encoding="utf-8"
+        )
+        public_urls = re.search(
+            r"\$PublicStatusUrls\s*=\s*@\((?P<body>.*?)\)",
+            watchdog,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(public_urls)
+        self.assertIn("https://thewyj.uk/api/status", public_urls.group("body"))
+        self.assertNotIn(
+            "https://api.thewyj.uk/api/status",
+            public_urls.group("body"),
+        )
+
+        api_probe = re.search(
+            r"function Test-ApiOk\s*\{(?P<body>.*?)function Test-HttpOk",
+            launcher,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(api_probe)
+        self.assertLess(
+            api_probe.group("body").index("Invoke-RestMethod"),
+            api_probe.group("body").index("Test-UrlWithPython"),
+        )
+
+        endpoint_probe = re.search(
+            r"function Test-Endpoint\s*\{(?P<body>.*?)function Get-TunnelHaConnections",
+            watchdog,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(endpoint_probe)
+        self.assertLess(
+            endpoint_probe.group("body").index("Invoke-RestMethod"),
+            endpoint_probe.group("body").index("Test-EndpointWithPython"),
+        )
     def test_tunnel_candidate_keeps_first_end_to_end_success(self):
         launcher = (
             ROOT / "desktop-tools" / "start-wyj.ps1"
@@ -309,6 +360,55 @@ class LauncherStabilityTests(unittest.TestCase):
             )
             self.run_powershell(script)
 
+
+    def test_mihomo_party_persistent_routing_is_safe_and_idempotent(self):
+        launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "mihomo-party"
+            (root / "override").mkdir(parents=True)
+            (root / "mihomo.yaml").write_text(
+                "mode: global\ndns:\n  fake-ip-filter:\n    - +.lan\n",
+                encoding="utf-8",
+            )
+            (root / "override.yaml").write_text(
+                "items:\n  - id: keep-existing\n    type: local\n",
+                encoding="utf-8",
+            )
+            root_ps = str(root).replace("'", "''")
+            backup_ps = str(Path(directory) / "backups").replace("'", "''")
+            script = textwrap.dedent(
+                f"""
+                . '{launcher}'
+                $first = Install-MihomoPartyPersistentRouting -PartyRoot '{root_ps}' -BackupRoot '{backup_ps}'
+                if (-not $first.Enabled -or -not $first.Changed) {{ throw 'repair did not run' }}
+                $all = (Get-Content -Raw (Join-Path '{root_ps}' 'mihomo.yaml')) + (Get-Content -Raw (Join-Path '{root_ps}' 'override.yaml')) + (Get-Content -Raw (Join-Path '{root_ps}' 'override\\wyj-cloudflared-direct.yaml'))
+                foreach ($marker in @('mode: rule', '+.argotunnel.com', 'keep-existing', 'wyj-cloudflared-direct', 'PROCESS-NAME,cloudflared.exe,DIRECT', 'DOMAIN-SUFFIX,argotunnel.com,DIRECT', 'MATCH,GLOBAL')) {{
+                    if (-not $all.Contains($marker)) {{ throw "missing marker: $marker" }}
+                }}
+                $second = Install-MihomoPartyPersistentRouting -PartyRoot '{root_ps}' -BackupRoot '{backup_ps}'
+                if ($second.Changed) {{ throw 'repair is not idempotent' }}
+                """
+            )
+            self.run_powershell(script)
+
+    def test_mihomo_party_guard_is_session_scoped_and_redirected(self):
+        launcher = (ROOT / "desktop-tools" / "start-wyj.ps1").read_text(encoding="utf-8")
+        for marker in (
+            "PROCESS-NAME,cloudflared.exe,DIRECT",
+            "DOMAIN-SUFFIX,argotunnel.com,DIRECT",
+            "MATCH,GLOBAL",
+            "/configs?force=true",
+            "-RedirectStandardInput $MihomoGuardStandardInputPath",
+            "-RedirectStandardOutput $MihomoGuardStandardOutputPath",
+            "-RedirectStandardError $MihomoGuardStandardErrorPath",
+        ):
+            self.assertIn(marker, launcher)
+        encoded = re.search(r'\$encoded = "([A-Za-z0-9+/=]+)"', launcher)
+        self.assertIsNotNone(encoded)
+        guard = base64.b64decode(encoded.group(1)).decode("utf-8")
+        self.assertIn("while (Get-Process -Id $ClashPartyPid", guard)
+        self.assertIn("Set-MihomoRuleMode", guard)
+        self.assertNotIn("Start Menu\\Programs\\Startup", guard)
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.7.0"
+$LauncherVersion = "10.8.1"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -29,6 +29,12 @@ $BackendFailureLogPath = Join-Path $LauncherEntryRoot "后台启动错误.txt"
 $BackendStandardInputPath = Join-Path $StateRoot "backend-stdin.empty"
 $BackendStandardOutputPath = Join-Path $LauncherEntryRoot "后台标准输出.txt"
 $BackendStandardErrorPath = Join-Path $LauncherEntryRoot "后台标准错误.txt"
+$script:MihomoPartyRoot = Join-Path $env:APPDATA "mihomo-party"
+$MihomoGuardScriptPath = Join-Path $StateRoot "mihomo-tunnel-guard.ps1"
+$MihomoGuardPidPath = Join-Path $StateRoot "mihomo-tunnel-guard.pid"
+$MihomoGuardStandardInputPath = Join-Path $StateRoot "mihomo-tunnel-guard.stdin.txt"
+$MihomoGuardStandardOutputPath = Join-Path $StateRoot "mihomo-tunnel-guard.out.log"
+$MihomoGuardStandardErrorPath = Join-Path $StateRoot "mihomo-tunnel-guard.err.log"
 $ProbeTempRoot = [IO.Path]::GetTempPath()
 $PythonProbeScriptPath = Join-Path $ProbeTempRoot "wyj-launcher-http-health-probe.py"
 $ProtocolStatePath = Join-Path $StateRoot "tunnel-protocol.txt"
@@ -44,7 +50,7 @@ $PagesStatusUrl = "https://thewyj.uk/api/status"
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $OllamaModel = "qwen3:8b"
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.7"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.8.1"
 
 $script:BackendRoot = ""
 $script:CloudflaredExe = ""
@@ -547,6 +553,524 @@ function Repair-TunnelOriginAddress {
     Write-LaunchLog "已将 Tunnel 本地上游固定为 IPv4，避免 localhost 解析到不可监听的 IPv6 地址。" "Green"
 }
 
+function Set-Utf8TextFileAtomically {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content
+    )
+    $parent = Split-Path -Parent $Path
+    if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $temporaryPath = $Path + ".tmp-" + [Guid]::NewGuid().ToString("N")
+    try {
+        [IO.File]::WriteAllText(
+            $temporaryPath,
+            $Content,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Backup-MihomoPartyFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$BackupRoot
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+    if (-not (Test-Path -LiteralPath $BackupRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+    }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $name = $stamp + "-" + [IO.Path]::GetFileName($Path)
+    Copy-Item -LiteralPath $Path -Destination (Join-Path $BackupRoot $name) -Force
+}
+
+function Set-MihomoDnsFilterContent {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content)
+    if ([regex]::IsMatch(
+        $Content,
+        '(?im)^[ \t]*-[ \t]*["'']?\+\.argotunnel\.com["'']?[ \t]*\r?$'
+    )) {
+        return $Content
+    }
+
+    $newline = if ($Content.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $emptyFilter = [regex]::Match(
+        $Content,
+        '(?m)^(?<indent>[ \t]+)fake-ip-filter:[ \t]*\[[ \t]*\][ \t]*\r?$'
+    )
+    if ($emptyFilter.Success) {
+        $indent = $emptyFilter.Groups["indent"].Value
+        $replacement = (
+            $indent + "fake-ip-filter:" + $newline +
+            $indent + "  - +.argotunnel.com"
+        )
+        return (
+            $Content.Substring(0, $emptyFilter.Index) +
+            $replacement +
+            $Content.Substring($emptyFilter.Index + $emptyFilter.Length)
+        )
+    }
+
+    $filter = [regex]::Match(
+        $Content,
+        '(?m)^(?<indent>[ \t]+)fake-ip-filter:[ \t]*\r?$'
+    )
+    if ($filter.Success) {
+        $itemIndent = $filter.Groups["indent"].Value + "  "
+        $replacement = $filter.Value + $newline + $itemIndent + "- +.argotunnel.com"
+        return (
+            $Content.Substring(0, $filter.Index) +
+            $replacement +
+            $Content.Substring($filter.Index + $filter.Length)
+        )
+    }
+
+    $dns = [regex]::Match($Content, '(?m)^dns:[ \t]*\r?$')
+    if ($dns.Success) {
+        $replacement = (
+            $dns.Value + $newline +
+            "  fake-ip-filter:" + $newline +
+            "    - +.argotunnel.com"
+        )
+        return (
+            $Content.Substring(0, $dns.Index) +
+            $replacement +
+            $Content.Substring($dns.Index + $dns.Length)
+        )
+    }
+    return $Content
+}
+
+function Set-MihomoWorkRoutingContent {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content)
+    $newline = if ($Content.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $updated = [regex]::Replace(
+        $Content,
+        '(?im)^(?:\uFEFF)?mode:[ \t]*(?:global|rule)[ \t]*(?:#.*)?\r?$',
+        'mode: rule',
+        1
+    )
+    $updated = Set-MihomoDnsFilterContent -Content $updated
+
+    $rules = @(
+        "rules:",
+        "  - PROCESS-NAME,cloudflared.exe,DIRECT",
+        "  - DOMAIN-SUFFIX,argotunnel.com,DIRECT",
+        "  - MATCH,GLOBAL"
+    ) -join $newline
+    $rulesBlock = [regex]::Match(
+        $updated,
+        '(?ms)^rules:[ \t]*(?:\r?\n).*?(?=^[A-Za-z0-9_-]+:[ \t]*|\z)'
+    )
+    if ($rulesBlock.Success) {
+        $updated = (
+            $updated.Substring(0, $rulesBlock.Index) +
+            $rules + $newline +
+            $updated.Substring($rulesBlock.Index + $rulesBlock.Length)
+        )
+    } else {
+        $updated = $updated.TrimEnd("`r", "`n") + $newline + $rules + $newline
+    }
+    return $updated
+}
+
+function Set-MihomoTextFileIfChanged {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory = $true)][string]$BackupRoot
+    )
+    $current = if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        [IO.File]::ReadAllText($Path)
+    } else {
+        $null
+    }
+    if ($null -ne $current -and $current -ceq $Content) { return $false }
+    if ($null -ne $current) {
+        Backup-MihomoPartyFile -Path $Path -BackupRoot $BackupRoot
+    }
+    Set-Utf8TextFileAtomically -Path $Path -Content $Content
+    return $true
+}
+
+function Install-MihomoPartyPersistentRouting {
+    param(
+        [string]$PartyRoot = $script:MihomoPartyRoot,
+        [string]$BackupRoot = (Join-Path $StateRoot "config-backups\mihomo-party")
+    )
+    $result = [ordered]@{
+        Available = $false
+        Enabled = $false
+        Mode = ""
+        Changed = $false
+    }
+    if (-not $PartyRoot -or
+        -not (Test-Path -LiteralPath $PartyRoot -PathType Container)) {
+        return [pscustomobject]$result
+    }
+
+    $persistentPath = Join-Path $PartyRoot "mihomo.yaml"
+    if (-not (Test-Path -LiteralPath $persistentPath -PathType Leaf)) {
+        return [pscustomobject]$result
+    }
+    $result.Available = $true
+    $persistent = [IO.File]::ReadAllText($persistentPath)
+    $modeMatch = [regex]::Match(
+        $persistent,
+        '(?im)^(?:\uFEFF)?mode:[ \t]*(?<mode>[A-Za-z0-9_-]+)[ \t]*(?:#.*)?\r?$'
+    )
+    if (-not $modeMatch.Success) {
+        $result.Mode = "unknown"
+        return [pscustomobject]$result
+    }
+    $result.Mode = $modeMatch.Groups["mode"].Value.ToLowerInvariant()
+    if ($result.Mode -eq "direct") {
+        return [pscustomobject]$result
+    }
+    if ($result.Mode -notin @("global", "rule")) {
+        return [pscustomobject]$result
+    }
+    $result.Enabled = $true
+
+    $persistentUpdated = [regex]::Replace(
+        $persistent,
+        '(?im)^(?:\uFEFF)?mode:[ \t]*(?:global|rule)[ \t]*(?:#.*)?\r?$',
+        'mode: rule',
+        1
+    )
+    $persistentUpdated = Set-MihomoDnsFilterContent -Content $persistentUpdated
+    if (Set-MihomoTextFileIfChanged -Path $persistentPath -Content $persistentUpdated -BackupRoot $BackupRoot) {
+        $result.Changed = $true
+    }
+
+    $newline = if ($persistent.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $overrideIndexPath = Join-Path $PartyRoot "override.yaml"
+    $overrideIndex = if (Test-Path -LiteralPath $overrideIndexPath -PathType Leaf) {
+        [IO.File]::ReadAllText($overrideIndexPath)
+    } else {
+        "items:" + $newline
+    }
+    if (-not [regex]::IsMatch(
+        $overrideIndex,
+        '(?im)^[ \t]*-[ \t]*id:[ \t]*wyj-cloudflared-direct[ \t]*\r?$'
+    )) {
+        $updatedMilliseconds = [long](
+            ([DateTime]::UtcNow - [DateTime]"1970-01-01").TotalMilliseconds
+        )
+        $item = @(
+            "  - id: wyj-cloudflared-direct",
+            "    name: WYJ Cloudflare Tunnel Direct",
+            "    type: local",
+            "    ext: yaml",
+            "    global: true",
+            ("    updated: " + $updatedMilliseconds)
+        ) -join $newline
+        if ([regex]::IsMatch($overrideIndex, '(?im)^items:[ \t]*\[[ \t]*\][ \t]*\r?$')) {
+            $overrideIndex = [regex]::Replace(
+                $overrideIndex,
+                '(?im)^items:[ \t]*\[[ \t]*\][ \t]*\r?$',
+                ("items:" + $newline + $item),
+                1
+            )
+        } elseif ([regex]::IsMatch($overrideIndex, '(?im)^items:[ \t]*\r?$')) {
+            $itemsBlock = [regex]::Match(
+                $overrideIndex,
+                '(?ms)^items:[ \t]*(?:\r?\n).*?(?=^[A-Za-z0-9_-]+:[ \t]*|\z)'
+            )
+            if ($itemsBlock.Success) {
+                $replacement = $itemsBlock.Value.TrimEnd("`r", "`n") + $newline + $item + $newline
+                $overrideIndex = (
+                    $overrideIndex.Substring(0, $itemsBlock.Index) +
+                    $replacement +
+                    $overrideIndex.Substring($itemsBlock.Index + $itemsBlock.Length)
+                )
+            }
+        } else {
+            $overrideIndex = (
+                $overrideIndex.TrimEnd("`r", "`n") + $newline +
+                "items:" + $newline + $item + $newline
+            )
+        }
+    }
+    if (Set-MihomoTextFileIfChanged -Path $overrideIndexPath -Content $overrideIndex -BackupRoot $BackupRoot) {
+        $result.Changed = $true
+    }
+
+    $overridePath = Join-Path $PartyRoot "override\wyj-cloudflared-direct.yaml"
+    $overrideContent = @(
+        "rules:",
+        "  - PROCESS-NAME,cloudflared.exe,DIRECT",
+        "  - DOMAIN-SUFFIX,argotunnel.com,DIRECT",
+        "  - MATCH,GLOBAL",
+        ""
+    ) -join $newline
+    if (Set-MihomoTextFileIfChanged -Path $overridePath -Content $overrideContent -BackupRoot $BackupRoot) {
+        $result.Changed = $true
+    }
+    return [pscustomobject]$result
+}
+function Resolve-MihomoExecutable {
+    $candidates = @()
+    foreach ($programRoot in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($programRoot) {
+            $candidates += (Join-Path $programRoot "Clash Party\resources\sidecar\mihomo.exe")
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
+    }
+    return ""
+}
+
+function Test-MihomoConfigurationFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$MihomoExe = (Resolve-MihomoExecutable)
+    )
+    if (-not $MihomoExe) { return $true }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $MihomoExe
+    $startInfo.Arguments = "-t -f " + (ConvertTo-QuotedNativePath -PathValue $Path)
+    $startInfo.WorkingDirectory = Split-Path -Parent $Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { return $false }
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill() } catch { }
+            return $false
+        }
+        return ($process.ExitCode -eq 0)
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Get-MihomoPartyControlContext {
+    param([string]$PartyRoot = $script:MihomoPartyRoot)
+    $logsRoot = Join-Path $PartyRoot "logs"
+    if (-not (Test-Path -LiteralPath $logsRoot -PathType Container)) { return $null }
+    $appLog = Get-ChildItem -LiteralPath $logsRoot -Filter "clash-party-*.log" -File |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    if (-not $appLog) { return $null }
+    $ipcLine = Get-Content -LiteralPath $appLog.FullName -Encoding UTF8 -Tail 5000 |
+        Where-Object { $_ -match 'Using IPC path:\s*(\\\\\.\\pipe\\\S+)' } |
+        Select-Object -Last 1
+    if (-not $ipcLine) { return $null }
+    $ipcMatch = [regex]::Match(
+        [string]$ipcLine,
+        'Using IPC path:\s*(\\\\\.\\pipe\\\S+)'
+    )
+    if (-not $ipcMatch.Success) { return $null }
+    $mainProcess = Get-Process -Name "Clash Party" -ErrorAction SilentlyContinue |
+        Sort-Object StartTime |
+        Select-Object -First 1
+    if (-not $mainProcess) { return $null }
+    return [pscustomobject]@{
+        Pipe = $ipcMatch.Groups[1].Value
+        AppLogPath = $appLog.FullName
+        ProcessId = $mainProcess.Id
+    }
+}
+
+function Invoke-MihomoNamedPipeRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$PipePath,
+        [Parameter(Mandatory = $true)][ValidateSet("PATCH", "PUT")][string]$Method,
+        [Parameter(Mandatory = $true)][string]$RequestPath,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Body
+    )
+    $pipeName = $PipePath -replace '^\\\\\.\\pipe\\', ''
+    $bodyBytes = [Text.Encoding]::UTF8.GetBytes($Body)
+    $head = (
+        "$Method $RequestPath HTTP/1.1`r`n" +
+        "Host: localhost`r`n" +
+        "Content-Type: application/json`r`n" +
+        "Content-Length: $($bodyBytes.Length)`r`n" +
+        "Connection: close`r`n`r`n"
+    )
+    $pipe = [IO.Pipes.NamedPipeClientStream]::new(
+        ".",
+        $pipeName,
+        [IO.Pipes.PipeDirection]::InOut,
+        [IO.Pipes.PipeOptions]::None
+    )
+    $reader = $null
+    try {
+        $pipe.Connect(1500)
+        $headBytes = [Text.Encoding]::ASCII.GetBytes($head)
+        $pipe.Write($headBytes, 0, $headBytes.Length)
+        if ($bodyBytes.Length) {
+            $pipe.Write($bodyBytes, 0, $bodyBytes.Length)
+        }
+        $pipe.Flush()
+        $reader = [IO.StreamReader]::new(
+            $pipe,
+            [Text.Encoding]::UTF8,
+            $false,
+            4096,
+            $true
+        )
+        $statusLine = $reader.ReadLine()
+        return ([string]$statusLine -match '^HTTP/\d(?:\.\d)? 2\d\d ')
+    } catch {
+        return $false
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        $pipe.Dispose()
+    }
+}
+
+function Get-MihomoTunnelGuardSource {
+    $encoded = "cGFyYW0oCiAgICBbUGFyYW1ldGVyKE1hbmRhdG9yeSA9ICR0cnVlKV1baW50XSRDbGFzaFBhcnR5UGlkLAogICAgW1BhcmFtZXRlcihNYW5kYXRvcnkgPSAkdHJ1ZSldW3N0cmluZ10kV29ya0NvbmZpZ1BhdGgsCiAgICBbUGFyYW1ldGVyKE1hbmRhdG9yeSA9ICR0cnVlKV1bc3RyaW5nXSRBcHBMb2dQYXRoCikKCiRFcnJvckFjdGlvblByZWZlcmVuY2UgPSAnU2lsZW50bHlDb250aW51ZScKCmZ1bmN0aW9uIFNldC1NaWhvbW9SdWxlTW9kZSB7CiAgICAkbGluZSA9IEdldC1Db250ZW50IC1MaXRlcmFsUGF0aCAkQXBwTG9nUGF0aCAtRW5jb2RpbmcgVVRGOCB8CiAgICAgICAgV2hlcmUtT2JqZWN0IHsgJF8gLW1hdGNoICdVc2luZyBJUEMgcGF0aDpccyooXFxcXFwuXFxwaXBlXFxcUyspJyB9IHwKICAgICAgICBTZWxlY3QtT2JqZWN0IC1MYXN0IDEKICAgIGlmICgtbm90ICRsaW5lIC1vciAkbGluZSAtbm90bWF0Y2ggJ1VzaW5nIElQQyBwYXRoOlxzKihcXFxcXC5cXHBpcGVcXFxTKyknKSB7IHJldHVybiB9CiAgICAkcGlwZU5hbWUgPSAkbWF0Y2hlc1sxXSAtcmVwbGFjZSAnXlxcXFxcLlxccGlwZVxcJywgJycKICAgICRib2R5Qnl0ZXMgPSBbU3lzdGVtLlRleHQuRW5jb2RpbmddOjpVVEY4LkdldEJ5dGVzKCd7Im1vZGUiOiJydWxlIn0nKQogICAgJGhlYWQgPSAiUEFUQ0ggL2NvbmZpZ3MgSFRUUC8xLjFgcmBuSG9zdDogbG9jYWxob3N0YHJgbkNvbnRlbnQtVHlwZTogYXBwbGljYXRpb24vanNvbmByYG5Db250ZW50LUxlbmd0aDogJCgkYm9keUJ5dGVzLkxlbmd0aClgcmBuQ29ubmVjdGlvbjogY2xvc2VgcmBuYHJgbiIKICAgICRwaXBlID0gW1N5c3RlbS5JTy5QaXBlcy5OYW1lZFBpcGVDbGllbnRTdHJlYW1dOjpuZXcoJy4nLCAkcGlwZU5hbWUsIFtTeXN0ZW0uSU8uUGlwZXMuUGlwZURpcmVjdGlvbl06OkluT3V0LCBbU3lzdGVtLklPLlBpcGVzLlBpcGVPcHRpb25zXTo6Tm9uZSkKICAgIHRyeSB7CiAgICAgICAgJHBpcGUuQ29ubmVjdCgxNTAwKQogICAgICAgICRoZWFkQnl0ZXMgPSBbU3lzdGVtLlRleHQuRW5jb2RpbmddOjpBU0NJSS5HZXRCeXRlcygkaGVhZCkKICAgICAgICAkcGlwZS5Xcml0ZSgkaGVhZEJ5dGVzLCAwLCAkaGVhZEJ5dGVzLkxlbmd0aCkKICAgICAgICAkcGlwZS5Xcml0ZSgkYm9keUJ5dGVzLCAwLCAkYm9keUJ5dGVzLkxlbmd0aCkKICAgICAgICAkcGlwZS5GbHVzaCgpCiAgICAgICAgJHJlYWRlciA9IFtTeXN0ZW0uSU8uU3RyZWFtUmVhZGVyXTo6bmV3KCRwaXBlLCBbU3lzdGVtLlRleHQuRW5jb2RpbmddOjpVVEY4LCAkZmFsc2UsIDQwOTYsICR0cnVlKQogICAgICAgICRyZXNwb25zZSA9ICRyZWFkZXIuUmVhZFRvRW5kKCkKICAgICAgICBpZiAoKCRyZXNwb25zZSAtc3BsaXQgImByP2BuIilbMF0gLW1hdGNoICcgMlxkXGQgJykgewogICAgICAgICAgICBXcml0ZS1PdXRwdXQgKChHZXQtRGF0ZSAtRm9ybWF0IG8pICsgJyBtb2RlPXJ1bGUnKQogICAgICAgIH0KICAgIH0gZmluYWxseSB7CiAgICAgICAgaWYgKCRyZWFkZXIpIHsgJHJlYWRlci5EaXNwb3NlKCkgfQogICAgICAgICRwaXBlLkRpc3Bvc2UoKQogICAgfQp9CgokbGFzdFdyaXRlID0gW0RhdGVUaW1lXTo6TWluVmFsdWUKd2hpbGUgKEdldC1Qcm9jZXNzIC1JZCAkQ2xhc2hQYXJ0eVBpZCAtRXJyb3JBY3Rpb24gU2lsZW50bHlDb250aW51ZSkgewogICAgJGN1cnJlbnRXcml0ZSA9IGlmIChUZXN0LVBhdGggLUxpdGVyYWxQYXRoICRXb3JrQ29uZmlnUGF0aCkgewogICAgICAgIChHZXQtSXRlbSAtTGl0ZXJhbFBhdGggJFdvcmtDb25maWdQYXRoKS5MYXN0V3JpdGVUaW1lVXRjCiAgICB9IGVsc2UgewogICAgICAgIFtEYXRlVGltZV06Ok1pblZhbHVlCiAgICB9CiAgICBpZiAoJGN1cnJlbnRXcml0ZSAtbmUgJGxhc3RXcml0ZSkgewogICAgICAgIFN0YXJ0LVNsZWVwIC1NaWxsaXNlY29uZHMgMzAwCiAgICAgICAgU2V0LU1paG9tb1J1bGVNb2RlCiAgICAgICAgJGxhc3RXcml0ZSA9ICRjdXJyZW50V3JpdGUKICAgIH0KICAgIFN0YXJ0LVNsZWVwIC1TZWNvbmRzIDEKfQ=="
+    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+}
+
+function Start-MihomoTunnelGuard {
+    param(
+        [Parameter(Mandatory = $true)]$ControlContext,
+        [Parameter(Mandatory = $true)][string]$WorkConfigPath
+    )
+    $source = Get-MihomoTunnelGuardSource
+    Set-Utf8TextFileAtomically -Path $MihomoGuardScriptPath -Content $source
+    foreach ($streamPath in @(
+        $MihomoGuardStandardInputPath,
+        $MihomoGuardStandardOutputPath,
+        $MihomoGuardStandardErrorPath
+    )) {
+        if (-not (Test-Path -LiteralPath $streamPath -PathType Leaf)) {
+            Set-Utf8TextFileAtomically -Path $streamPath -Content ""
+        }
+    }
+
+    if (Test-Path -LiteralPath $MihomoGuardPidPath -PathType Leaf) {
+        $oldPid = 0
+        [void][int]::TryParse(
+            ([IO.File]::ReadAllText($MihomoGuardPidPath).Trim()),
+            [ref]$oldPid
+        )
+        if ($oldPid -gt 0) {
+            $old = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+            if ($old) {
+                $commandLine = ""
+                try {
+                    $commandLine = [string](
+                        Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid" -ErrorAction Stop
+                    ).CommandLine
+                } catch { }
+                if ($commandLine.IndexOf(
+                    $MihomoGuardScriptPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -ge 0) {
+                    Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+                    $old | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    $arguments = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", (ConvertTo-QuotedNativePath -PathValue $MihomoGuardScriptPath),
+        "-ClashPartyPid", [string]$ControlContext.ProcessId,
+        "-WorkConfigPath", (ConvertTo-QuotedNativePath -PathValue $WorkConfigPath),
+        "-AppLogPath", (ConvertTo-QuotedNativePath -PathValue $ControlContext.AppLogPath)
+    )
+    $guard = Start-Process -FilePath $PowerShellExe -ArgumentList $arguments `
+        -WorkingDirectory $StateRoot -WindowStyle Hidden -PassThru `
+        -RedirectStandardInput $MihomoGuardStandardInputPath `
+        -RedirectStandardOutput $MihomoGuardStandardOutputPath `
+        -RedirectStandardError $MihomoGuardStandardErrorPath
+    Set-Utf8TextFileAtomically -Path $MihomoGuardPidPath -Content ([string]$guard.Id)
+}
+
+function Repair-MihomoPartyTunnelRouting {
+    $backupRoot = Join-Path $StateRoot "config-backups\mihomo-party"
+    $persistent = Install-MihomoPartyPersistentRouting `
+        -PartyRoot $script:MihomoPartyRoot `
+        -BackupRoot $backupRoot
+    if (-not $persistent.Available) {
+        Write-LaunchLog "Clash Party was not detected; using the current system network settings." "Gray"
+        return
+    }
+    if (-not $persistent.Enabled) {
+        if ($persistent.Mode -eq "direct") {
+            Write-LaunchLog "Clash Party is already in direct mode." "Green"
+        } else {
+            Write-LaunchLog "Clash Party mode could not be repaired safely." "Yellow"
+        }
+        return
+    }
+    if ($persistent.Changed) {
+        Write-LaunchLog "Clash Party tunnel routing was saved and the prior files were backed up." "Green"
+    } else {
+        Write-LaunchLog "Clash Party tunnel routing is ready." "Green"
+    }
+
+    $workConfigPath = Join-Path $script:MihomoPartyRoot "work\config.yaml"
+    $control = Get-MihomoPartyControlContext -PartyRoot $script:MihomoPartyRoot
+    if (-not $control -or
+        -not (Test-Path -LiteralPath $workConfigPath -PathType Leaf)) {
+        Write-LaunchLog "Clash Party is not running; the persistent rule will apply next time it opens." "Gray"
+        return
+    }
+
+    $workCurrent = [IO.File]::ReadAllText($workConfigPath)
+    $workUpdated = Set-MihomoWorkRoutingContent -Content $workCurrent
+    $mihomoExe = Resolve-MihomoExecutable
+    if ($workUpdated -cne $workCurrent) {
+        $temporary = $workConfigPath + ".wyj-" + [Guid]::NewGuid().ToString("N")
+        try {
+            [IO.File]::WriteAllText(
+                $temporary,
+                $workUpdated,
+                (New-Object Text.UTF8Encoding($false))
+            )
+            if (-not (Test-MihomoConfigurationFile -Path $temporary -MihomoExe $mihomoExe)) {
+                throw "Clash Party work config validation failed; the original file was preserved."
+            }
+            Backup-MihomoPartyFile -Path $workConfigPath -BackupRoot $backupRoot
+            Move-Item -LiteralPath $temporary -Destination $workConfigPath -Force
+        } finally {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $reloadBody = @{ path = $workConfigPath } | ConvertTo-Json -Compress
+    $reloaded = Invoke-MihomoNamedPipeRequest `
+        -PipePath $control.Pipe `
+        -Method "PUT" `
+        -RequestPath "/configs?force=true" `
+        -Body $reloadBody
+    $modeSet = Invoke-MihomoNamedPipeRequest `
+        -PipePath $control.Pipe `
+        -Method "PATCH" `
+        -RequestPath "/configs" `
+        -Body '{"mode":"rule"}'
+    if ($reloaded -or $modeSet) {
+        Write-LaunchLog "Clash Party hot reload succeeded: cloudflared is DIRECT; other traffic remains GLOBAL." "Green"
+    } else {
+        Write-LaunchLog "Clash Party hot reload did not answer; the session guard will retry." "Yellow"
+    }
+    Start-MihomoTunnelGuard -ControlContext $control -WorkConfigPath $workConfigPath
+    Write-LaunchLog "The proxy compatibility guard is active only for this manual session." "Green"
+}
 function Resolve-PythonExecutable {
     $candidates = @()
     if (-not [string]::IsNullOrWhiteSpace($env:VOCAB_PYTHON_EXE)) {
@@ -681,11 +1205,6 @@ function Test-ApiOk {
     param([Parameter(Mandatory = $true)][string]$Url, [int]$TimeoutSec = 6)
     $separator = if ($Url.Contains("?")) { "&" } else { "?" }
     $probeUrl = $Url + $separator + "launcher_probe=" + [Guid]::NewGuid().ToString("N")
-    if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and
-        $script:PythonExe -and
-        (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
-        return Test-UrlWithPython -Url $probeUrl -TimeoutSec $TimeoutSec -Mode "api" -ExpectedBuild $script:ExpectedBackendBuild
-    }
     try {
         $result = Invoke-RestMethod -Uri $probeUrl -TimeoutSec $TimeoutSec -UserAgent $HealthProbeUserAgent -Headers @{
             "Accept" = "application/json"
@@ -698,17 +1217,17 @@ function Test-ApiOk {
         }
         return $true
     } catch {
+        if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and
+            $script:PythonExe -and
+            (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
+            return Test-UrlWithPython -Url $probeUrl -TimeoutSec $TimeoutSec -Mode "api" -ExpectedBuild $script:ExpectedBackendBuild
+        }
         return $false
     }
 }
 
 function Test-HttpOk {
     param([Parameter(Mandatory = $true)][string]$Url, [int]$TimeoutSec = 6)
-    if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and
-        $script:PythonExe -and
-        (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
-        return Test-UrlWithPython -Url $Url -TimeoutSec $TimeoutSec -Mode "http"
-    }
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec $TimeoutSec -UserAgent $HealthProbeUserAgent -Headers @{
             "Cache-Control" = "no-cache"
@@ -716,6 +1235,11 @@ function Test-HttpOk {
         }
         return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
     } catch {
+        if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and
+            $script:PythonExe -and
+            (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
+            return Test-UrlWithPython -Url $Url -TimeoutSec $TimeoutSec -Mode "http"
+        }
         return $false
     }
 }
@@ -1032,10 +1556,10 @@ function Ensure-Backend {
 }
 
 function Test-PublicBackendReady {
-    return (
-        (Test-ApiOk -Url $ApiStatusUrl -TimeoutSec 4) -and
-        (Test-ApiOk -Url $PagesStatusUrl -TimeoutSec 4)
-    )
+    # The Pages endpoint is the real user path and already validates the
+    # complete Pages Function -> Tunnel -> local backend chain. A local global
+    # proxy may intercept the origin-only hostname and return a false 502.
+    return (Test-ApiOk -Url $PagesStatusUrl -TimeoutSec 6)
 }
 
 function Get-TunnelHaConnections {
@@ -1449,6 +1973,8 @@ function Invoke-WyjLauncher {
         Ensure-Backend -RestartRequired:$sourceChanged
         $script:CurrentPhase = "修复 Tunnel 本地上游"
         Repair-TunnelOriginAddress
+        $script:CurrentPhase = "Clash Party tunnel compatibility"
+        Repair-MihomoPartyTunnelRouting
         $script:CurrentPhase = "恢复固定 Tunnel"
         Ensure-Tunnel
 

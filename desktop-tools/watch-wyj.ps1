@@ -15,7 +15,7 @@ public static class WYJPowerState {
 }
 "@
 
-$WatchdogVersion = "3.4.0"
+$WatchdogVersion = "3.5.0"
 $Launcher = Join-Path $PSScriptRoot "start-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR)) {
@@ -29,7 +29,6 @@ $PythonProbeScriptPath = Join-Path $ProbeTempRoot "wyj-watchdog-http-health-prob
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $PublicStatusUrls = @(
-    "https://api.thewyj.uk/api/status",
     "https://thewyj.uk/api/status"
 )
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
@@ -39,7 +38,7 @@ $RepairFailureLimit = 3
 $RepairSuspendSeconds = 1800
 $RepairTimeoutMilliseconds = 480000
 $PublicProbeGraceFailures = 1
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/3.3"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/3.5"
 
 function Repair-DuplicatePathEnvironment {
     try {
@@ -181,9 +180,6 @@ function Test-Endpoint {
     param([string]$Url, [switch]$RequireOk)
     $separator = if ($Url.Contains("?")) { "&" } else { "?" }
     $probeUrl = $Url + $separator + "watchdog_probe=" + [Guid]::NewGuid().ToString("N")
-    if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and $PythonExe) {
-        return Test-EndpointWithPython -Url $probeUrl -RequireOk:$RequireOk
-    }
     try {
         $result = Invoke-RestMethod -Uri $probeUrl -TimeoutSec 8 -UserAgent $HealthProbeUserAgent -Headers @{
             "Accept" = "application/json"
@@ -193,6 +189,9 @@ function Test-Endpoint {
         if ($RequireOk) { return ($result.ok -eq $true) }
         return ($null -ne $result)
     } catch {
+        if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and $PythonExe) {
+            return Test-EndpointWithPython -Url $probeUrl -RequireOk:$RequireOk
+        }
         return $false
     }
 }
