@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-07-28-launcher-stability";
+const APP_VERSION = "2026-07-28-network-stability";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -594,7 +594,7 @@ function membershipLabel(value) {
     legacy_all_lifetime: "历史双语言永久会员",
     japanese_lifetime: "日语永久会员",
     tools_monthly: "工具箱包月会员",
-    dual_language_monthly: "双语言测试包月会员",
+    dual_language_monthly: "双语言包月",
     dual_language_lifetime: "历史双语言双项永久会员",
     all_access_monthly: "全功能包月会员",
     all_access_lifetime: "全功能永久会员",

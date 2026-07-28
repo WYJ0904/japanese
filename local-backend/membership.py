@@ -45,7 +45,7 @@ MEMBERSHIP_PLANS = {
         ),
     },
     "dual_language_monthly": {
-        "name": "双语言测试包月会员",
+        "name": "双语言包月",
         "price_cents": 2000,
         "currency": "CNY",
         "lifetime": False,

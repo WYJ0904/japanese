@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.2.0"
+$LauncherVersion = "10.4.0"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -26,11 +26,14 @@ $LauncherLog = Join-Path $LauncherEntryRoot "启动日志.txt"
 $ErrorReportPath = Join-Path $LauncherEntryRoot "启动错误报告.txt"
 $PreviousErrorReportPath = Join-Path $LauncherEntryRoot "启动错误报告-previous.txt"
 $BackendFailureLogPath = Join-Path $LauncherEntryRoot "后台启动错误.txt"
+$BackendStandardInputPath = Join-Path $StateRoot "backend-stdin.empty"
+$BackendStandardOutputPath = Join-Path $LauncherEntryRoot "后台标准输出.txt"
+$BackendStandardErrorPath = Join-Path $LauncherEntryRoot "后台标准错误.txt"
 $ProtocolStatePath = Join-Path $StateRoot "tunnel-protocol.txt"
 $BackendPidPath = Join-Path $StateRoot "backend.pid"
 $WatchdogScript = Join-Path $PSScriptRoot "watch-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$BackendStartupTimeoutSeconds = 90
+$BackendStartupProbeDelayMilliseconds = 2000
 
 $SiteUrl = "https://thewyj.uk"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
@@ -39,6 +42,7 @@ $PagesStatusUrl = "https://thewyj.uk/api/status"
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $OllamaModel = "qwen3:8b"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.4"
 
 $script:BackendRoot = ""
 $script:CloudflaredExe = ""
@@ -51,7 +55,6 @@ $script:CurrentPhase = "初始化"
 $script:BackendLaunchProcess = $null
 $script:LaunchStartedAt = Get-Date
 $script:DuplicatePathWasRepaired = $false
-$script:TunnelValidationDegraded = $false
 
 function Repair-DuplicatePathEnvironment {
     try {
@@ -208,12 +211,20 @@ function Write-LauncherErrorReport {
         $report.Add(("[{0}] {1}" -f $(if ($present) { "存在" } else { "缺失" }), $relativePath))
     }
     $report.Add("")
-    $report.Add("=== 后台启动错误（末尾） ===")
+    $report.Add("=== 后台标准错误（末尾） ===")
+    $standardErrorLines = @(Get-TextFileTail -Path $BackendStandardErrorPath -Lines 120)
+    if ($standardErrorLines.Count) {
+        foreach ($line in $standardErrorLines) { $report.Add([string]$line) }
+    } else {
+        $report.Add("[后台标准错误为空。]")
+    }
+    $report.Add("")
+    $report.Add("=== 后台故障摘要（末尾） ===")
     $backendLines = @(Get-TextFileTail -Path $BackendFailureLogPath -Lines 120)
     if ($backendLines.Count) {
         foreach ($line in $backendLines) { $report.Add([string]$line) }
     } else {
-        $report.Add("[没有捕获到后台 stderr；请查看下方启动日志。]")
+        $report.Add("[没有生成后台故障摘要。]")
     }
     $report.Add("")
     $report.Add("=== 启动日志（末尾） ===")
@@ -540,13 +551,67 @@ function Resolve-CloudflaredExecutable {
     return ""
 }
 
+function Test-UrlWithPython {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [ValidateRange(1, 60)][int]$TimeoutSec,
+        [ValidateSet("api", "http")][string]$Mode,
+        [string]$ExpectedBuild = ""
+    )
+    if (-not $script:PythonExe -or
+        -not (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
+        return $false
+    }
+    $probeCode = @'
+import json
+import sys
+import urllib.request
+
+url, timeout, mode, expected, user_agent = sys.argv[1:6]
+request = urllib.request.Request(
+    url,
+    headers={
+        'Accept': 'application/json' if mode == 'api' else '*/*',
+        'Cache-Control': 'no-store, no-cache',
+        'Pragma': 'no-cache',
+        'User-Agent': user_agent,
+    },
+)
+try:
+    with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError('unexpected HTTP status')
+        if mode == 'api':
+            payload = json.load(response)
+            if payload.get('ok') is not True:
+                raise RuntimeError('API is not ready')
+            if expected and str(payload.get('build', '')) != expected:
+                raise RuntimeError('backend build mismatch')
+except Exception:
+    raise SystemExit(1)
+'@
+    $previousErrorPreference = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    $null = & $script:PythonExe -c $probeCode $Url ([string]$TimeoutSec) $Mode $ExpectedBuild $HealthProbeUserAgent 2>$null
+    $probeExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorPreference
+    return ($probeExitCode -eq 0)
+}
+
 function Test-ApiOk {
     param([Parameter(Mandatory = $true)][string]$Url, [int]$TimeoutSec = 6)
+    $separator = if ($Url.Contains("?")) { "&" } else { "?" }
+    $probeUrl = $Url + $separator + "launcher_probe=" + [Guid]::NewGuid().ToString("N")
+    if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and
+        $script:PythonExe -and
+        (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
+        return Test-UrlWithPython -Url $probeUrl -TimeoutSec $TimeoutSec -Mode "api" -ExpectedBuild $script:ExpectedBackendBuild
+    }
     try {
-        $separator = if ($Url.Contains("?")) { "&" } else { "?" }
-        $probeUrl = $Url + $separator + "launcher_probe=" + [Guid]::NewGuid().ToString("N")
-        $result = Invoke-RestMethod -Uri $probeUrl -TimeoutSec $TimeoutSec -Headers @{
+        $result = Invoke-RestMethod -Uri $probeUrl -TimeoutSec $TimeoutSec -UserAgent $HealthProbeUserAgent -Headers @{
+            "Accept" = "application/json"
             "Cache-Control" = "no-store, no-cache"
+            "Pragma" = "no-cache"
         }
         if ($result.ok -ne $true) { return $false }
         if ($script:ExpectedBackendBuild -and ([string]$result.build -ne $script:ExpectedBackendBuild)) {
@@ -560,8 +625,16 @@ function Test-ApiOk {
 
 function Test-HttpOk {
     param([Parameter(Mandatory = $true)][string]$Url, [int]$TimeoutSec = 6)
+    if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and
+        $script:PythonExe -and
+        (Test-Path -LiteralPath $script:PythonExe -PathType Leaf)) {
+        return Test-UrlWithPython -Url $Url -TimeoutSec $TimeoutSec -Mode "http"
+    }
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec $TimeoutSec -Headers @{ "Cache-Control" = "no-cache" }
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec $TimeoutSec -UserAgent $HealthProbeUserAgent -Headers @{
+            "Cache-Control" = "no-cache"
+            "Pragma" = "no-cache"
+        }
         return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
     } catch {
         return $false
@@ -602,33 +675,6 @@ function Wait-ForCondition {
     } while ((Get-Date) -lt $deadline)
     Write-Host ""
     Write-LaunchLog "$Label 在 $Seconds 秒内没有就绪。" "Yellow"
-    return $false
-}
-
-function Wait-ForBackendStartup {
-    param(
-        [Parameter(Mandatory = $true)]$Process,
-        [ValidateRange(1, 600)][int]$Seconds
-    )
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    do {
-        if (Test-BackendReady) {
-            Write-Host ""
-            return $true
-        }
-        try {
-            $Process.Refresh()
-            if ($Process.HasExited) {
-                Write-Host ""
-                Write-LaunchLog "本地后端进程已提前退出，不再等待超时。" "Red"
-                return $false
-            }
-        } catch { }
-        Write-Host "." -NoNewline
-        Start-Sleep -Seconds 1
-    } while ((Get-Date) -lt $deadline)
-    Write-Host ""
-    Write-LaunchLog "本地后端在 $Seconds 秒内没有就绪。" "Yellow"
     return $false
 }
 
@@ -875,23 +921,34 @@ function Ensure-Backend {
     }
     Write-LaunchLog "正在启动本地账户与支付后端..." "Yellow"
     $quotedRunScript = ConvertTo-QuotedNativePath -PathValue $runScript
+    if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $BackendStandardInputPath -PathType Leaf)) {
+        New-Item -ItemType File -Path $BackendStandardInputPath -Force | Out-Null
+    }
+    foreach ($logPath in @($BackendStandardOutputPath, $BackendStandardErrorPath)) {
+        Set-Content -LiteralPath $logPath -Value "" -Encoding UTF8
+    }
     $script:BackendLaunchProcess = Start-Process -FilePath $PowerShellExe -ArgumentList @(
         "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $quotedRunScript
-    ) -WorkingDirectory $script:BackendRoot -WindowStyle Hidden -PassThru
-    if (-not (Wait-ForBackendStartup -Seconds $BackendStartupTimeoutSeconds -Process $script:BackendLaunchProcess)) {
+    ) -WorkingDirectory $script:BackendRoot -WindowStyle Hidden -PassThru `
+        -RedirectStandardInput $BackendStandardInputPath `
+        -RedirectStandardOutput $BackendStandardOutputPath `
+        -RedirectStandardError $BackendStandardErrorPath
+
+    Start-Sleep -Milliseconds $BackendStartupProbeDelayMilliseconds
+    $backendReady = Test-BackendReady
+    if (-not $backendReady) {
         try { $script:BackendLaunchProcess.Refresh() } catch { }
         if ($script:BackendLaunchProcess.HasExited) {
             $summary = Get-BackendFailureSummary
             $detail = if ($summary) { "：$summary" } else { "" }
             throw "本地后端启动后立即退出（退出码 $($script:BackendLaunchProcess.ExitCode)）$detail"
         }
-        try { Stop-Process -Id $script:BackendLaunchProcess.Id -Force -ErrorAction SilentlyContinue } catch { }
-        throw "本地后端启动超时，已停止本次启动进程。"
+        throw "本地后端已作为独立后台进程启动，但 2 秒后的单次健康检查未通过。请查看 $BackendStandardErrorPath"
     }
-    $listenerIds = @(Get-ListeningProcessIds)
-    if ($listenerIds.Count -gt 0) {
-        Set-Content -LiteralPath $BackendPidPath -Value ([string]$listenerIds[0]) -Encoding ASCII
-    }
+    Set-Content -LiteralPath $BackendPidPath -Value ([string]$script:BackendLaunchProcess.Id) -Encoding ASCII
     Write-LaunchLog "本地账户与支付后端正常。" "Green"
 }
 
@@ -944,7 +1001,6 @@ function Wait-ForStablePublicBackend {
         [Parameter(Mandatory = $true)][string]$Label,
         [ValidateRange(1, 20)][int]$StableSuccesses = 5,
         [ValidateRange(100, 10000)][int]$IntervalMilliseconds = 3000,
-        [switch]$AcceptHealthyConnector,
         $Process = $null
     )
     $deadline = (Get-Date).AddSeconds($Seconds)
@@ -969,18 +1025,6 @@ function Wait-ForStablePublicBackend {
             }
         } else {
             $consecutiveSuccesses = 0
-            if ($AcceptHealthyConnector) {
-                $connections = Get-TunnelHaConnections
-                if ($connections -gt 0) {
-                    $script:TunnelValidationDegraded = $true
-                    Write-Host ""
-                    Write-LaunchLog (
-                        "$Label 的外部 HTTP 探测暂时波动，但 Tunnel 保持 $connections 条活动连接；" +
-                        "保留现有连接并交由 cloudflared 自动重连。"
-                    ) "Yellow"
-                    return $true
-                }
-            }
         }
 
         Write-Host "." -NoNewline
@@ -996,24 +1040,66 @@ function Wait-ForStablePublicBackend {
     return $false
 }
 
+function Test-RecentQuicInstabilityWithHttp2Available {
+    if (-not $script:TunnelLog -or
+        -not (Test-Path -LiteralPath $script:TunnelLog -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $tail = (Get-Content -LiteralPath $script:TunnelLog -Encoding UTF8 -Tail 800) -join "`n"
+        $quicFailures = [regex]::Matches(
+            $tail,
+            'timeout: no recent network activity|failed to dial to edge with quic'
+        ).Count
+        if ($quicFailures -lt 4) { return $false }
+
+        $lastHttp2Pass = $tail.LastIndexOf(
+            "HTTP/2 connection successful",
+            [StringComparison]::OrdinalIgnoreCase
+        )
+        $lastHttp2Failure = [Math]::Max(
+            $tail.LastIndexOf(
+                "HTTP/2 connection is blocked or unreachable",
+                [StringComparison]::OrdinalIgnoreCase
+            ),
+            $tail.LastIndexOf(
+                "TLS handshake with edge error",
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        )
+        return ($lastHttp2Pass -ge 0 -and $lastHttp2Pass -gt $lastHttp2Failure)
+    } catch {
+        return $false
+    }
+}
+
 function Get-PreferredTunnelProtocol {
+    if (-not [string]::IsNullOrWhiteSpace($env:VOCAB_TUNNEL_PROTOCOL)) {
+        $configured = $env:VOCAB_TUNNEL_PROTOCOL.Trim().ToLowerInvariant()
+        if ($configured -in @("auto", "quic", "http2")) { return $configured }
+    }
+    if (Test-RecentQuicInstabilityWithHttp2Available) {
+        Write-LaunchLog "检测到近期 QUIC 连续超时，且最新 HTTP/2 预检可用；本次优先使用 HTTP/2。" "Yellow"
+        return "http2"
+    }
     if (Test-Path -LiteralPath $ProtocolStatePath -PathType Leaf) {
         $saved = (Get-Content -Raw -Encoding UTF8 -LiteralPath $ProtocolStatePath).Trim().ToLowerInvariant()
-        if ($saved -in @("quic", "http2")) { return $saved }
+        if ($saved -in @("auto", "quic", "http2")) { return $saved }
     }
-    return "quic"
+    return "auto"
 }
 
 function Save-PreferredTunnelProtocol {
-    param([ValidateSet("http2", "quic")][string]$Protocol)
+    param([ValidateSet("auto", "http2", "quic")][string]$Protocol)
     Set-Content -LiteralPath $ProtocolStatePath -Value $Protocol -Encoding ASCII
 }
 
 function Start-TunnelProcess {
-    param([ValidateSet("http2", "quic")][string]$Protocol)
+    param([ValidateSet("auto", "http2", "quic")][string]$Protocol)
     $arguments = @(
         "tunnel", "--config", (ConvertTo-QuotedNativePath -PathValue $script:TunnelConfig),
         "--protocol", $Protocol, "--edge-ip-version", "4",
+        "--retries", "8",
         "--metrics", "127.0.0.1:20241",
         "--loglevel", "info", "--logfile", (ConvertTo-QuotedNativePath -PathValue $script:TunnelLog),
         "run", "japanese-local-backend"
@@ -1054,18 +1140,21 @@ function Ensure-Tunnel {
 
     $connectorConnections = Get-TunnelHaConnections
     if (Test-PublicBackendReady) {
-        if (Wait-ForStablePublicBackend -Seconds 20 -Label "现有固定 Tunnel" -StableSuccesses 5 -IntervalMilliseconds 3000 -AcceptHealthyConnector) {
+        if (Wait-ForStablePublicBackend -Seconds 20 -Label "现有固定 Tunnel" -StableSuccesses 5 -IntervalMilliseconds 3000) {
             Write-LaunchLog "固定 Tunnel 与 Pages 代理连续稳定。" "Green"
             return
         }
         Write-LaunchLog "现有 Tunnel 响应不稳定，准备主动重连。" "Yellow"
     } elseif ($connectorConnections -gt 0) {
-        $script:TunnelValidationDegraded = $true
         Write-LaunchLog (
-            "公网 HTTP 探测暂时波动，但现有 Tunnel 保持 $connectorConnections 条活动连接；" +
-            "为避免放大断线，本次不重启 cloudflared。"
+            "Tunnel 显示 $connectorConnections 条活动连接，但公网接口不可用；" +
+            "先等待短暂网络抖动恢复。"
         ) "Yellow"
-        return
+        if (Wait-ForStablePublicBackend -Seconds 20 -Label "现有固定 Tunnel 恢复" -StableSuccesses 3 -IntervalMilliseconds 2500) {
+            Write-LaunchLog "公网接口已自行恢复。" "Green"
+            return
+        }
+        Write-LaunchLog "连接指标与实际公网状态不一致，准备主动重连。" "Yellow"
     }
 
     Write-LaunchLog "正在恢复固定 Tunnel..." "Yellow"
@@ -1076,12 +1165,15 @@ function Ensure-Tunnel {
     }
 
     $preferred = Get-PreferredTunnelProtocol
-    $fallback = if ($preferred -eq "quic") { "http2" } else { "quic" }
+    $protocols = New-Object System.Collections.Generic.List[string]
+    foreach ($protocol in @($preferred, "auto", "quic", "http2")) {
+        if (-not $protocols.Contains($protocol)) { $protocols.Add($protocol) }
+    }
     $lastProcess = $null
-    foreach ($protocol in @($preferred, $fallback)) {
+    foreach ($protocol in $protocols) {
         $lastProcess = Start-TunnelProcess -Protocol $protocol
-        $waitSeconds = if ($protocol -eq $preferred) { 40 } else { 55 }
-        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -Process $lastProcess -AcceptHealthyConnector) {
+        $waitSeconds = if ($protocol -eq "auto") { 65 } else { 45 }
+        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -Process $lastProcess) {
             Save-PreferredTunnelProtocol -Protocol $protocol
             Write-LaunchLog ("固定 Tunnel 已恢复并记住 " + $protocol.ToUpperInvariant() + "。") "Green"
             return
@@ -1090,17 +1182,16 @@ function Ensure-Tunnel {
             Stop-Process -Id $lastProcess.Id -Force
             $lastProcess | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
         }
-        if ($protocol -eq $preferred) {
-            Write-LaunchLog ("正在改用 " + $fallback.ToUpperInvariant() + "...") "Yellow"
-        }
+        Write-LaunchLog "当前传输方式没有稳定恢复，继续尝试下一种方式..." "Yellow"
     }
     try {
-        $null = Start-TunnelProcess -Protocol $preferred
-        Write-LaunchLog ("两种协议均未稳定；已保留 " + $preferred.ToUpperInvariant() + " 在后台继续重连。") "Yellow"
+        $null = Start-TunnelProcess -Protocol "auto"
+        Save-PreferredTunnelProtocol -Protocol "auto"
+        Write-LaunchLog "所有传输方式均未稳定；已保留 AUTO 在后台继续自动回退与重连。" "Yellow"
     } catch {
         Write-LaunchLog ("无法保留 Tunnel 后台重连: " + $_.Exception.Message) "Yellow"
     }
-    throw "QUIC 与 HTTP/2 均未恢复公网连接。"
+    throw "AUTO、QUIC 与 HTTP/2 均未恢复公网连接。"
 }
 
 function Resolve-OllamaExecutable {
@@ -1182,6 +1273,7 @@ function Ensure-Watchdog {
         $existing | Stop-Process -Force -ErrorAction SilentlyContinue
         $existing | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
     }
+    $env:VOCAB_PYTHON_EXE = $script:PythonExe
     $quotedWatchdogScript = ConvertTo-QuotedNativePath -PathValue $WatchdogScript
     Start-Process -FilePath $PowerShellExe -ArgumentList @(
         "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $quotedWatchdogScript
@@ -1292,14 +1384,10 @@ function Invoke-WyjLauncher {
         if (-not (Test-HttpOk -Url $SiteUrl -TimeoutSec 12)) {
             throw "正式网站首页暂时无法访问。"
         }
-        if (-not (Wait-ForStablePublicBackend -Seconds 12 -Label "正式账户与支付接口" -StableSuccesses 3 -IntervalMilliseconds 2000 -AcceptHealthyConnector)) {
+        if (-not (Wait-ForStablePublicBackend -Seconds 12 -Label "正式账户与支付接口" -StableSuccesses 3 -IntervalMilliseconds 2000)) {
             throw "固定 Tunnel 在启动完成前再次失去连接。"
         }
-        if ($script:TunnelValidationDegraded) {
-            Write-LaunchLog "网站已启动；Tunnel 有活动连接，公网验证波动将由 cloudflared 在后台自动恢复。" "Yellow"
-        } else {
-            Write-LaunchLog "网站、账户、会员与支付服务均已就绪。" "Green"
-        }
+        Write-LaunchLog "网站、账户、会员与支付服务均已就绪。" "Green"
         if (-not $aiReady) {
             Write-LaunchLog "AI 选词与首次释义判卷稍后可由守护程序继续恢复。" "Yellow"
         }

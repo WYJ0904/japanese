@@ -1,14 +1,14 @@
-const CACHE = "wyj-shell-20260728-launcher-stability";
+const CACHE = "wyj-shell-20260728-network-stability";
 const CORE_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260728-launcher-stability",
-  "/app.js?v=20260728-launcher-stability",
-  "/tools.js?v=20260728-launcher-stability",
+  "/styles.css?v=20260728-network-stability",
+  "/app.js?v=20260728-network-stability",
+  "/tools.js?v=20260728-network-stability",
   "/vendor/qrcode.js?v=2.0.4",
   "/vendor/opencc-st-characters.txt",
   "/vendor/opencc-ts-characters.txt",
-  "/manifest.webmanifest?v=20260728-launcher-stability",
+  "/manifest.webmanifest?v=20260728-network-stability",
   "/icon-192.png",
   "/icon-512.png",
 ];

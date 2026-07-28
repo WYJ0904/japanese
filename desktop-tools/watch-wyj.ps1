@@ -15,7 +15,7 @@ public static class WYJPowerState {
 }
 "@
 
-$WatchdogVersion = "3.1.0"
+$WatchdogVersion = "3.2.0"
 $Launcher = Join-Path $PSScriptRoot "start-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR)) {
@@ -36,6 +36,8 @@ $AiRepairCooldownSeconds = 600
 $RepairFailureLimit = 3
 $RepairSuspendSeconds = 1800
 $RepairTimeoutMilliseconds = 480000
+$PublicProbeGraceFailures = 1
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/3.2"
 
 function Repair-DuplicatePathEnvironment {
     try {
@@ -71,6 +73,50 @@ function Repair-DuplicatePathEnvironment {
 }
 
 $null = Repair-DuplicatePathEnvironment
+$PythonExe = ""
+if (-not [string]::IsNullOrWhiteSpace($env:VOCAB_PYTHON_EXE)) {
+    $candidatePython = [Environment]::ExpandEnvironmentVariables($env:VOCAB_PYTHON_EXE).Trim().Trim('"')
+    if (Test-Path -LiteralPath $candidatePython -PathType Leaf) {
+        $PythonExe = [IO.Path]::GetFullPath($candidatePython)
+    }
+}
+
+function Test-EndpointWithPython {
+    param([string]$Url, [switch]$RequireOk)
+    if (-not $PythonExe) { return $false }
+    $probeCode = @'
+import json
+import sys
+import urllib.request
+
+url, require_ok, user_agent = sys.argv[1:4]
+request = urllib.request.Request(
+    url,
+    headers={
+        'Accept': 'application/json',
+        'Cache-Control': 'no-store, no-cache',
+        'Pragma': 'no-cache',
+        'User-Agent': user_agent,
+    },
+)
+try:
+    with urllib.request.urlopen(request, timeout=8) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError('unexpected HTTP status')
+        payload = json.load(response)
+        if require_ok == '1' and payload.get('ok') is not True:
+            raise RuntimeError('API is not ready')
+except Exception:
+    raise SystemExit(1)
+'@
+    $required = if ($RequireOk) { "1" } else { "0" }
+    $previousErrorPreference = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    $null = & $PythonExe -c $probeCode $Url $required $HealthProbeUserAgent 2>$null
+    $probeExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $previousErrorPreference
+    return ($probeExitCode -eq 0)
+}
 
 function Initialize-WatchdogState {
     if (-not (Test-Path -LiteralPath $EntryRoot -PathType Container)) {
@@ -91,10 +137,17 @@ function Write-WatchdogLog {
 
 function Test-Endpoint {
     param([string]$Url, [switch]$RequireOk)
+    $separator = if ($Url.Contains("?")) { "&" } else { "?" }
+    $probeUrl = $Url + $separator + "watchdog_probe=" + [Guid]::NewGuid().ToString("N")
+    if ($Url.StartsWith("https://", [StringComparison]::OrdinalIgnoreCase) -and $PythonExe) {
+        return Test-EndpointWithPython -Url $probeUrl -RequireOk:$RequireOk
+    }
     try {
-        $separator = if ($Url.Contains("?")) { "&" } else { "?" }
-        $probeUrl = $Url + $separator + "watchdog_probe=" + [Guid]::NewGuid().ToString("N")
-        $result = Invoke-RestMethod -Uri $probeUrl -TimeoutSec 8 -Headers @{ "Cache-Control" = "no-store, no-cache" }
+        $result = Invoke-RestMethod -Uri $probeUrl -TimeoutSec 8 -UserAgent $HealthProbeUserAgent -Headers @{
+            "Accept" = "application/json"
+            "Cache-Control" = "no-store, no-cache"
+            "Pragma" = "no-cache"
+        }
         if ($RequireOk) { return ($result.ok -eq $true) }
         return ($null -ne $result)
     } catch {
@@ -228,19 +281,25 @@ try {
         $connectorOk = ($connectorConnections -gt 0)
         $ollamaOk = Test-Endpoint -Url $OllamaStatusUrl
 
-        if ($localOk -and ($publicOk -or $connectorOk)) {
+        if ($localOk -and $publicOk) {
             $websiteFailures = 0
             $websiteRepairFailureStreak = 0
-            if ($publicOk) {
-                $publicValidationFailures = 0
+            $publicValidationFailures = 0
+        } elseif ($localOk -and $connectorOk) {
+            $publicValidationFailures++
+            if ($publicValidationFailures -le $PublicProbeGraceFailures) {
+                $websiteFailures = 0
+                Write-WatchdogLog (
+                    "public HTTP validation failed once; " +
+                    "cloudflared still reports $connectorConnections active connection(s), allowing one grace interval"
+                )
             } else {
-                $publicValidationFailures++
-                if ($publicValidationFailures -eq 1 -or ($publicValidationFailures % 12) -eq 0) {
-                    Write-WatchdogLog (
-                        "public HTTP validation is transiently unavailable; " +
-                        "cloudflared has $connectorConnections active connection(s), so it will not be restarted"
-                    )
-                }
+                $websiteFailures++
+                Write-WatchdogLog (
+                    "website health failure {0}/2 local={1} public={2} tunnelConnections={3}; " +
+                    "connector metrics are not accepted as public availability" -f
+                    $websiteFailures, $localOk, $publicOk, $connectorConnections
+                )
             }
         } else {
             $publicValidationFailures = 0

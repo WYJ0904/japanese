@@ -731,6 +731,7 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(by_code["trial_single_language"]["price_cents"], 800)
         self.assertEqual(by_code["tools_monthly"]["price_cents"], 2000)
         self.assertEqual(by_code["dual_language_monthly"]["price_cents"], 2000)
+        self.assertEqual(by_code["dual_language_monthly"]["name"], "双语言包月")
         self.assertEqual(by_code["all_access_monthly"]["price_cents"], 3000)
         self.assertEqual(by_code["japanese_lifetime"]["price_cents"], 7000)
         self.assertEqual(by_code["all_access_lifetime"]["price_cents"], 10000)

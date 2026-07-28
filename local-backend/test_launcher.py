@@ -41,59 +41,17 @@ class LauncherStabilityTests(unittest.TestCase):
         )
         return completed
 
-    def test_early_backend_exit_is_detected_and_report_is_exported(self):
+    def test_backend_start_is_detached_redirected_and_checked_once(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = Path(directory)
-            failure_log = temporary / "后台启动错误.txt"
-            report = temporary / "启动错误报告.txt"
-            launcher_log = temporary / "启动日志.txt"
-            runtime = temporary / "runtime"
-            runtime.mkdir()
-            for relative in (
-                "server.py",
-                "account_store.py",
-                "membership.py",
-                "payment_assets.py",
-                "temporary_store.py",
-                "vocabulary_index.py",
-                "run.ps1",
-            ):
-                (runtime / relative).write_text("", encoding="utf-8")
-            (runtime / "migrations").mkdir()
-            (runtime / "migrations" / "004_payment_flow_up.sql").write_text(
-                "", encoding="utf-8"
-            )
-            script = textwrap.dedent(
-                f"""
-                . '{launcher}'
-                function Test-BackendReady {{ return $false }}
-                function Get-ListeningProcessIds {{ return @() }}
-                $script:BackendFailureLogPath = '{failure_log}'
-                $script:ErrorReportPath = '{report}'
-                $script:LauncherLog = '{launcher_log}'
-                $script:LauncherEntryRoot = '{temporary}'
-                $script:StateRoot = '{temporary}'
-                $script:BackendRoot = '{runtime}'
-                $script:FrontendRoot = ''
-                $script:ExpectedBackendBuild = 'test-build'
-                $script:CurrentPhase = 'fault injection'
-                $process = Start-Process -FilePath $env:ComSpec -ArgumentList @('/c', 'exit 7') -PassThru -WindowStyle Hidden
-                $clock = [Diagnostics.Stopwatch]::StartNew()
-                $ready = Wait-ForBackendStartup -Process $process -Seconds 10
-                $clock.Stop()
-                if ($ready) {{ throw 'unexpected readiness' }}
-                if ($clock.Elapsed.TotalSeconds -ge 5) {{ throw 'early exit was not detected' }}
-                Set-Content -LiteralPath $script:BackendFailureLogPath -Encoding UTF8 -Value 'ModuleNotFoundError: No module named payment_assets'
-                if ((Get-BackendFailureSummary) -notmatch 'ModuleNotFoundError') {{ throw 'failure summary missing' }}
-                try {{ throw 'synthetic launcher failure' }} catch {{ $exported = Write-LauncherErrorReport -ErrorRecord $_ }}
-                if (-not (Test-Path -LiteralPath $exported -PathType Leaf)) {{ throw 'report missing' }}
-                $text = Get-Content -Raw -Encoding UTF8 -LiteralPath $exported
-                if ($text -notmatch 'fault injection' -or $text -notmatch 'synthetic launcher failure') {{ throw 'report content missing' }}
-                if ($text -match 'share_hmac_key|access_token|tunnel_token') {{ throw 'sensitive setting leaked' }}
-                """
-            )
-            self.run_powershell(script)
+        text = launcher.read_text(encoding="utf-8")
+        self.assertIn("-RedirectStandardInput $BackendStandardInputPath", text)
+        self.assertIn("-RedirectStandardOutput $BackendStandardOutputPath", text)
+        self.assertIn("-RedirectStandardError $BackendStandardErrorPath", text)
+        self.assertIn("$BackendStartupProbeDelayMilliseconds = 2000", text)
+        self.assertEqual(text.count("$backendReady = Test-BackendReady"), 1)
+        self.assertNotIn("Wait-ForBackendStartup", text)
+        self.assertNotIn("$BackendStartupTimeoutSeconds", text)
+        self.assertNotIn("$script:BackendLaunchProcess.WaitForExit", text)
 
     def test_backend_runner_captures_bounded_python_failure_output(self):
         runner = ROOT / "local-backend" / "run.ps1"
@@ -168,28 +126,75 @@ class LauncherStabilityTests(unittest.TestCase):
         )
         self.run_powershell(script)
 
-    def test_tunnel_metrics_fallback_preserves_a_connected_connector(self):
+    def test_tunnel_metrics_do_not_replace_public_availability(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
         script = textwrap.dedent(
             f"""
             . '{launcher}'
             function Test-PublicBackendReady {{ return $false }}
             function Get-TunnelHaConnections {{ return 2 }}
-            $script:TunnelValidationDegraded = $false
-            $ready = Wait-ForStablePublicBackend -Seconds 2 -Label 'synthetic connector' -StableSuccesses 3 -IntervalMilliseconds 100 -AcceptHealthyConnector
-            if (-not $ready) {{ throw 'healthy connector fallback was rejected' }}
-            if (-not $script:TunnelValidationDegraded) {{ throw 'degraded validation was not recorded' }}
+            $ready = Wait-ForStablePublicBackend -Seconds 1 -Label 'synthetic connector' -StableSuccesses 3 -IntervalMilliseconds 100
+            if ($ready) {{ throw 'connector metrics incorrectly replaced public availability' }}
             """
         )
         self.run_powershell(script)
 
-    def test_watchdog_does_not_restart_cloudflared_for_http_probe_jitter(self):
+    def test_saved_protocol_is_preserved_without_new_health_evidence(self):
+        launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
+        with tempfile.TemporaryDirectory() as directory:
+            protocol_state = Path(directory) / "tunnel-protocol.txt"
+            protocol_state.write_text("quic", encoding="ascii")
+            script = textwrap.dedent(
+                f"""
+                . '{launcher}'
+                $script:ProtocolStatePath = '{protocol_state}'
+                Remove-Item Env:VOCAB_TUNNEL_PROTOCOL -ErrorAction SilentlyContinue
+                if ((Get-PreferredTunnelProtocol) -ne 'quic') {{ throw 'saved protocol was unexpectedly discarded' }}
+                """
+            )
+            self.run_powershell(script)
+
+    def test_recent_quic_failures_prefer_a_newer_http2_success(self):
+        launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            protocol_state = temporary / "tunnel-protocol.txt"
+            protocol_state.write_text("auto", encoding="ascii")
+            tunnel_log = temporary / "fixed-tunnel.log"
+            tunnel_log.write_text(
+                "\n".join(
+                    [
+                        "HTTP/2 connection is blocked or unreachable",
+                        "HTTP/2 connection successful",
+                        "timeout: no recent network activity",
+                        "failed to dial to edge with quic",
+                        "timeout: no recent network activity",
+                        "failed to dial to edge with quic",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            script = textwrap.dedent(
+                f"""
+                . '{launcher}'
+                $script:ProtocolStatePath = '{protocol_state}'
+                $script:TunnelLog = '{tunnel_log}'
+                $script:FileLoggingEnabled = $false
+                Remove-Item Env:VOCAB_TUNNEL_PROTOCOL -ErrorAction SilentlyContinue
+                if ((Get-PreferredTunnelProtocol) -ne 'http2') {{ throw 'HTTP2 was not preferred after repeated QUIC timeouts' }}
+                """
+            )
+            self.run_powershell(script)
+
+    def test_watchdog_repairs_persistent_public_failure(self):
         watchdog = (
             ROOT / "desktop-tools" / "watch-wyj.ps1"
         ).read_text(encoding="utf-8")
         self.assertIn('$connectorConnections = Get-TunnelHaConnections', watchdog)
-        self.assertIn('$localOk -and ($publicOk -or $connectorOk)', watchdog)
-        self.assertIn('so it will not be restarted', watchdog)
+        self.assertIn('$PublicProbeGraceFailures = 1', watchdog)
+        self.assertIn('$localOk -and $connectorOk', watchdog)
+        self.assertIn('connector metrics are not accepted as public availability', watchdog)
+        self.assertNotIn('$localOk -and ($publicOk -or $connectorOk)', watchdog)
 
     def test_source_selection_and_legacy_seventy_yuan_qr_fallback(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"

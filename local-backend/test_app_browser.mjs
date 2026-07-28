@@ -299,6 +299,7 @@ async function main() {
       assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "japanese_lifetime", "all_access_lifetime"]);
       assert.ok(plans.find((item) => item.code === "trial_single_language").text.includes("8"));
       assert.ok(plans.find((item) => item.code === "dual_language_monthly").text.includes("20"));
+      assert.ok(plans.find((item) => item.code === "dual_language_monthly").text.includes("双语言包月"));
       assert.ok(plans.find((item) => item.code === "tools_monthly").text.includes("20"));
       assert.ok(plans.find((item) => item.code === "all_access_monthly").text.includes("30"));
       assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("70"));
