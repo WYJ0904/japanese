@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.6.0"
+$LauncherVersion = "10.7.0"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -44,7 +44,7 @@ $PagesStatusUrl = "https://thewyj.uk/api/status"
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $OllamaModel = "qwen3:8b"
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.5"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.7"
 
 $script:BackendRoot = ""
 $script:CloudflaredExe = ""
@@ -512,6 +512,39 @@ function Set-ResolvedRuntimePaths {
     if ([string]::IsNullOrWhiteSpace($env:VOCAB_STATIC_DIR)) {
         $env:VOCAB_STATIC_DIR = $FrontendRoot
     }
+}
+
+function Repair-TunnelOriginAddress {
+    if (-not $script:TunnelConfig -or
+        -not (Test-Path -LiteralPath $script:TunnelConfig -PathType Leaf)) {
+        throw "找不到固定 Tunnel 配置: $script:TunnelConfig"
+    }
+
+    $content = [IO.File]::ReadAllText($script:TunnelConfig)
+    $pattern = '(?im)^(\s*service:\s*)http://localhost:8765(\s*)$'
+    if (-not [regex]::IsMatch($content, $pattern)) {
+        return
+    }
+
+    $updated = [regex]::Replace(
+        $content,
+        $pattern,
+        '${1}http://127.0.0.1:8765${2}'
+    )
+    $temporaryPath = $script:TunnelConfig + ".tmp-" + [Guid]::NewGuid().ToString("N")
+    try {
+        [IO.File]::WriteAllText(
+            $temporaryPath,
+            $updated,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temporaryPath -Destination $script:TunnelConfig -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force
+        }
+    }
+    Write-LaunchLog "已将 Tunnel 本地上游固定为 IPv4，避免 localhost 解析到不可监听的 IPv6 地址。" "Green"
 }
 
 function Resolve-PythonExecutable {
@@ -1414,6 +1447,8 @@ function Invoke-WyjLauncher {
 
         $script:CurrentPhase = "启动本地账户与支付后端"
         Ensure-Backend -RestartRequired:$sourceChanged
+        $script:CurrentPhase = "修复 Tunnel 本地上游"
+        Repair-TunnelOriginAddress
         $script:CurrentPhase = "恢复固定 Tunnel"
         Ensure-Tunnel
 

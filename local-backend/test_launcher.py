@@ -53,6 +53,35 @@ class LauncherStabilityTests(unittest.TestCase):
         self.assertNotIn("$BackendStartupTimeoutSeconds", text)
         self.assertNotIn("$script:BackendLaunchProcess.WaitForExit", text)
 
+    def test_tunnel_origin_repair_uses_ipv4_and_preserves_credentials(self):
+        launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.yml"
+            config.write_text(
+                "tunnel: tunnel-id\n"
+                "credentials-file: C:/secret/tunnel.json\n"
+                "ingress:\n"
+                "  - hostname: api.example.test\n"
+                "    service: http://localhost:8765\n"
+                "  - service: http_status:404\n",
+                encoding="utf-8",
+            )
+            config_path = str(config).replace("'", "''")
+            script = textwrap.dedent(
+                f"""
+                . '{launcher}'
+                $script:TunnelConfig = '{config_path}'
+                Repair-TunnelOriginAddress
+                Repair-TunnelOriginAddress
+                $content = Get-Content -LiteralPath $script:TunnelConfig -Raw
+                if ($content -match 'localhost:8765') {{ throw 'localhost was not repaired' }}
+                if ($content -notmatch '127\\.0\\.0\\.1:8765') {{ throw 'IPv4 origin missing' }}
+                if ($content -notmatch 'tunnel-id') {{ throw 'tunnel ID changed' }}
+                if ($content -notmatch 'C:/secret/tunnel\\.json') {{ throw 'credentials changed' }}
+                """
+            )
+            self.run_powershell(script)
+
     def test_backend_runner_captures_bounded_python_failure_output(self):
         runner = ROOT / "local-backend" / "run.ps1"
         with tempfile.TemporaryDirectory() as directory:

@@ -158,7 +158,9 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("002_single_language_orders_up.sql", launcher)
         self.assertIn("003_login_audit_up.sql", launcher)
         self.assertIn("004_payment_flow_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "10.6.0"', launcher)
+        self.assertIn('$LauncherVersion = "10.7.0"', launcher)
+        self.assertIn("Repair-TunnelOriginAddress", launcher)
+        self.assertIn("'${1}http://127.0.0.1:8765${2}'", launcher)
         self.assertIn("Get-TunnelHaConnections", launcher)
         self.assertNotIn("-AcceptHealthyConnector", launcher)
         self.assertIn('return "auto"', launcher)
@@ -218,6 +220,10 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("Write-LauncherErrorReport", launcher)
         self.assertIn("启动错误报告.txt", launcher)
         self.assertIn("Wait-ForStablePublicBackend", launcher)
+        self.assertLess(
+            launcher.index("        Repair-TunnelOriginAddress"),
+            launcher.index("        Ensure-Tunnel"),
+        )
         self.assertIn("launcher_probe=", launcher)
         self.assertIn("watchdog_probe=", watchdog)
         self.assertIn("Ensure-Backend -RestartRequired:$sourceChanged", launcher)
