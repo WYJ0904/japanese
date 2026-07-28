@@ -15,7 +15,7 @@ public static class WYJPowerState {
 }
 "@
 
-$WatchdogVersion = "3.2.0"
+$WatchdogVersion = "3.3.0"
 $Launcher = Join-Path $PSScriptRoot "start-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR)) {
@@ -24,6 +24,8 @@ $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR))
     $PSScriptRoot
 }
 $LogPath = Join-Path $EntryRoot "守护日志.txt"
+$ProbeStateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
+$PythonProbeScriptPath = Join-Path $ProbeStateRoot "watchdog-http-health-probe.py"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $PublicStatusUrls = @(
@@ -37,7 +39,7 @@ $RepairFailureLimit = 3
 $RepairSuspendSeconds = 1800
 $RepairTimeoutMilliseconds = 480000
 $PublicProbeGraceFailures = 1
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/3.2"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/3.3"
 
 function Repair-DuplicatePathEnvironment {
     try {
@@ -86,10 +88,12 @@ function Test-EndpointWithPython {
     if (-not $PythonExe) { return $false }
     $probeCode = @'
 import json
-import sys
+import os
 import urllib.request
 
-url, require_ok, user_agent = sys.argv[1:4]
+url = os.environ['WYJ_PROBE_URL']
+require_ok = os.environ['WYJ_PROBE_REQUIRE_OK']
+user_agent = os.environ['WYJ_PROBE_USER_AGENT']
 request = urllib.request.Request(
     url,
     headers={
@@ -108,14 +112,65 @@ try:
             raise RuntimeError('API is not ready')
 except Exception:
     raise SystemExit(1)
+print('OK')
 '@
+    if (-not (Test-Path -LiteralPath $ProbeStateRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $ProbeStateRoot -Force | Out-Null
+    }
+    [IO.File]::WriteAllText(
+        $PythonProbeScriptPath,
+        $probeCode,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+
     $required = if ($RequireOk) { "1" } else { "0" }
-    $previousErrorPreference = $ErrorActionPreference
-    $ErrorActionPreference = "SilentlyContinue"
-    $null = & $PythonExe -c $probeCode $Url $required $HealthProbeUserAgent 2>$null
-    $probeExitCode = $LASTEXITCODE
-    $ErrorActionPreference = $previousErrorPreference
-    return ($probeExitCode -eq 0)
+    $probeId = [Guid]::NewGuid().ToString("N")
+    $probeInput = Join-Path $ProbeStateRoot ("watch-probe-" + $probeId + ".stdin")
+    $probeOutput = Join-Path $ProbeStateRoot ("watch-probe-" + $probeId + ".stdout")
+    $probeError = Join-Path $ProbeStateRoot ("watch-probe-" + $probeId + ".stderr")
+    New-Item -ItemType File -Path $probeInput -Force | Out-Null
+    $environmentNames = @(
+        "WYJ_PROBE_URL",
+        "WYJ_PROBE_REQUIRE_OK",
+        "WYJ_PROBE_USER_AGENT"
+    )
+    $previousEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    }
+    $probeProcess = $null
+    try {
+        $env:WYJ_PROBE_URL = $Url
+        $env:WYJ_PROBE_REQUIRE_OK = $required
+        $env:WYJ_PROBE_USER_AGENT = $HealthProbeUserAgent
+        $quotedProbeScript = '"' + $PythonProbeScriptPath + '"'
+        $probeProcess = Start-Process -FilePath $PythonExe -ArgumentList @(
+            $quotedProbeScript
+        ) -WorkingDirectory $ProbeStateRoot -WindowStyle Hidden -PassThru `
+            -RedirectStandardInput $probeInput `
+            -RedirectStandardOutput $probeOutput `
+            -RedirectStandardError $probeError
+        if (-not $probeProcess.WaitForExit(8000)) {
+            Stop-Process -Id $probeProcess.Id -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        $probeProcess.WaitForExit()
+        $probeResult = [IO.File]::ReadAllText($probeOutput).Trim()
+        return ($probeResult -eq "OK")
+    } catch {
+        return $false
+    } finally {
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $previousEnvironment[$name],
+                "Process"
+            )
+        }
+        foreach ($path in @($probeInput, $probeOutput, $probeError)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Initialize-WatchdogState {

@@ -152,6 +152,27 @@ class LauncherStabilityTests(unittest.TestCase):
             launcher,
         )
 
+    def test_python_https_probes_have_hard_timeouts_and_redirected_streams(self):
+        launcher = (
+            ROOT / "desktop-tools" / "start-wyj.ps1"
+        ).read_text(encoding="utf-8")
+        watchdog = (
+            ROOT / "desktop-tools" / "watch-wyj.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("launcher-http-health-probe.py", launcher)
+        self.assertIn("$probeProcess.WaitForExit($TimeoutSec * 1000)", launcher)
+        self.assertNotIn("$null = & $script:PythonExe -c", launcher)
+        self.assertIn("watchdog-http-health-probe.py", watchdog)
+        self.assertIn("$probeProcess.WaitForExit(8000)", watchdog)
+        self.assertNotIn("$null = & $PythonExe -c", watchdog)
+        for script in (launcher, watchdog):
+            self.assertIn("-RedirectStandardInput $probeInput", script)
+            self.assertIn("-RedirectStandardOutput $probeOutput", script)
+            self.assertIn("-RedirectStandardError $probeError", script)
+            self.assertIn("Stop-Process -Id $probeProcess.Id -Force", script)
+            self.assertIn("print('OK')", script)
+            self.assertIn("[IO.File]::ReadAllText($probeOutput).Trim()", script)
+
     def test_saved_protocol_is_preserved_without_new_health_evidence(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
         with tempfile.TemporaryDirectory() as directory:

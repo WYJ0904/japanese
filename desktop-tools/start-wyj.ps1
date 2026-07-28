@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.4.1"
+$LauncherVersion = "10.5.0"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -29,6 +29,7 @@ $BackendFailureLogPath = Join-Path $LauncherEntryRoot "后台启动错误.txt"
 $BackendStandardInputPath = Join-Path $StateRoot "backend-stdin.empty"
 $BackendStandardOutputPath = Join-Path $LauncherEntryRoot "后台标准输出.txt"
 $BackendStandardErrorPath = Join-Path $LauncherEntryRoot "后台标准错误.txt"
+$PythonProbeScriptPath = Join-Path $StateRoot "launcher-http-health-probe.py"
 $ProtocolStatePath = Join-Path $StateRoot "tunnel-protocol.txt"
 $BackendPidPath = Join-Path $StateRoot "backend.pid"
 $WatchdogScript = Join-Path $PSScriptRoot "watch-wyj.ps1"
@@ -42,7 +43,7 @@ $PagesStatusUrl = "https://thewyj.uk/api/status"
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $OllamaModel = "qwen3:8b"
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.4.1"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.5"
 
 $script:BackendRoot = ""
 $script:CloudflaredExe = ""
@@ -564,10 +565,14 @@ function Test-UrlWithPython {
     }
     $probeCode = @'
 import json
-import sys
+import os
 import urllib.request
 
-url, timeout, mode, expected, user_agent = sys.argv[1:6]
+url = os.environ['WYJ_PROBE_URL']
+timeout = float(os.environ['WYJ_PROBE_TIMEOUT'])
+mode = os.environ['WYJ_PROBE_MODE']
+expected = os.environ.get('WYJ_PROBE_EXPECTED', '')
+user_agent = os.environ['WYJ_PROBE_USER_AGENT']
 request = urllib.request.Request(
     url,
     headers={
@@ -578,7 +583,7 @@ request = urllib.request.Request(
     },
 )
 try:
-    with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         if not 200 <= response.status < 300:
             raise RuntimeError('unexpected HTTP status')
         if mode == 'api':
@@ -589,13 +594,67 @@ try:
                 raise RuntimeError('backend build mismatch')
 except Exception:
     raise SystemExit(1)
+print('OK')
 '@
-    $previousErrorPreference = $ErrorActionPreference
-    $ErrorActionPreference = "SilentlyContinue"
-    $null = & $script:PythonExe -c $probeCode $Url ([string]$TimeoutSec) $Mode $ExpectedBuild $HealthProbeUserAgent 2>$null
-    $probeExitCode = $LASTEXITCODE
-    $ErrorActionPreference = $previousErrorPreference
-    return ($probeExitCode -eq 0)
+    if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+    }
+    [IO.File]::WriteAllText(
+        $PythonProbeScriptPath,
+        $probeCode,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+
+    $probeId = [Guid]::NewGuid().ToString("N")
+    $probeInput = Join-Path $StateRoot ("probe-" + $probeId + ".stdin")
+    $probeOutput = Join-Path $StateRoot ("probe-" + $probeId + ".stdout")
+    $probeError = Join-Path $StateRoot ("probe-" + $probeId + ".stderr")
+    New-Item -ItemType File -Path $probeInput -Force | Out-Null
+    $environmentNames = @(
+        "WYJ_PROBE_URL",
+        "WYJ_PROBE_TIMEOUT",
+        "WYJ_PROBE_MODE",
+        "WYJ_PROBE_EXPECTED",
+        "WYJ_PROBE_USER_AGENT"
+    )
+    $previousEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+    }
+    $probeProcess = $null
+    try {
+        $env:WYJ_PROBE_URL = $Url
+        $env:WYJ_PROBE_TIMEOUT = [string]$TimeoutSec
+        $env:WYJ_PROBE_MODE = $Mode
+        $env:WYJ_PROBE_EXPECTED = $ExpectedBuild
+        $env:WYJ_PROBE_USER_AGENT = $HealthProbeUserAgent
+        $probeProcess = Start-Process -FilePath $script:PythonExe -ArgumentList @(
+            (ConvertTo-QuotedNativePath -PathValue $PythonProbeScriptPath)
+        ) -WorkingDirectory $StateRoot -WindowStyle Hidden -PassThru `
+            -RedirectStandardInput $probeInput `
+            -RedirectStandardOutput $probeOutput `
+            -RedirectStandardError $probeError
+        if (-not $probeProcess.WaitForExit($TimeoutSec * 1000)) {
+            Stop-Process -Id $probeProcess.Id -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        $probeProcess.WaitForExit()
+        $probeResult = [IO.File]::ReadAllText($probeOutput).Trim()
+        return ($probeResult -eq "OK")
+    } catch {
+        return $false
+    } finally {
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable(
+                $name,
+                $previousEnvironment[$name],
+                "Process"
+            )
+        }
+        foreach ($path in @($probeInput, $probeOutput, $probeError)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Test-ApiOk {
