@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.4.0"
+$LauncherVersion = "10.4.1"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -42,7 +42,7 @@ $PagesStatusUrl = "https://thewyj.uk/api/status"
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $OllamaModel = "qwen3:8b"
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.4"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.4.1"
 
 $script:BackendRoot = ""
 $script:CloudflaredExe = ""
@@ -1173,7 +1173,7 @@ function Ensure-Tunnel {
     foreach ($protocol in $protocols) {
         $lastProcess = Start-TunnelProcess -Protocol $protocol
         $waitSeconds = if ($protocol -eq "auto") { 65 } else { 45 }
-        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -Process $lastProcess) {
+        if (Wait-ForStablePublicBackend -Seconds $waitSeconds -Label ("Tunnel " + $protocol.ToUpperInvariant()) -StableSuccesses 3 -IntervalMilliseconds 2500 -Process $lastProcess) {
             Save-PreferredTunnelProtocol -Protocol $protocol
             Write-LaunchLog ("固定 Tunnel 已恢复并记住 " + $protocol.ToUpperInvariant() + "。") "Green"
             return

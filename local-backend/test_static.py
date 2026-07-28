@@ -158,7 +158,7 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("002_single_language_orders_up.sql", launcher)
         self.assertIn("003_login_audit_up.sql", launcher)
         self.assertIn("004_payment_flow_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "10.4.0"', launcher)
+        self.assertIn('$LauncherVersion = "10.4.1"', launcher)
         self.assertIn("Get-TunnelHaConnections", launcher)
         self.assertNotIn("-AcceptHealthyConnector", launcher)
         self.assertIn('return "auto"', launcher)

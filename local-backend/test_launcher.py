@@ -139,6 +139,19 @@ class LauncherStabilityTests(unittest.TestCase):
         )
         self.run_powershell(script)
 
+    def test_tunnel_candidate_uses_three_consecutive_public_checks(self):
+        launcher = (
+            ROOT / "desktop-tools" / "start-wyj.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '-StableSuccesses 3 -IntervalMilliseconds 2500 -Process $lastProcess',
+            launcher,
+        )
+        self.assertIn(
+            '-Seconds 20 -Label "现有固定 Tunnel" -StableSuccesses 5',
+            launcher,
+        )
+
     def test_saved_protocol_is_preserved_without_new_health_evidence(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
         with tempfile.TemporaryDirectory() as directory:
