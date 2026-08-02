@@ -246,7 +246,14 @@ Pages Functions：
 
 ## 手动启动
 
-本项目不配置开机自启动。电脑重启后可双击 `启动WYJ网站.cmd`。CMD 既支持脚本与入口放在同一目录，也支持桌面入口配合 `_wyj-tools` 子目录，不会因部署布局不同找不到启动器。
+本项目不配置开机自启动。电脑重启后可双击 `启动WYJ网站.cmd`。仓库中的 `desktop-tools/` 是受版本控制的启动器源码目录；部署到桌面时，CMD 放在目标目录根部，两个 PowerShell 文件复制到 `_wyj-tools/`。CMD 也兼容三个文件处于同一目录的开发布局，不会因这两种布局找不到启动器。
+
+```text
+仓库源码                       桌面手动启动布局
+desktop-tools/启动WYJ网站.cmd  -> 启动WYJ网站.cmd
+desktop-tools/start-wyj.ps1    -> _wyj-tools/start-wyj.ps1
+desktop-tools/watch-wyj.ps1    -> _wyj-tools/watch-wyj.ps1
+```
 
 V11.0.0 启动器把仓库源码和私有运行目录分开。源码按 `-SourceRoot`、`VOCAB_SOURCE_ROOT`、入口附近、本机 `launcher.json`、受限范围自动发现的顺序选择；运行目录按 `-RuntimeRoot`、`VOCAB_BACKEND_ROOT`、本机配置、现有旧版目录、当前账户本地应用数据目录的顺序选择。首次识别后会保存本机配置，继续使用原数据库、管理员账户和 Tunnel 工具，不搬移或覆盖私有数据。启动时会把 Tunnel 的本地上游从 `localhost:8765` 原子修复为 `127.0.0.1:8765`，避免 Windows 将 `localhost` 解析到后端未监听的 IPv6 地址。
 
@@ -287,6 +294,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\local-backend\run.ps1
 cd local-backend
 python -m py_compile account_store.py membership.py payment_assets.py temporary_store.py vocabulary_index.py server.py test_accounts.py test_api.py test_payment_assets.py test_static.py test_vocabulary_index.py
 python -m unittest discover -p "test_*.py" -v
+cd ..
+python scripts/repository_audit.py
 ```
 
 JavaScript 语法检查：
@@ -300,9 +309,28 @@ node local-backend/test_tools_js.mjs
 node local-backend/test_proxy_js.mjs
 ```
 
+`.github/workflows/ci.yml` 会在每次 push 和 pull request 上运行上述 Python 核心测试、JavaScript 语法检查、Pages API 代理测试、工具逻辑测试及仓库敏感文件/静态名称审计。CI 不读取本机目录，也不需要二维码、数据库、账号、密钥或 Tunnel 凭据。
+
+两个浏览器矩阵依赖一个隔离后端和启用了 CDP 的本地 Chrome，因此不作为 Linux CI 的强制步骤。准备好 `WYJ_TEST_BASE`、`WYJ_CDP_URL` 和仅用于隔离测试库的 `WYJ_TEST_ADMIN_SECRET` 后，本地运行：
+
+```powershell
+node local-backend/test_app_browser.mjs
+node local-backend/test_tools_browser.mjs
+```
+
 当前 Python 自动化套件共 133 项，另有 27 项 JavaScript 工具自检和 4 项 Pages 代理韧性检查。`test_app_browser.mjs` 使用真实 Chrome 覆盖 14 条完整用户流程，`test_tools_browser.mjs` 会自行准备隔离样本，并逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）及实际下载。覆盖注册登录、断网后会话保留与自动恢复、微信 WebView 兼容、登录位置审计、会话摘要迁移、封禁、管理员安全重置密钥、用户自助改密、密钥与哈希防泄露、老会员迁移、六种在售方案、支付方式锁定、私有二维码鉴权、完整支付状态机、原子审批与唯一履约、包月续期与永久会员幂等、权益隔离与合并、过期降级、管理员审计、本地优先分级搜索、NFKC/大小写/假名归一化、英语词形匹配、稳定排序、TTL/LRU 缓存、完整排除词缓存键、工具权限、收藏/历史/配置、20 MB 临时文件往返、双客户端留言自动同步、文件签名、跨站拒绝、限流、AI 兜底选词、日语汉字自动标音、纯假名直接出题、汉字与假名听写判卷、错题 PDF、HTML ID、PWA 缓存、390 像素手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理、Wi-Fi/联系人二维码和 OpenCC 词典完整性。额外压力矩阵验证 300 次状态请求、200 次并发工具写入和 24 次并发 PDF 导出均为 0 错误。
 
 ## Cloudflare Pages 配置
+
+### GitHub 仓库改名待办
+
+当前 GitHub 仓库仍是 `WYJ0904/japanese`，目标名称是 `WYJ0904/thewyj.uk`；代码提交不能代替 Repository Settings 中的改名。仓库所有者需要进入 **Settings -> General -> Repository name**，输入 `thewyj.uk` 并确认 Rename。完成后在本地仓库执行：
+
+```powershell
+git remote set-url origin https://github.com/WYJ0904/thewyj.uk.git
+```
+
+随后在 Cloudflare Pages 的 Git 集成页面确认仓库仍连接到改名后的项目和 `main` 分支；在改名前继续使用当前 `WYJ0904/japanese` 仓库。
 
 | 设置 | 值 |
 | --- | --- |
@@ -313,7 +341,7 @@ node local-backend/test_proxy_js.mjs
 
 部署步骤：
 
-1. 推送 `main` 到 `WYJ0904/thewyj.uk`。
+1. 推送 `main` 到当前 GitHub 仓库；完成上述改名后其地址应为 `WYJ0904/thewyj.uk`。
 2. Cloudflare Pages 连接该仓库和 `main`。
 3. 设置 `LOCAL_API_BASE=https://api.thewyj.uk`。
 4. 部署后检查 `/api/status`、登录、`/select`、无权限 `/tools` 拦截和管理员审批。

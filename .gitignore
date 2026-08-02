@@ -3,6 +3,7 @@ dist/
 build/
 .env
 .env.*
+.idea/
 
 # Local runtime files from the original desktop version
 data/
@@ -10,11 +11,30 @@ tools/
 __pycache__/
 *.pyc
 *.log
+*.db
+*.db3
+*.sqlite
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.pem
+*.key
+*.p12
+*.pfx
 desktop-tools/启动日志.txt
 desktop-tools/启动日志-previous.txt
 desktop-tools/启动错误报告*.txt
 desktop-tools/后台启动错误*.txt
 desktop-tools/守护日志*.txt
+desktop-tools/*日志*.txt
+desktop-tools/*错误*.txt
+desktop-tools/*标准输出*.txt
+desktop-tools/*标准错误*.txt
+**/payment/qrcodes/
+**/credentials.json
 *.pdf
 latest-url.txt
 

@@ -30,9 +30,10 @@ from payment_assets import (
 
 ADMIN_USERNAME = "wyj"
 ADMIN_SECRET = os.environ.get("VOCAB_ADMIN_SECRET", "").strip() or secrets.token_urlsafe(12)
-MEMBERSHIPS = {"free", "trial_single_language", "monthly", "lifetime"}
+# Values still accepted by the legacy users.membership column and its admin
+# compatibility endpoint. New plans and purchases must use membership.py.
+LEGACY_MEMBERSHIP_CODES = {"free", "trial_single_language", "monthly", "lifetime"}
 LANGUAGES = {"english", "japanese"}
-RECHARGE_PLANS = {"trial_single_language", "monthly", "lifetime"}
 SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 MAX_SESSIONS_PER_USER = 12
 MIN_SECRET_LENGTH = 7
@@ -685,7 +686,7 @@ class AccountStore:
     def _effective_membership(row):
         if row["role"] == "super_admin":
             return "lifetime"
-        membership = row["membership"] if row["membership"] in MEMBERSHIPS else "free"
+        membership = row["membership"] if row["membership"] in LEGACY_MEMBERSHIP_CODES else "free"
         if membership in {"trial_single_language", "monthly"}:
             expires = parse_time(row["membership_expires"])
             if not expires or expires <= utc_now():
@@ -1525,7 +1526,7 @@ class AccountStore:
             raise AccountError("不能修改固定管理员的等级", 403, "admin_protected")
         before = self._public_snapshot(self.user_payload(target))
         membership = str(membership or "free")
-        if membership not in MEMBERSHIPS:
+        if membership not in LEGACY_MEMBERSHIP_CODES:
             raise AccountError("会员等级无效", 400, "membership_invalid")
         raw_start = str(start or "").strip()
         raw_expires = str(expires or "").strip()
