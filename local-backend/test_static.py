@@ -63,14 +63,14 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("/assets/logo.png", self.worker)
         self.assertIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260728-network-stability"
+        release_token = "20260802-network-resilience"
         for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-07-28-network-stability"', self.app)
+        self.assertIn('const APP_VERSION = "2026-08-02-network-resilience"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
-        self.assertIn('APP_BUILD = "2026-07-28-network-stability"', server)
+        self.assertIn('APP_BUILD = "2026-08-02-network-resilience"', server)
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -112,6 +112,21 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("请至少选择一种密码字符", self.tools)
         self.assertIn("const matrix = new Uint16Array(cells)", self.tools)
 
+    def test_temporary_file_limit_is_consistent_across_the_full_request_chain(self):
+        proxy = (ROOT / "functions" / "api" / "[[path]].js").read_text(encoding="utf-8")
+        server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
+        store = (ROOT / "local-backend" / "temporary_store.py").read_text(encoding="utf-8")
+        self.assertIn("const TEMP_FILE_MAX_BYTES = 20 * 1024 * 1024", self.tools)
+        self.assertIn("const MAX_PROXY_BODY_BYTES = 600 * 1024", proxy)
+        self.assertIn("const MAX_TEMP_FILE_PROXY_BODY_BYTES = 28 * 1024 * 1024", proxy)
+        self.assertIn("MAX_TEMP_FILE_BYTES = 20 * 1024 * 1024", store)
+        self.assertIn("MAX_JSON_BYTES = int(os.environ.get(\"VOCAB_MAX_JSON_BYTES\", str(512 * 1024)))", server)
+        self.assertIn("DEFAULT_MAX_TEMP_FILE_JSON_BYTES = ((MAX_TEMP_FILE_BYTES + 2) // 3) * 4 + 128 * 1024", server)
+        self.assertIn('request_path == "/api/temporary/file"', server)
+        self.assertIn("function uploadApi", self.app)
+        self.assertIn('bridge.uploadApi("/api/temporary/file"', self.tools)
+        self.assertIn("timeoutMs: 180000", self.tools)
+
     def test_opencc_character_dictionaries_are_local_and_cached(self):
         expected = {
             "opencc-st-characters.txt": "81c27e6364fd164181276197b9215cf95f7f12a050aa207375248a5badf8d6fc",
@@ -122,7 +137,7 @@ class StaticSiteTests(unittest.TestCase):
             content = path.read_bytes()
             self.assertGreater(len(content.splitlines()), 3000)
             self.assertEqual(hashlib.sha256(content).hexdigest(), checksum)
-            self.assertIn(f'fetch("/vendor/{name}")', self.tools)
+            self.assertIn(f'fetchStaticText("/vendor/{name}")', self.tools)
             self.assertIn(f'"/vendor/{name}"', self.worker)
         self.assertIn("OpenCC 1.4.1", (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8"))
 
@@ -158,7 +173,8 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("002_single_language_orders_up.sql", launcher)
         self.assertIn("003_login_audit_up.sql", launcher)
         self.assertIn("004_payment_flow_up.sql", launcher)
-        self.assertIn('$LauncherVersion = "10.8.1"', launcher)
+        self.assertIn('$LauncherVersion = "11.0.0"', launcher)
+        self.assertIn("WYJ Website Launcher 11.0.0", launcher_cmd)
         self.assertIn("Repair-TunnelOriginAddress", launcher)
         self.assertIn("'${1}http://127.0.0.1:8765${2}'", launcher)
         self.assertIn("Get-TunnelHaConnections", launcher)
@@ -194,7 +210,7 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("$RepairFailureLimit = 3", watchdog)
         self.assertIn("$RepairSuspendSeconds = 1800", watchdog)
         self.assertIn("Update-RepairBackoff", watchdog)
-        self.assertIn('$WatchdogVersion = "3.5.0"', watchdog)
+        self.assertIn('$WatchdogVersion = "4.0.0"', watchdog)
         self.assertIn("Get-TunnelHaConnections", watchdog)
         self.assertIn("connector metrics are not accepted as public availability", watchdog)
         self.assertNotIn("$publicOk -or $connectorOk", watchdog)
@@ -217,6 +233,9 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("-RedirectStandardInput $BackendStandardInputPath", launcher)
         self.assertIn("-RedirectStandardOutput $BackendStandardOutputPath", launcher)
         self.assertIn("-RedirectStandardError $BackendStandardErrorPath", launcher)
+        self.assertIn("-RedirectStandardInput $TunnelStandardInputPath", launcher)
+        self.assertIn("-RedirectStandardOutput $TunnelStandardOutputPath", launcher)
+        self.assertIn("-RedirectStandardError $TunnelStandardErrorPath", launcher)
         self.assertIn("Write-LauncherErrorReport", launcher)
         self.assertIn("启动错误报告.txt", launcher)
         self.assertIn("Wait-ForStablePublicBackend", launcher)
@@ -273,6 +292,20 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn("requestJsonGet", self.app)
         self.assertIn("Promise.allSettled(requests.map", self.app)
         self.assertIn("已加载的内容会保留，请点击刷新重试", self.app)
+        self.assertNotIn("loadMembershipPlans().catch(() => {});", self.app)
+        self.assertIn("membershipModalController?.abort()", self.app)
+        self.assertIn("Promise.allSettled([", self.app)
+        self.assertIn("function retryDelayWithJitter", self.app)
+        self.assertIn('window.addEventListener("offline"', self.app)
+        self.assertIn('window.addEventListener("pageshow"', self.app)
+        self.assertIn("async function fetchWithDeadline", self.worker)
+        self.assertIn("Promise.allSettled(", self.worker)
+        self.assertNotIn("cache.addAll(CORE_SHELL)", self.worker)
+        proxy = (ROOT / "functions" / "api" / "[[path]].js").read_text(encoding="utf-8")
+        self.assertIn("function upstreamTimeoutFor", proxy)
+        self.assertIn("function retryDelayWithJitter", proxy)
+        self.assertIn("bases.slice(0, 1)", proxy)
+        self.assertNotIn("bases.flatMap", proxy)
         launcher = (ROOT / "desktop-tools" / "start-wyj.ps1").read_text(encoding="utf-8-sig")
         startup = launcher[launcher.index("        $sourceChanged = Sync-BackendSource"):]
         self.assertLess(startup.index("        Ensure-Backend"), startup.index("        Ensure-Tunnel"))

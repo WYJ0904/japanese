@@ -25,6 +25,7 @@ function prepareFixtures() {
   write("objects.json", JSON.stringify([{ name: "Alice", age: 18 }, { name: "Bob", age: 20 }]));
   write("array1.json", JSON.stringify([1, 2]));
   write("array2.json", JSON.stringify([3]));
+  write("twenty-megabytes.txt", Buffer.alloc(20 * 1024 * 1024, 0x41));
   fs.copyFileSync(path.join(ROOT, "icon-192.png"), path.join(TEST_ROOT, "sample.png"));
   fs.copyFileSync(path.join(ROOT, "icon-512.png"), path.join(TEST_ROOT, "sample2.png"));
   write("sample.jpg", Buffer.from(
@@ -48,6 +49,7 @@ const samples = {
   png: sample("sample.png"),
   png2: sample("sample2.png"),
   jpeg: sample("sample.jpg"),
+  large: sample("twenty-megabytes.txt"),
 };
 
 for (const [name, filePath] of Object.entries(samples)) {
@@ -450,14 +452,15 @@ async function main() {
 
     await record("temporary", "temporary-file", async () => {
       await openTool("temporary-file");
-      await setFiles("#tempFileInput", [samples.text]);
+      await setFiles("#tempFileInput", [samples.large]);
       await click("#createTempBtn");
-      await waitFor("document.querySelector('#temporaryResult code')?.textContent.includes('/share/file/')", 10_000, "temporary file link");
+      await waitFor("document.querySelector('#temporaryResult code')?.textContent.includes('/share/file/')", 120_000, "20 MB temporary file link");
       const state = await readState();
       const id = state.temporaryCode.split("/").pop();
       const opened = await api("/api/share/file/read", { id, password: "" });
-      assert.equal(opened.file.file_name, "sample.txt");
-      assert.ok(opened.file.base64);
+      assert.equal(opened.file.file_name, "twenty-megabytes.txt");
+      assert.equal(opened.file.size_bytes, 20 * 1024 * 1024);
+      assert.equal(Buffer.from(opened.file.base64, "base64").length, 20 * 1024 * 1024);
     });
 
     await record("temporary", "temporary-clipboard", async () => {
@@ -482,9 +485,14 @@ async function main() {
       await setFields({ "#qrKind": "wifi", "#qrWifiName": "WYJ-WIFI", "#qrWifiPassword": "password123" });
       await click("#createTempBtn");
       await waitFor("document.querySelector('#temporaryResult code')?.textContent.startsWith('WIFI:')", 5_000, "Wi-Fi QR");
-      await setFields({ "#qrKind": "contact", "#qrContactName": "WYJ", "#qrContactEmail": "wyj@example.com" });
+      await setFields({
+        "#qrKind": "contact", "#qrContactFamily": "王", "#qrContactGiven": "小明",
+        "#qrContactPhone": "+86 13800000000", "#qrContactEmail": "wyj@example.com",
+        "#qrContactOrg": "WYJ Lab", "#qrContactCity": "上海",
+        "#qrContactUrl": "https://thewyj.uk/contact", "#qrContactNote": "浏览器回归测试",
+      });
       await click("#createTempBtn");
-      await waitFor("document.querySelector('#temporaryResult code')?.textContent.includes('BEGIN:VCARD')", 5_000, "contact QR");
+      await waitFor("document.querySelector('#temporaryResult code')?.textContent.includes('BEGIN:VCARD') && document.querySelector('#temporaryResult code')?.textContent.includes('TEL;TYPE=CELL') && document.querySelector('#temporaryResult code')?.textContent.includes('URL:https://thewyj.uk/contact')", 5_000, "full contact QR");
       await setFields({ "#qrKind": "text", "#qrText": "dynamic qr", "#qrDynamic": true });
       await click("#createTempBtn");
       await waitFor("document.querySelector('#temporaryResult code')?.textContent.includes('/share/qr/')", 10_000, "dynamic QR");
@@ -502,7 +510,17 @@ async function main() {
       await click("#postRoomBtn");
       await waitFor("document.querySelector('#roomMessages')?.textContent.includes('hello room')", 10_000, "room post");
       await click("#openRoomBtn");
-      await waitFor("document.querySelector('#toolWorkbenchMessage')?.textContent === '房间已打开'", 10_000, "room open");
+      await waitFor("document.querySelector('#toolWorkbenchMessage')?.textContent.includes('自动同步')", 10_000, "room auto-sync open");
+      const credentials = await evaluate("({ id: document.querySelector('#roomId').value, password: document.querySelector('#roomPassword').value })");
+      await api("/api/share/room/post", { ...credentials, author: "Second", message: "hello from second client" }, "", [201]);
+      await waitFor("document.querySelector('#roomMessages')?.textContent.includes('hello from second client')", 12_000, "second client polling update");
+      await delay(4_500);
+      const roomSnapshot = await evaluate(`({
+        ids: [...document.querySelectorAll('#roomMessages article')].map((item) => item.dataset.messageId),
+        secondCount: (document.querySelector('#roomMessages')?.textContent.match(/hello from second client/g) || []).length,
+      })`);
+      assert.equal(roomSnapshot.secondCount, 1);
+      assert.equal(new Set(roomSnapshot.ids).size, roomSnapshot.ids.length);
       await click("#clearRoomBtn");
       await waitFor("document.querySelector('#toolWorkbenchMessage')?.textContent === '房间已清空'", 10_000, "room clear");
       assert.equal(await evaluate("document.querySelectorAll('#roomMessages article').length"), 0);

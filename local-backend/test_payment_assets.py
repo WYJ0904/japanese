@@ -102,8 +102,8 @@ class PaymentAssetTests(unittest.TestCase):
         with self.assertRaises(PaymentAssetError) as missing:
             load_qr_asset(
                 "wechat",
-                "dual_language_lifetime",
-                "qr-v1:wechat:dual_language_lifetime",
+                "japanese_lifetime",
+                "qr-v1:wechat:japanese_lifetime",
             )
         self.assertEqual(missing.exception.code, "payment_qr_unavailable")
         self.assertNotIn(str(self.root), str(missing.exception))

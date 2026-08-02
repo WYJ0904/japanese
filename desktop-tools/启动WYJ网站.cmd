@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
-title WYJ Website Launcher 10.8.1
+title WYJ Website Launcher 11.0.0
 
 set "SCRIPT_DIR=%~dp0"
 set "LAUNCHER=%SCRIPT_DIR%start-wyj.ps1"

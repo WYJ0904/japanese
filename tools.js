@@ -9,6 +9,18 @@
     { id: "temporary", name: "临时工具", mark: "T", description: "临时文本、文件、剪贴板、二维码与留言房间" },
   ];
 
+  async function fetchStaticText(url, timeoutMs = 10000) {
+    const controller = typeof AbortController === "undefined" ? null : new AbortController();
+    const timeout = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : 0;
+    try {
+      const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+      if (!response.ok) throw new Error(`${url} ${response.status}`);
+      return await response.text();
+    } finally {
+      if (timeout) window.clearTimeout(timeout);
+    }
+  }
+
   const toolRows = {
     text: [
       ["text-stats", "文本统计", "统计字符、单词、行数、段落和预计阅读时间。", "字数 计数 阅读时长"],
@@ -249,6 +261,11 @@
   let currentCategory = "all";
   let currentTool = null;
   let currentDownload = null;
+  let activeRoomPoller = null;
+  let activeUploadController = null;
+  const TEMP_FILE_MAX_BYTES = 20 * 1024 * 1024;
+  const ROOM_POLL_BASE_MS = 4000;
+  const ROOM_POLL_MAX_MS = 30000;
 
   const byId = (id) => document.getElementById(id);
   const categoryFor = (tool) => CATEGORY_MAP.get(tool.category);
@@ -417,7 +434,7 @@
       if (!field) return;
       if (field.type === "checkbox") field.checked = Boolean(value);
       else field.value = value;
-      if (["qrKind", "qrDynamic"].includes(field.id)) field.dispatchEvent(new Event("change", { bubbles: true }));
+      if (["qrKind", "qrDynamic", "qrWifiSecurity"].includes(field.id)) field.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }
 
@@ -524,8 +541,8 @@
     if (openCcMaps) return Promise.resolve(openCcMaps);
     if (!openCcMapsPromise) {
       openCcMapsPromise = Promise.all([
-        fetch("/vendor/opencc-st-characters.txt").then((response) => response.ok ? response.text() : Promise.reject(new Error(`ST ${response.status}`))),
-        fetch("/vendor/opencc-ts-characters.txt").then((response) => response.ok ? response.text() : Promise.reject(new Error(`TS ${response.status}`))),
+        fetchStaticText("/vendor/opencc-st-characters.txt"),
+        fetchStaticText("/vendor/opencc-ts-characters.txt"),
       ]).then(([simplifiedToTraditional, traditionalToSimplified]) => {
         const maps = {
           traditional: parseOpenCcCharacterDictionary(simplifiedToTraditional),
@@ -830,6 +847,8 @@
   }
 
   function renderCurrentTool() {
+    stopRoomPolling();
+    cancelActiveUpload(false);
     if (!currentTool) return;
     byId("toolWorkbenchCategory").textContent = categoryFor(currentTool).name;
     byId("toolWorkbenchTitle").textContent = currentTool.name;
@@ -856,6 +875,8 @@
   }
 
   function closeWorkbench(pushRoute = true) {
+    stopRoomPolling();
+    cancelActiveUpload(false);
     currentTool = null;
     currentDownload = null;
     byId("toolWorkbench").classList.add("hidden");
@@ -879,6 +900,8 @@
   }
 
   function hide() {
+    stopRoomPolling();
+    cancelActiveUpload(false);
     byId("toolsPanel")?.classList.add("hidden");
     byId("toolsPanel")?.setAttribute("aria-hidden", "true");
   }
@@ -902,7 +925,7 @@
     });
   }
 
-  window.WYJTools = { init, show, hide, openTool, closeWorkbench, searchTools, tools: TOOLS };
+  window.WYJTools = { init, show, hide, openTool, closeWorkbench, searchTools, tools: TOOLS, test: { buildWifiPayload, buildVcardPayload } };
 
   function uint32(value) {
     return new Uint8Array([value & 255, (value >>> 8) & 255, (value >>> 16) & 255, (value >>> 24) & 255]);
@@ -1668,26 +1691,104 @@
     bindConfigControls();
   }
 
+  function cancelActiveUpload(showMessage = true) {
+    if (!activeUploadController) return;
+    activeUploadController.silentCancel = !showMessage;
+    activeUploadController.abort();
+    activeUploadController = null;
+    if (showMessage) setMessage("已取消上传");
+  }
+
+  function readFileWithProgress(file, controller, onProgress) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      const abort = () => reader.abort();
+      const finish = (callback) => {
+        controller.signal.removeEventListener("abort", abort);
+        callback();
+      };
+      reader.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(event.loaded / event.total);
+      };
+      reader.onload = () => finish(() => resolve(reader.result));
+      reader.onerror = () => finish(() => reject(reader.error || new Error("读取文件失败")));
+      reader.onabort = () => finish(() => {
+        const error = new Error("上传已取消");
+        error.name = "AbortError";
+        reject(error);
+      });
+      controller.signal.addEventListener("abort", abort, { once: true });
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
   function renderTemporaryFile(tool) {
     byId("toolWorkbenchBody").innerHTML = `<div class="tool-form temporary-tool-form">
-      <label class="file-drop"><span>选择临时文件（最大 350 KB）</span><input id="tempFileInput" type="file" accept=".txt,.csv,.json,.pdf,.png,.jpg,.jpeg,.webp,.gif,.zip" /></label>
+      <label class="file-drop"><span>选择临时文件（最大 20 MB）</span><input id="tempFileInput" type="file" accept=".txt,.csv,.json,.pdf,.png,.jpg,.jpeg,.webp,.gif,.zip" /></label>
       ${temporaryCommonFields(60)}
       <label><span>最大下载次数</span><input id="tempMaxDownloads" data-config="maxDownloads" type="number" min="1" max="100" value="5" /></label>
-      <div class="tool-command-row"><button class="primary" id="createTempBtn" type="button">上传并生成链接</button></div>
+      <div class="tool-command-row"><button class="primary" id="createTempBtn" type="button">上传并生成链接</button><button id="cancelTempUploadBtn" class="hidden" type="button">取消上传</button></div>
+      <div class="upload-progress hidden" id="tempUploadProgressWrap"><progress id="tempUploadProgress" max="100" value="0"></progress><span id="tempUploadProgressText">0%</span></div>
       <div class="temporary-result" id="temporaryResult"></div>${renderConfigControls(tool.id)}
     </div>`;
-    byId("createTempBtn").addEventListener("click", async () => {
+    const createButton = byId("createTempBtn");
+    const cancelButton = byId("cancelTempUploadBtn");
+    const progressWrap = byId("tempUploadProgressWrap");
+    const progress = byId("tempUploadProgress");
+    const progressText = byId("tempUploadProgressText");
+    const updateProgress = (value, label) => {
+      const percent = Math.round(Math.max(0, Math.min(1, value)) * 100);
+      progress.value = percent;
+      progressText.textContent = label || `${percent}%`;
+    };
+    cancelButton.addEventListener("click", () => cancelActiveUpload(true));
+    createButton.addEventListener("click", async () => {
+      if (activeUploadController) return;
+      const controller = new AbortController();
+      activeUploadController = controller;
+      createButton.disabled = true;
+      cancelButton.classList.remove("hidden");
+      progressWrap.classList.remove("hidden");
+      updateProgress(0, "准备读取…");
       try {
-        const file = byId("tempFileInput").files?.[0]; if (!file) throw new Error("请选择文件"); if (file.size > 350 * 1024) throw new Error("临时文件不能超过 350 KB");
-        const bytes = new Uint8Array(await file.arrayBuffer()); let binary = "";
-        for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-        const data = await bridge.api("/api/temporary/file", {
-          file_name: file.name, mime_type: file.type || "application/octet-stream", base64: btoa(binary),
-          password: byId("tempPassword").value, minutes: byId("tempMinutes").value,
-          max_downloads: byId("tempMaxDownloads").value, destroy_after_download: byId("tempDestroy").checked,
+        const selected = byId("tempFileInput").files?.[0];
+        if (!selected) throw new Error("请选择文件");
+        if (selected.size > TEMP_FILE_MAX_BYTES) throw new Error("临时文件不能超过 20 MB");
+        const buffer = await readFileWithProgress(selected, controller, (ratio) => updateProgress(ratio * 0.2, `读取 ${Math.round(ratio * 100)}%`));
+        if (controller.signal.aborted) return;
+        updateProgress(0.2, "正在编码…");
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (let index = 0; index < bytes.length; index += 0x8000) {
+          if (controller.signal.aborted) return;
+          binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+        }
+        const data = await bridge.uploadApi("/api/temporary/file", {
+          file_name: selected.name,
+          mime_type: selected.type || "application/octet-stream",
+          base64: btoa(binary),
+          password: byId("tempPassword").value,
+          minutes: byId("tempMinutes").value,
+          max_downloads: byId("tempMaxDownloads").value,
+          destroy_after_download: byId("tempDestroy").checked,
+        }, {
+          controller,
+          timeoutMs: 180000,
+          onProgress: (ratio) => updateProgress(0.2 + ratio * 0.8, `上传 ${Math.round(ratio * 100)}%`),
         });
-        const url = shareUrl("file", data.file.id); renderTemporaryResult(byId("temporaryResult"), "下载链接", url, url); setMessage(`已安全保存，${formatBytes(data.file.size_bytes)}，有效至 ${bridge.formatDate(data.file.expires_at)}`);
-      } catch (error) { setMessage(error.message, true); }
+        const url = shareUrl("file", data.file.id);
+        renderTemporaryResult(byId("temporaryResult"), "下载链接", url, url);
+        updateProgress(1, "上传完成");
+        setMessage(`已安全保存，${formatBytes(data.file.size_bytes)}，有效至 ${bridge.formatDate(data.file.expires_at)}`);
+      } catch (error) {
+        if (error.name !== "AbortError" || !controller.silentCancel) {
+          setMessage(error.message, error.name !== "AbortError");
+        }
+      } finally {
+        if (activeUploadController === controller) activeUploadController = null;
+        createButton.disabled = false;
+        cancelButton.classList.add("hidden");
+      }
     });
     bindConfigControls();
   }
@@ -1719,25 +1820,96 @@
     if (kind === "wifi") return `<div class="tool-options tool-wide">
       <label><span>网络名称（SSID）</span><input id="qrWifiName" data-config="wifiName" maxlength="128" /></label>
       <label><span>安全类型</span><select id="qrWifiSecurity" data-config="wifiSecurity"><option value="WPA">WPA/WPA2/WPA3</option><option value="WEP">WEP</option><option value="nopass">无密码</option></select></label>
-      <label><span>Wi-Fi 密码</span><input id="qrWifiPassword" data-config="wifiPassword" type="password" maxlength="128" autocomplete="new-password" /></label>
+      <label id="qrWifiPasswordField"><span>Wi-Fi 密码</span><input id="qrWifiPassword" data-config="wifiPassword" type="password" maxlength="128" autocomplete="new-password" /></label>
       <label class="admin-checkbox"><input id="qrWifiHidden" data-config="wifiHidden" type="checkbox" /> 隐藏网络</label>
     </div>`;
     if (kind === "contact") return `<div class="tool-options tool-wide">
-      <label><span>姓名</span><input id="qrContactName" data-config="contactName" maxlength="100" /></label>
-      <label><span>电话</span><input id="qrContactPhone" data-config="contactPhone" inputmode="tel" maxlength="50" /></label>
+      <label><span>姓</span><input id="qrContactFamily" data-config="contactFamily" maxlength="80" /></label>
+      <label><span>名</span><input id="qrContactGiven" data-config="contactGiven" maxlength="80" /></label>
+      <label><span>显示姓名（可空）</span><input id="qrContactDisplay" data-config="contactDisplay" maxlength="160" /></label>
+      <label><span>手机</span><input id="qrContactPhone" data-config="contactPhone" inputmode="tel" maxlength="50" /></label>
       <label><span>邮箱</span><input id="qrContactEmail" data-config="contactEmail" inputmode="email" maxlength="254" /></label>
       <label><span>组织</span><input id="qrContactOrg" data-config="contactOrg" maxlength="100" /></label>
+      <label><span>职务</span><input id="qrContactTitle" data-config="contactTitle" maxlength="100" /></label>
+      <label><span>街道地址</span><input id="qrContactStreet" data-config="contactStreet" maxlength="180" /></label>
+      <label><span>城市</span><input id="qrContactCity" data-config="contactCity" maxlength="80" /></label>
+      <label><span>省或州</span><input id="qrContactRegion" data-config="contactRegion" maxlength="80" /></label>
+      <label><span>邮政编码</span><input id="qrContactPostal" data-config="contactPostal" maxlength="30" /></label>
+      <label><span>国家或地区</span><input id="qrContactCountry" data-config="contactCountry" maxlength="80" /></label>
       <label class="tool-wide"><span>网址（可空）</span><input id="qrContactUrl" data-config="contactUrl" inputmode="url" maxlength="500" /></label>
+      <label class="tool-wide"><span>备注（可空）</span><textarea id="qrContactNote" data-config="contactNote" maxlength="500"></textarea></label>
     </div>`;
     return '<label class="tool-wide"><span>文本内容</span><textarea id="qrText" data-config="text" maxlength="3000"></textarea></label>';
   }
 
   function escapeWifiValue(value) {
-    return String(value || "").replace(/([\\;,:"])/g, "\\$1");
+    return String(value ?? "").replace(/([\\;,:"])/g, "\\$1");
+  }
+
+  function buildWifiPayload({ name, security = "WPA", password = "", hidden = false } = {}) {
+    const ssid = String(name ?? "");
+    if (!ssid.trim()) throw new Error("请输入 Wi-Fi 网络名称");
+    if (/[\r\n\0]/.test(ssid)) throw new Error("Wi-Fi 网络名称不能包含换行或空字符");
+    if (new TextEncoder().encode(ssid).length > 32) throw new Error("Wi-Fi 网络名称不能超过 32 字节");
+    const type = String(security || "WPA");
+    if (!["WPA", "WEP", "nopass"].includes(type)) throw new Error("Wi-Fi 安全类型无效");
+    let secret = String(password ?? "");
+    if (/[\r\n\0]/.test(secret)) throw new Error("Wi-Fi 密码不能包含换行或空字符");
+    if (type === "nopass") secret = "";
+    if (type === "WPA" && !(/^([0-9a-fA-F]{64})$/.test(secret) || (Array.from(secret).length >= 8 && Array.from(secret).length <= 63))) {
+      throw new Error("WPA 密码需为 8–63 个字符，或 64 位十六进制密钥");
+    }
+    if (type === "WEP") {
+      const bytes = new TextEncoder().encode(secret).length;
+      if (!([5, 13].includes(bytes) || /^(?:[0-9a-fA-F]{10}|[0-9a-fA-F]{26})$/.test(secret))) {
+        throw new Error("WEP 密码需为 5 或 13 字节，或 10 或 26 位十六进制密钥");
+      }
+    }
+    return `WIFI:T:${type};S:${escapeWifiValue(ssid)};P:${escapeWifiValue(secret)};H:${hidden ? "true" : "false"};;`;
   }
 
   function escapeVcardValue(value) {
-    return String(value || "").replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/([;,])/g, "\\$1");
+    return String(value ?? "").replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/([;,])/g, "\\$1");
+  }
+
+  function buildVcardPayload(values = {}) {
+    const family = String(values.family || "").trim();
+    const given = String(values.given || "").trim();
+    const display = String(values.display || "").trim();
+    const phone = String(values.phone || "").trim();
+    const email = String(values.email || "").trim();
+    const organization = String(values.organization || "").trim();
+    const title = String(values.title || "").trim();
+    const street = String(values.street || "").trim();
+    const city = String(values.city || "").trim();
+    const region = String(values.region || "").trim();
+    const postal = String(values.postal || "").trim();
+    const country = String(values.country || "").trim();
+    const website = String(values.website || "").trim();
+    const note = String(values.note || "").trim();
+    if (![family, given, display, phone, email, organization, title, street, city, region, postal, country, website, note].some(Boolean)) throw new Error("请至少填写一项联系人信息");
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("联系人邮箱格式不正确");
+    if (website) {
+      let parsed;
+      try { parsed = new URL(website); } catch (_error) { throw new Error("联系人网址格式不正确"); }
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("联系人网址只支持 http 或 https");
+    }
+    const fullName = display || (family + given) || organization || phone || email;
+    const addressPresent = [street, city, region, postal, country].some(Boolean);
+    return [
+      "BEGIN:VCARD",
+      "VERSION:3.0",
+      `N:${escapeVcardValue(family)};${escapeVcardValue(given)};;;`,
+      `FN:${escapeVcardValue(fullName)}`,
+      phone && `TEL;TYPE=CELL:${escapeVcardValue(phone)}`,
+      email && `EMAIL;TYPE=INTERNET:${escapeVcardValue(email)}`,
+      organization && `ORG:${escapeVcardValue(organization)}`,
+      title && `TITLE:${escapeVcardValue(title)}`,
+      addressPresent && `ADR;TYPE=HOME:;;${escapeVcardValue(street)};${escapeVcardValue(city)};${escapeVcardValue(region)};${escapeVcardValue(postal)};${escapeVcardValue(country)}`,
+      website && `URL:${escapeVcardValue(website)}`,
+      note && `NOTE:${escapeVcardValue(note)}`,
+      "END:VCARD",
+    ].filter(Boolean).join("\r\n");
   }
 
   function temporaryQrContent(kind) {
@@ -1748,25 +1920,30 @@
       if (!["http:", "https:"].includes(url.protocol)) throw new Error("网址只支持 http 或 https");
       return url.href;
     }
-    if (kind === "wifi") {
-      const name = byId("qrWifiName").value.trim(); if (!name) throw new Error("请输入 Wi-Fi 网络名称");
-      const security = byId("qrWifiSecurity").value;
-      const password = byId("qrWifiPassword").value;
-      if (security !== "nopass" && !password) throw new Error("请输入 Wi-Fi 密码，或将安全类型改为无密码");
-      return `WIFI:T:${security};S:${escapeWifiValue(name)};P:${escapeWifiValue(password)};H:${byId("qrWifiHidden").checked ? "true" : "false"};;`;
-    }
-    if (kind === "contact") {
-      const name = byId("qrContactName").value.trim();
-      const phone = byId("qrContactPhone").value.trim();
-      const email = byId("qrContactEmail").value.trim();
-      const organization = byId("qrContactOrg").value.trim();
-      const website = byId("qrContactUrl").value.trim();
-      if (![name, phone, email, organization, website].some(Boolean)) throw new Error("请至少填写一项联系人信息");
-      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("联系人邮箱格式不正确");
-      if (website) { try { new URL(website); } catch (_error) { throw new Error("联系人网址格式不正确"); } }
-      return ["BEGIN:VCARD", "VERSION:3.0", `FN:${escapeVcardValue(name || organization || phone || email)}`, phone && `TEL:${escapeVcardValue(phone)}`, email && `EMAIL:${escapeVcardValue(email)}`, organization && `ORG:${escapeVcardValue(organization)}`, website && `URL:${website}`, "END:VCARD"].filter(Boolean).join("\r\n");
-    }
-    const value = byId("qrText").value.trim(); if (!value) throw new Error("请输入二维码文本");
+    if (kind === "wifi") return buildWifiPayload({
+      name: byId("qrWifiName").value,
+      security: byId("qrWifiSecurity").value,
+      password: byId("qrWifiPassword").value,
+      hidden: byId("qrWifiHidden").checked,
+    });
+    if (kind === "contact") return buildVcardPayload({
+      family: byId("qrContactFamily").value,
+      given: byId("qrContactGiven").value,
+      display: byId("qrContactDisplay").value,
+      phone: byId("qrContactPhone").value,
+      email: byId("qrContactEmail").value,
+      organization: byId("qrContactOrg").value,
+      title: byId("qrContactTitle").value,
+      street: byId("qrContactStreet").value,
+      city: byId("qrContactCity").value,
+      region: byId("qrContactRegion").value,
+      postal: byId("qrContactPostal").value,
+      country: byId("qrContactCountry").value,
+      website: byId("qrContactUrl").value,
+      note: byId("qrContactNote").value,
+    });
+    const value = byId("qrText").value.trim();
+    if (!value) throw new Error("请输入二维码文本");
     return value;
   }
 
@@ -1781,7 +1958,19 @@
       <div class="tool-command-row"><button class="primary" id="createTempBtn" type="button">生成二维码</button></div>
       <div class="temporary-result" id="temporaryResult"></div>${renderConfigControls(tool.id)}
     </div>`;
-    const updateFields = () => { byId("qrStructuredFields").innerHTML = qrStructuredFields(byId("qrKind").value); };
+    const updateFields = () => {
+      byId("qrStructuredFields").innerHTML = qrStructuredFields(byId("qrKind").value);
+      const security = byId("qrWifiSecurity");
+      if (security) {
+        const updatePassword = () => {
+          const open = security.value !== "nopass";
+          byId("qrWifiPassword").disabled = !open;
+          byId("qrWifiPasswordField").classList.toggle("field-disabled", !open);
+        };
+        security.addEventListener("change", updatePassword);
+        updatePassword();
+      }
+    };
     const updateDynamic = () => byId("qrDynamicOptions").classList.toggle("hidden", !byId("qrDynamic").checked);
     byId("qrKind").addEventListener("change", updateFields);
     byId("qrDynamic").addEventListener("change", updateDynamic);
@@ -1802,30 +1991,174 @@
     bindConfigControls();
   }
 
+  function stopRoomPolling() {
+    const poller = activeRoomPoller;
+    if (!poller) return;
+    poller.active = false;
+    if (poller.timer) window.clearTimeout(poller.timer);
+    poller.controller?.abort();
+    activeRoomPoller = null;
+  }
+
+  function startRoomPolling({ id, password = "", onRoom, onStatus }) {
+    stopRoomPolling();
+    const poller = { active: true, timer: null, controller: null, failures: 0 };
+    activeRoomPoller = poller;
+    const schedule = (delay) => {
+      if (!poller.active) return;
+      poller.timer = window.setTimeout(tick, delay);
+    };
+    const tick = async () => {
+      if (!poller.active) return;
+      if (document.visibilityState === "hidden") {
+        schedule(ROOM_POLL_BASE_MS);
+        return;
+      }
+      const controller = new AbortController();
+      poller.controller = controller;
+      try {
+        const data = await bridge.publicApi("/api/share/room/read", { id, password }, { controller, timeoutMs: 12000 });
+        if (!poller.active) return;
+        poller.failures = 0;
+        onRoom(data.room);
+        onStatus?.("\u81ea\u52a8\u540c\u6b65\u4e2d", false);
+      } catch (error) {
+        if (!poller.active || error.name === "AbortError") return;
+        if (["room_not_found", "password_invalid", "share_password_invalid"].includes(error.code)) {
+          onStatus?.(error.message, true);
+          stopRoomPolling();
+          return;
+        }
+        poller.failures += 1;
+        const delay = Math.min(ROOM_POLL_MAX_MS, ROOM_POLL_BASE_MS * (2 ** Math.min(3, poller.failures)));
+        onStatus?.(`\u8fde\u63a5\u4e2d\u65ad\uff0c${Math.ceil(delay / 1000)} \u79d2\u540e\u91cd\u8bd5`, true);
+      } finally {
+        if (poller.controller === controller) poller.controller = null;
+      }
+      if (!poller.active) return;
+      const delay = poller.failures
+        ? Math.min(ROOM_POLL_MAX_MS, ROOM_POLL_BASE_MS * (2 ** Math.min(3, poller.failures)))
+        : ROOM_POLL_BASE_MS;
+      schedule(delay);
+    };
+    onStatus?.("\u81ea\u52a8\u540c\u6b65\u5df2\u5f00\u542f", false);
+    schedule(ROOM_POLL_BASE_MS);
+    return poller;
+  }
+
+  function uniqueRoomMessages(room) {
+    const messages = Array.isArray(room?.messages) ? room.messages : [];
+    const unique = new Map();
+    messages.forEach((message, index) => {
+      const key = String(message.id || `legacy-${message.created_at}-${index}`);
+      if (!unique.has(key)) unique.set(key, { ...message, id: key, _index: index });
+    });
+    return [...unique.values()].sort((left, right) => {
+      const timeOrder = String(left.created_at || "").localeCompare(String(right.created_at || ""));
+      return timeOrder || left._index - right._index;
+    });
+  }
+
   function renderRoomMessages(room) {
-    const target = byId("roomMessages"); if (!target) return; target.innerHTML = "";
-    (room.messages || []).forEach((message) => { const article = document.createElement("article"); const strong = document.createElement("strong"); strong.textContent = message.author; const time = document.createElement("time"); time.textContent = bridge.formatDate(message.created_at); const paragraph = document.createElement("p"); paragraph.textContent = message.message; article.append(strong, time, paragraph); target.appendChild(article); });
+    const target = byId("roomMessages");
+    if (!target) return;
+    const messages = uniqueRoomMessages(room);
+    const signature = messages.map((message) => message.id).join("|");
+    if (target.dataset.signature === signature) return;
+    const followBottom = !target.childElementCount || target.scrollTop + target.clientHeight >= target.scrollHeight - 32;
+    target.dataset.signature = signature;
+    target.innerHTML = "";
+    messages.forEach((message) => {
+      const article = document.createElement("article");
+      article.dataset.messageId = message.id;
+      const strong = document.createElement("strong");
+      strong.textContent = message.author;
+      const time = document.createElement("time");
+      time.textContent = bridge.formatDate(message.created_at);
+      const paragraph = document.createElement("p");
+      paragraph.textContent = message.message;
+      article.append(strong, time, paragraph);
+      target.appendChild(article);
+    });
+    if (!messages.length) {
+      const empty = document.createElement("p");
+      empty.className = "room-empty";
+      empty.textContent = "\u623f\u95f4\u6682\u65e0\u7559\u8a00";
+      target.appendChild(empty);
+    }
+    if (followBottom) target.scrollTop = target.scrollHeight;
   }
 
   function renderTemporaryRoom(tool) {
     byId("toolWorkbenchBody").innerHTML = `<div class="tool-form temporary-tool-form">
-      ${temporaryCommonFields(60)}<label><span>最大消息数</span><input id="roomMaxMessages" data-config="maxMessages" type="number" min="1" max="200" value="50" /></label>
-      <div class="tool-command-row"><button class="primary" id="createTempBtn" type="button">创建私密房间</button></div><div class="temporary-result" id="temporaryResult"></div>
-      <hr /><div class="tool-options"><label><span>房间 ID</span><input id="roomId" /></label><label><span>房间密码</span><input id="roomPassword" type="password" /></label><button id="openRoomBtn" type="button">打开房间</button></div>
-      <div class="room-messages" id="roomMessages"></div><div class="tool-options"><label><span>显示名称</span><input id="roomAuthor" maxlength="30" value="访客" /></label><label class="tool-wide"><span>留言</span><textarea id="roomMessage" maxlength="4000"></textarea></label><button id="postRoomBtn" type="button">发送留言</button><button id="clearRoomBtn" type="button">清空我的房间</button></div>
+      ${temporaryCommonFields(60)}<label><span>\u6700\u5927\u6d88\u606f\u6570</span><input id="roomMaxMessages" data-config="maxMessages" type="number" min="1" max="200" value="50" /></label>
+      <div class="tool-command-row"><button class="primary" id="createTempBtn" type="button">\u521b\u5efa\u79c1\u5bc6\u623f\u95f4</button></div><div class="temporary-result" id="temporaryResult"></div>
+      <hr /><div class="tool-options"><label><span>\u623f\u95f4 ID</span><input id="roomId" autocomplete="off" /></label><label><span>\u623f\u95f4\u5bc6\u7801</span><input id="roomPassword" type="password" autocomplete="off" /></label><button id="openRoomBtn" type="button">\u6253\u5f00\u5e76\u81ea\u52a8\u540c\u6b65</button></div>
+      <p class="room-sync-status" id="roomSyncStatus" aria-live="polite">\u5c1a\u672a\u6253\u5f00\u623f\u95f4</p>
+      <div class="room-messages" id="roomMessages"></div><div class="tool-options"><label><span>\u663e\u793a\u540d\u79f0</span><input id="roomAuthor" maxlength="30" value="\u8bbf\u5ba2" /></label><label class="tool-wide"><span>\u7559\u8a00</span><textarea id="roomMessage" maxlength="4000"></textarea></label><button id="postRoomBtn" type="button">\u53d1\u9001\u7559\u8a00</button><button id="clearRoomBtn" type="button">\u6e05\u7a7a\u6211\u7684\u623f\u95f4</button></div>
       ${renderConfigControls(tool.id)}
     </div>`;
+    const status = (message, error = false) => {
+      const target = byId("roomSyncStatus");
+      if (!target) return;
+      target.textContent = message;
+      target.classList.toggle("error", error);
+    };
+    const roomCredentials = () => ({ id: byId("roomId").value.trim(), password: byId("roomPassword").value });
+    const readRoom = async () => {
+      const credentials = roomCredentials();
+      if (!credentials.id) throw new Error("\u8bf7\u8f93\u5165\u623f\u95f4 ID");
+      return bridge.publicApi("/api/share/room/read", credentials, { timeoutMs: 12000 });
+    };
+    const openRoom = async () => {
+      stopRoomPolling();
+      status("\u6b63\u5728\u6253\u5f00\u623f\u95f4\u2026");
+      const data = await readRoom();
+      renderRoomMessages(data.room);
+      const credentials = roomCredentials();
+      startRoomPolling({ id: credentials.id, password: credentials.password, onRoom: renderRoomMessages, onStatus: status });
+      setMessage("\u623f\u95f4\u5df2\u6253\u5f00\uff0c\u7559\u8a00\u4f1a\u81ea\u52a8\u540c\u6b65");
+      return data;
+    };
     byId("createTempBtn").addEventListener("click", async () => {
       try {
         const data = await bridge.api("/api/temporary/room", { password: byId("tempPassword").value, minutes: byId("tempMinutes").value, max_messages: byId("roomMaxMessages").value });
-        byId("roomId").value = data.room.id; byId("roomPassword").value = byId("tempPassword").value;
-        const url = shareUrl("room", data.room.id); renderTemporaryResult(byId("temporaryResult"), "房间链接", url, url); setMessage(`有效至 ${bridge.formatDate(data.room.expires_at)}`);
+        byId("roomId").value = data.room.id;
+        byId("roomPassword").value = byId("tempPassword").value;
+        const url = shareUrl("room", data.room.id);
+        renderTemporaryResult(byId("temporaryResult"), "\u623f\u95f4\u94fe\u63a5", url, url);
+        await openRoom();
+        setMessage(`\u623f\u95f4\u5df2\u521b\u5efa\uff0c\u6709\u6548\u81f3 ${bridge.formatDate(data.room.expires_at)}`);
+      } catch (error) { status(error.message, true); setMessage(error.message, true); }
+    });
+    byId("openRoomBtn").addEventListener("click", () => openRoom().catch((error) => { status(error.message, true); setMessage(error.message, true); }));
+    byId("postRoomBtn").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const messageField = byId("roomMessage");
+      const message = messageField.value.trim();
+      if (!message) { setMessage("\u8bf7\u8f93\u5165\u7559\u8a00", true); messageField.focus(); return; }
+      button.disabled = true;
+      try {
+        const credentials = roomCredentials();
+        if (!credentials.id) throw new Error("\u8bf7\u5148\u6253\u5f00\u623f\u95f4");
+        const data = await bridge.publicApi("/api/share/room/post", { ...credentials, author: byId("roomAuthor").value, message });
+        messageField.value = "";
+        renderRoomMessages(data.room);
+        status("\u81ea\u52a8\u540c\u6b65\u4e2d");
+        setMessage("\u7559\u8a00\u5df2\u53d1\u9001");
+      } catch (error) { status(error.message, true); setMessage(`\u53d1\u9001\u5931\u8d25\uff1a${error.message}\uff0c\u8349\u7a3f\u5df2\u4fdd\u7559`, true); }
+      finally { button.disabled = false; }
+    });
+    byId("clearRoomBtn").addEventListener("click", async () => {
+      try {
+        const id = roomCredentials().id;
+        if (!id) throw new Error("\u8bf7\u5148\u6253\u5f00\u623f\u95f4");
+        await bridge.api("/api/temporary/room/clear", { id });
+        const data = await readRoom();
+        renderRoomMessages(data.room);
+        setMessage("\u623f\u95f4\u5df2\u6e05\u7a7a");
       } catch (error) { setMessage(error.message, true); }
     });
-    const refreshRoom = async () => { const data = await bridge.publicApi("/api/share/room/read", { id: byId("roomId").value, password: byId("roomPassword").value }); renderRoomMessages(data.room); return data; };
-    byId("openRoomBtn").addEventListener("click", () => refreshRoom().then(() => setMessage("房间已打开")).catch((error) => setMessage(error.message, true)));
-    byId("postRoomBtn").addEventListener("click", async () => { try { const data = await bridge.publicApi("/api/share/room/post", { id: byId("roomId").value, password: byId("roomPassword").value, author: byId("roomAuthor").value, message: byId("roomMessage").value }); byId("roomMessage").value = ""; renderRoomMessages(data.room); setMessage("留言已发送"); } catch (error) { setMessage(error.message, true); } });
-    byId("clearRoomBtn").addEventListener("click", async () => { try { await bridge.api("/api/temporary/room/clear", { id: byId("roomId").value }); await refreshRoom(); setMessage("房间已清空"); } catch (error) { setMessage(error.message, true); } });
     bindConfigControls();
   }
 
@@ -1841,33 +2174,96 @@
     const binary = atob(value); return Uint8Array.from(binary, (char) => char.charCodeAt(0));
   }
 
+  function renderShareRoomMessages(room) {
+    const output = byId("shareViewerOutput");
+    const messages = uniqueRoomMessages(room);
+    const signature = messages.map((message) => message.id).join("|");
+    if (output.dataset.signature === signature) return;
+    output.dataset.signature = signature;
+    output.textContent = messages.map((item) => `${item.author} \u00b7 ${bridge.formatDate(item.created_at)}\n${item.message}`).join("\n\n") || "\u623f\u95f4\u6682\u65e0\u7559\u8a00";
+    output.classList.remove("hidden");
+  }
+
   function showShareViewer(path) {
+    stopRoomPolling();
+    cancelActiveUpload(false);
     const match = path.match(/^\/share\/(text|file|clipboard|qr|room)\/([^/?#]+)/);
     if (!match) return false;
-    const [, type, rawId] = match; const id = decodeURIComponent(rawId);
-    const titleMap = { text: "临时文本", file: "临时文件", clipboard: "临时剪贴板", qr: "临时二维码", room: "临时留言房间" };
-    byId("shareViewerTitle").textContent = titleMap[type]; byId("shareViewerMeta").textContent = "内容可能在读取后立即销毁，请确认后再打开。";
-    byId("shareViewerOutput").classList.add("hidden"); byId("shareViewerOutput").textContent = ""; byId("shareViewerMessage").textContent = "";
+    const [, type, rawId] = match;
+    const id = decodeURIComponent(rawId);
+    const titleMap = { text: "\u4e34\u65f6\u6587\u672c", file: "\u4e34\u65f6\u6587\u4ef6", clipboard: "\u4e34\u65f6\u526a\u8d34\u677f", qr: "\u4e34\u65f6\u4e8c\u7ef4\u7801", room: "\u4e34\u65f6\u7559\u8a00\u623f\u95f4" };
+    byId("shareViewerTitle").textContent = titleMap[type];
+    byId("shareViewerMeta").textContent = type === "room" ? "\u6253\u5f00\u540e\u4f1a\u81ea\u52a8\u540c\u6b65\u65b0\u7559\u8a00\u3002" : "\u5185\u5bb9\u53ef\u80fd\u5728\u8bfb\u53d6\u540e\u7acb\u5373\u9500\u6bc1\uff0c\u8bf7\u786e\u8ba4\u540e\u518d\u6253\u5f00\u3002";
+    const output = byId("shareViewerOutput");
+    output.classList.add("hidden");
+    output.textContent = "";
+    output.dataset.signature = "";
+    byId("shareViewerMessage").textContent = "";
     byId("sharePasswordField").classList.toggle("hidden", type === "clipboard");
-    byId("shareViewerExtra").innerHTML = type === "room" ? '<label class="field-label"><span>显示名称</span><input id="shareRoomAuthor" maxlength="30" value="访客" /></label><label class="field-label"><span>留言</span><textarea id="shareRoomMessage" maxlength="4000"></textarea></label>' : "";
-    byId("shareViewer").classList.remove("hidden"); byId("shareViewer").setAttribute("aria-hidden", "false");
+    byId("shareViewerExtra").innerHTML = type === "room" ? '<label class="field-label"><span>\u663e\u793a\u540d\u79f0</span><input id="shareRoomAuthor" maxlength="30" value="\u8bbf\u5ba2" /></label><label class="field-label"><span>\u7559\u8a00</span><textarea id="shareRoomMessage" maxlength="4000"></textarea></label><div class="action-row compact"><button id="shareRoomSendBtn" type="button">\u53d1\u9001\u7559\u8a00</button><span class="room-sync-status" id="shareRoomSyncStatus" aria-live="polite">\u5c1a\u672a\u6253\u5f00\u623f\u95f4</span></div>' : "";
+    byId("shareViewer").classList.remove("hidden");
+    byId("shareViewer").setAttribute("aria-hidden", "false");
+    byId("openShareBtn").textContent = type === "room" ? "\u6253\u5f00\u5e76\u81ea\u52a8\u540c\u6b65" : "\u6253\u5f00";
+    const roomStatus = (message, error = false) => {
+      const target = byId("shareRoomSyncStatus");
+      if (!target) return;
+      target.textContent = message;
+      target.classList.toggle("error", error);
+    };
     byId("openShareBtn").onclick = async () => {
-      const message = byId("shareViewerMessage"); message.textContent = "正在打开…";
+      const message = byId("shareViewerMessage");
+      message.textContent = "\u6b63\u5728\u6253\u5f00\u2026";
       try {
         if (type === "clipboard") {
-          const data = await bridge.publicApi("/api/share/clipboard/read", { code: id }); byId("shareViewerOutput").textContent = data.clipboard.content;
+          const data = await bridge.publicApi("/api/share/clipboard/read", { code: id });
+          output.textContent = data.clipboard.content;
         } else if (type === "file") {
-          const data = await bridge.publicApi("/api/share/file/read", { id, password: byId("sharePasswordInput").value }); const bytes = bytesFromBase64(data.file.base64); downloadBlob(data.file.file_name, new Blob([bytes], { type: data.file.mime_type })); byId("shareViewerOutput").textContent = `文件 ${data.file.file_name} 已开始下载`;
+          const data = await bridge.publicApi("/api/share/file/read", { id, password: byId("sharePasswordInput").value }, { timeoutMs: 180000 });
+          const bytes = bytesFromBase64(data.file.base64);
+          downloadBlob(data.file.file_name, new Blob([bytes], { type: data.file.mime_type }));
+          output.textContent = `\u6587\u4ef6 ${data.file.file_name} \u5df2\u5f00\u59cb\u4e0b\u8f7d`;
         } else if (type === "room") {
-          if (byId("shareRoomMessage")?.value.trim()) await bridge.publicApi("/api/share/room/post", { id, password: byId("sharePasswordInput").value, author: byId("shareRoomAuthor").value, message: byId("shareRoomMessage").value });
-          const data = await bridge.publicApi("/api/share/room/read", { id, password: byId("sharePasswordInput").value }); byId("shareViewerOutput").textContent = data.room.messages.map((item) => `${item.author} · ${bridge.formatDate(item.created_at)}\n${item.message}`).join("\n\n") || "房间暂无留言";
+          const password = byId("sharePasswordInput").value;
+          const data = await bridge.publicApi("/api/share/room/read", { id, password }, { timeoutMs: 12000 });
+          renderShareRoomMessages(data.room);
+          startRoomPolling({ id, password, onRoom: renderShareRoomMessages, onStatus: roomStatus });
+          message.textContent = "\u623f\u95f4\u5df2\u6253\u5f00\uff0c\u6b63\u5728\u81ea\u52a8\u540c\u6b65";
+          return;
         } else {
-          const data = await bridge.publicApi("/api/share/text/read", { id, password: byId("sharePasswordInput").value }); byId("shareViewerOutput").textContent = data.share.content;
-          if (type === "qr") { const qr = document.createElement("div"); qr.className = "temporary-qr-output"; byId("shareViewerExtra").innerHTML = ""; byId("shareViewerExtra").appendChild(qr); showQrCode(qr, data.share.content); }
+          const data = await bridge.publicApi("/api/share/text/read", { id, password: byId("sharePasswordInput").value });
+          output.textContent = data.share.content;
+          if (type === "qr") {
+            const qr = document.createElement("div");
+            qr.className = "temporary-qr-output";
+            byId("shareViewerExtra").innerHTML = "";
+            byId("shareViewerExtra").appendChild(qr);
+            showQrCode(qr, data.share.content);
+          }
         }
-        byId("shareViewerOutput").classList.remove("hidden"); message.textContent = "打开成功";
-      } catch (error) { message.textContent = error.message; }
+        output.classList.remove("hidden");
+        message.textContent = "\u6253\u5f00\u6210\u529f";
+      } catch (error) {
+        roomStatus(error.message, true);
+        message.textContent = error.message;
+      }
     };
+    if (type === "room") {
+      byId("shareRoomSendBtn").onclick = async (event) => {
+        const button = event.currentTarget;
+        const field = byId("shareRoomMessage");
+        const message = field.value.trim();
+        if (!message) { byId("shareViewerMessage").textContent = "\u8bf7\u8f93\u5165\u7559\u8a00"; field.focus(); return; }
+        button.disabled = true;
+        try {
+          const data = await bridge.publicApi("/api/share/room/post", { id, password: byId("sharePasswordInput").value, author: byId("shareRoomAuthor").value, message });
+          field.value = "";
+          renderShareRoomMessages(data.room);
+          byId("shareViewerMessage").textContent = "\u7559\u8a00\u5df2\u53d1\u9001";
+        } catch (error) {
+          byId("shareViewerMessage").textContent = `\u53d1\u9001\u5931\u8d25\uff1a${error.message}\uff0c\u8349\u7a3f\u5df2\u4fdd\u7559`;
+        } finally { button.disabled = false; }
+      };
+    }
     return true;
   }
 

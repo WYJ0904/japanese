@@ -380,6 +380,7 @@ class AccountStore:
             self._seed_membership_plans(connection, now)
             self._migrate_legacy_memberships(connection, now)
             self._migrate_legacy_recharge_requests(connection, now)
+            self._sync_all_legacy_membership_snapshots(connection, now)
             self._hash_plaintext_secrets(connection)
             self._hash_plaintext_session_tokens(connection)
             self._validate_membership_migration(connection)
@@ -577,6 +578,14 @@ class AccountStore:
                 )
 
     @staticmethod
+    def _sync_all_legacy_membership_snapshots(connection, now):
+        rows = connection.execute(
+            "SELECT id FROM users WHERE deleted = 0 AND role != 'super_admin'"
+        ).fetchall()
+        for row in rows:
+            AccountStore._sync_legacy_membership_snapshot_in_connection(connection, row["id"], now)
+
+    @staticmethod
     def _validate_membership_migration(connection):
         missing = connection.execute(
             """
@@ -584,7 +593,7 @@ class AccountStore:
             WHERE u.deleted = 0 AND u.role != 'super_admin' AND u.membership != 'free'
               AND NOT EXISTS (
                   SELECT 1 FROM user_memberships m
-                  WHERE m.user_id = u.id AND m.source_ref = 'users.membership'
+                  WHERE m.user_id = u.id AND m.status = 'active'
               )
             """
         ).fetchone()[0]
@@ -1744,6 +1753,12 @@ class AccountStore:
             raise AccountError("账户不可用", 403, "account_unavailable")
         plan_code = str(plan or "").strip()
         if plan_code not in PURCHASABLE_PLAN_CODES:
+            if plan_code in MEMBERSHIP_PLANS:
+                raise AccountError(
+                    "该会员方案已停止销售，请刷新页面后选择当前可购买方案",
+                    400,
+                    "plan_retired",
+                )
             raise AccountError("充值套餐无效", 400, "plan_invalid")
         plan_data = MEMBERSHIP_PLANS[plan_code]
         try:

@@ -15,7 +15,7 @@ from account_store import AccountError, hash_secret, iso_now, parse_time, utc_no
 
 
 MAX_TEMP_TEXT_BYTES = 100 * 1024
-MAX_TEMP_FILE_BYTES = 350 * 1024
+MAX_TEMP_FILE_BYTES = 20 * 1024 * 1024
 MAX_ROOM_MESSAGE_BYTES = 4 * 1024
 MAX_TEMP_LIFETIME_MINUTES = 7 * 24 * 60
 ALLOWED_FILE_TYPES = {
@@ -210,7 +210,7 @@ class TemporaryStore:
         if extension not in ALLOWED_FILE_TYPES or mime not in ALLOWED_FILE_TYPES[extension]:
             raise AccountError("不支持该文件类型或类型与扩展名不匹配", 400, "file_type_invalid")
         if len(content) > MAX_TEMP_FILE_BYTES:
-            raise AccountError(f"临时文件不能超过 {MAX_TEMP_FILE_BYTES // 1024} KB", 413, "file_too_large")
+            raise AccountError(f"临时文件不能超过 {MAX_TEMP_FILE_BYTES // (1024 * 1024)} MB", 413, "file_too_large")
         if not content:
             raise AccountError("文件不能为空", 400, "file_empty")
         if not TemporaryStore._content_matches_extension(extension, content):
@@ -355,7 +355,7 @@ class TemporaryStore:
             messages = [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT id, author, message, created_at FROM temporary_room_messages WHERE room_id = ? ORDER BY created_at",
+                    "SELECT id, author, message, created_at FROM temporary_room_messages WHERE room_id = ? ORDER BY created_at, rowid",
                     (room["id"],),
                 ).fetchall()
             ]
@@ -381,7 +381,7 @@ class TemporaryStore:
                 """
                 DELETE FROM temporary_room_messages WHERE id IN (
                     SELECT id FROM temporary_room_messages WHERE room_id = ?
-                    ORDER BY created_at DESC LIMIT -1 OFFSET ?
+                    ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
                 )
                 """,
                 (room["id"], room["max_messages"]),

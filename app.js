@@ -1,10 +1,11 @@
-const APP_VERSION = "2026-07-28-network-stability";
+const APP_VERSION = "2026-08-02-network-resilience";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
-const API_TIMEOUT_MS = 100000;
+const API_TIMEOUT_MS = 30000;
+const AI_TIMEOUT_MS = 120000;
 const STATUS_TIMEOUT_MS = 8000;
-const STATUS_RETRY_DELAYS_MS = [0, 800, 2000];
+const STATUS_RETRY_BASE_DELAYS_MS = [0, 650, 1800];
 const API_GET_TIMEOUT_MS = 10000;
 const GET_RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 530]);
 const PDF_TIMEOUT_MS = 120000;
@@ -110,6 +111,7 @@ let paymentQrObjectUrl = "";
 let paymentQrController = null;
 let membershipPlansPromise = null;
 let membershipModalLoadSequence = 0;
+let membershipModalController = null;
 let vocabularySearchTimer = null;
 let vocabularySearchController = null;
 let vocabularySearchSequence = 0;
@@ -122,6 +124,7 @@ let lastLimitPromptKey = "";
 let projectRuntimeNeedsRestore = false;
 let backendStatusPromise = null;
 let backendRefreshPromise = null;
+let backendRecoveryTimer = null;
 let storageWriteFailed = false;
 let achievementFilter = "all";
 let achievementToastTimer = null;
@@ -592,7 +595,7 @@ function membershipLabel(value) {
     lifetime: "历史双语言永久会员",
     legacy_all_monthly: "历史双语言包月会员",
     legacy_all_lifetime: "历史双语言永久会员",
-    japanese_lifetime: "日语永久会员",
+    japanese_lifetime: "日语单项永久会员",
     tools_monthly: "工具箱包月会员",
     dual_language_monthly: "双语言包月",
     dual_language_lifetime: "历史双语言双项永久会员",
@@ -724,9 +727,9 @@ function renderAccountDetails() {
 async function requestJsonGet(path, options = {}) {
   const authenticated = options.authenticated === true;
   let lastError = new Error(BACKEND_NETWORK_MESSAGE);
-  for (let attempt = 0; attempt < STATUS_RETRY_DELAYS_MS.length; attempt += 1) {
-    const delay = STATUS_RETRY_DELAYS_MS[attempt];
-    if (delay) await waitForDelay(delay);
+  for (let attempt = 0; attempt < STATUS_RETRY_BASE_DELAYS_MS.length; attempt += 1) {
+    const delay = retryDelayWithJitter(STATUS_RETRY_BASE_DELAYS_MS[attempt]);
+    if (delay) await waitForDelay(delay, options.controller?.signal);
     let response;
     try {
       response = await fetchWithTimeout(path, {
@@ -734,12 +737,14 @@ async function requestJsonGet(path, options = {}) {
         cache: "no-store",
         credentials: "same-origin",
         headers: authenticated ? { "X-Session-Token": state.session } : {},
+        controller: options.controller,
       }, options.timeoutMs || API_GET_TIMEOUT_MS);
     } catch (networkError) {
+      if (networkError?.name === "AbortError") throw networkError;
       backendAvailable = false;
       backendFailureMessage = backendErrorMessage(networkError);
       lastError = new Error(backendFailureMessage);
-      if (attempt < STATUS_RETRY_DELAYS_MS.length - 1) continue;
+      if (attempt < STATUS_RETRY_BASE_DELAYS_MS.length - 1) continue;
       throw lastError;
     }
 
@@ -755,15 +760,16 @@ async function requestJsonGet(path, options = {}) {
       error.code = "session_expired";
       throw error;
     }
-    if (GET_RETRYABLE_STATUS.has(response.status) && attempt < STATUS_RETRY_DELAYS_MS.length - 1) {
+    if (GET_RETRYABLE_STATUS.has(response.status) && attempt < STATUS_RETRY_BASE_DELAYS_MS.length - 1) {
       lastError = new Error("服务器正在恢复，请稍候…");
+      lastError.status = response.status;
       continue;
     }
     const configuredWrong = String(data.error || "").includes("LOCAL_API_BASE");
     const message = configuredWrong
       ? BACKEND_CONFIG_MESSAGE
       : GET_RETRYABLE_STATUS.has(response.status)
-        ? "服务器暂时不可用，请稍后重新加载。"
+        ? backendErrorMessage({ status: response.status })
         : data.error || `请求失败（HTTP ${response.status}）`;
     const error = new Error(message);
     error.code = data.code || "request_failed";
@@ -793,13 +799,18 @@ function openModal(id) {
 function closeModal(id, immediate = false) {
   const modal = $(id);
   if (!modal || modal.classList.contains("hidden")) return;
+  if (id === "membershipModal") {
+    membershipModalLoadSequence += 1;
+    membershipModalController?.abort();
+    membershipModalController = null;
+    releasePaymentQr();
+  }
   const finish = () => {
     modal.classList.add("hidden");
     modal.classList.remove("is-closing");
     modal.setAttribute("aria-hidden", "true");
     if (id === "accountModal") clearOwnSecretEditor();
     if (id === "adminEditModal") clearAdminSecretEditor();
-    if (id === "membershipModal") releasePaymentQr();
     if (!document.querySelector(".modal-layer:not(.hidden)")) {
       document.body.classList.remove("modal-open");
       if ($("appShell")) $("appShell").inert = false;
@@ -934,9 +945,47 @@ function releasePaymentQr() {
   if ($("paymentQrMessage")) $("paymentQrMessage").textContent = "";
 }
 
-async function loadPaymentQr(record) {
+function waitForImageReady(image, signal, timeoutMs = 4000) {
+  if (image.complete && image.naturalWidth > 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      image.removeEventListener("load", handleLoad);
+      image.removeEventListener("error", handleError);
+      signal?.removeEventListener("abort", handleAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const handleLoad = () => finish();
+    const handleError = () => finish(new Error("二维码图片无法解码"));
+    const handleAbort = () => {
+      const error = new Error("请求已取消");
+      error.name = "AbortError";
+      finish(error);
+    };
+    const timer = window.setTimeout(() => finish(new Error("二维码图片加载超时")), timeoutMs);
+    image.addEventListener("load", handleLoad, { once: true });
+    image.addEventListener("error", handleError, { once: true });
+    signal?.addEventListener("abort", handleAbort, { once: true });
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+    if (typeof image.decode === "function") {
+      image.decode().then(handleLoad).catch(() => {
+        if (image.complete && image.naturalWidth > 0) handleLoad();
+      });
+    }
+  });
+}
+
+async function loadPaymentQr(record, modalSequence = membershipModalLoadSequence) {
   releasePaymentQr();
   if (!record?.id || !["pending_payment", "user_paid", "processing"].includes(record.status)) return;
+  if ($("membershipModal")?.classList.contains("hidden")) return;
   const wrap = $("paymentQrWrap");
   const image = $("paymentQrImage");
   const message = $("paymentQrMessage");
@@ -970,14 +1019,15 @@ async function loadPaymentQr(record) {
     if (!contentType.startsWith("image/png")) throw new Error("二维码资源格式无效");
     const blob = await response.blob();
     if (!blob.size || blob.size > 3 * 1024 * 1024) throw new Error("二维码资源大小无效");
-    if (currentPaymentOrder?.id !== record.id || controller.signal.aborted) return;
+    if (currentPaymentOrder?.id !== record.id || controller.signal.aborted || modalSequence !== membershipModalLoadSequence) return;
     paymentQrObjectUrl = URL.createObjectURL(blob);
     image.src = paymentQrObjectUrl;
-    await image.decode();
+    await waitForImageReady(image, controller.signal);
+    if (currentPaymentOrder?.id !== record.id || controller.signal.aborted || modalSequence !== membershipModalLoadSequence) return;
     image.classList.remove("hidden");
     message.textContent = "请核对金额、套餐和支付方式后扫码。";
   } catch (error) {
-    if (error.name !== "AbortError") {
+    if (error.name !== "AbortError" && modalSequence === membershipModalLoadSequence) {
       message.textContent = error.message;
     }
   } finally {
@@ -1003,7 +1053,7 @@ function showMembershipPlanRecovery(message) {
   $("membershipPlanRecovery").classList.remove("hidden");
 }
 
-async function loadMembershipPlans(force = false) {
+async function loadMembershipPlans(force = false, options = {}) {
   if (membershipPlans.length && !force) {
     renderMembershipPlans();
     return membershipPlans;
@@ -1015,7 +1065,10 @@ async function loadMembershipPlans(force = false) {
   $("membershipPlanRecovery")?.classList.add("hidden");
 
   membershipPlansPromise = (async () => {
-    const data = await requestJsonGet("/api/membership/plans", { timeoutMs: STATUS_TIMEOUT_MS });
+    const data = await requestJsonGet("/api/membership/plans", {
+      timeoutMs: STATUS_TIMEOUT_MS,
+      controller: options.controller,
+    });
     if (!Array.isArray(data.plans) || !data.plans.length) throw new Error("服务器没有返回可购买的会员方案");
     paymentMethods = Array.isArray(data.payment_methods) ? data.payment_methods.filter((item) => ["wechat", "alipay"].includes(item.code)) : [];
     const order = ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "japanese_lifetime", "all_access_lifetime"];
@@ -1027,7 +1080,9 @@ async function loadMembershipPlans(force = false) {
     renderMembershipPlans();
     return membershipPlans;
   })().catch((error) => {
-    showMembershipPlanRecovery(`${error.message} 请点击下方按钮重试。`);
+    if (error?.name !== "AbortError") {
+      showMembershipPlanRecovery(`${error.message} 请点击下方按钮重试。`);
+    }
     throw error;
   }).finally(() => {
     list?.setAttribute("aria-busy", "false");
@@ -1056,6 +1111,9 @@ async function openMembershipModal(options = {}) {
     showAuth("请先登录后查看会员方案", { path: "/login" });
     return;
   }
+  membershipModalController?.abort();
+  const controller = new AbortController();
+  membershipModalController = controller;
   const sequence = ++membershipModalLoadSequence;
   releasePaymentQr();
   currentPaymentOrder = null;
@@ -1063,18 +1121,20 @@ async function openMembershipModal(options = {}) {
   $("rechargeMessage").textContent = "正在加载套餐与订单状态…";
   openModal("membershipModal");
   let openOrder = null;
-  let loadError = "";
-  try {
-    await loadMembershipPlans(options.forcePlans === true);
-    if (sequence !== membershipModalLoadSequence) return membershipPlans;
-    const orders = await apiGet("/api/recharge/mine");
-    if (sequence !== membershipModalLoadSequence) return membershipPlans;
-    openOrder = (orders.requests || []).find((item) => ["pending_payment", "user_paid", "processing"].includes(item.status)) || null;
-  } catch (error) {
-    if (sequence !== membershipModalLoadSequence) return membershipPlans;
-    loadError = error.message;
-  }
+  const loadErrors = [];
+  const [plansResult, ordersResult] = await Promise.allSettled([
+    loadMembershipPlans(options.forcePlans === true, { controller }),
+    apiGet("/api/recharge/mine", { controller }),
+  ]);
   if (sequence !== membershipModalLoadSequence) return membershipPlans;
+  if (plansResult.status === "rejected" && plansResult.reason?.name !== "AbortError") {
+    loadErrors.push(plansResult.reason?.message || "会员方案加载失败");
+  }
+  if (ordersResult.status === "fulfilled") {
+    openOrder = (ordersResult.value.requests || []).find((item) => ["pending_payment", "user_paid", "processing"].includes(item.status)) || null;
+  } else if (ordersResult.reason?.name !== "AbortError") {
+    loadErrors.push(ordersResult.reason?.message || "订单状态加载失败");
+  }
   if (!state.session || !state.account) {
     closeModal("membershipModal", true);
     return;
@@ -1090,8 +1150,8 @@ async function openMembershipModal(options = {}) {
       user_paid: "已通知管理员，正在等待人工核对付款。",
       processing: "管理员正在核对付款，请稍候。",
     }[openOrder.status] || "订单处理中。";
-  } else if (loadError) {
-    $("rechargeMessage").textContent = loadError;
+  } else if (loadErrors.length) {
+    $("rechargeMessage").textContent = `${[...new Set(loadErrors)].join("；")} 已加载的内容仍可使用。`;
   } else {
     $("rechargeMessage").textContent = "请选择会员方案。";
   }
@@ -1164,7 +1224,7 @@ function renderPaymentOrder(record) {
     processing: "管理员核对中",
   }[record.status] || "确认订单并显示二维码";
   $("submitRechargeBtn").disabled = ["pending_payment", "user_paid", "processing"].includes(record.status);
-  loadPaymentQr(record);
+  loadPaymentQr(record, membershipModalLoadSequence);
 }
 
 async function submitRechargeRequest() {
@@ -2788,9 +2848,13 @@ function confirmClearStudyRecords() {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = API_TIMEOUT_MS) {
-  const { controller: suppliedController, ...requestOptions } = options;
-  const controller = suppliedController || new AbortController();
+  const { controller: suppliedController, signal: suppliedSignal, ...requestOptions } = options;
+  const externalSignal = suppliedController?.signal || suppliedSignal || null;
+  const controller = new AbortController();
   let timedOut = false;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
   const timeout = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -2801,23 +2865,58 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = API_TIMEOUT_MS) {
   } catch (error) {
     if (error.name === "AbortError") {
       const wrapped = new Error(timedOut ? "请求超时，请稍后重试" : "请求已取消");
-      wrapped.name = "AbortError";
+      wrapped.name = timedOut ? "TimeoutError" : "AbortError";
+      wrapped.code = timedOut ? "request_timeout" : "request_aborted";
       throw wrapped;
     }
     throw error;
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
 
-function waitForDelay(milliseconds) {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+function retryDelayWithJitter(baseMilliseconds) {
+  if (!baseMilliseconds) return 0;
+  const jitter = Math.floor(Math.random() * Math.max(80, baseMilliseconds * 0.35));
+  return baseMilliseconds + jitter;
+}
+
+function waitForDelay(milliseconds, signal = null) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      const error = new Error("请求已取消");
+      error.name = "AbortError";
+      reject(error);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, milliseconds);
+    const abort = () => {
+      window.clearTimeout(timer);
+      const error = new Error("请求已取消");
+      error.name = "AbortError";
+      reject(error);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function backendErrorMessage(error) {
   const detail = String(error?.message || "");
   if (detail.includes("LOCAL_API_BASE")) return BACKEND_CONFIG_MESSAGE;
   if (navigator.onLine === false) return "设备当前没有网络连接，请联网后重试。";
+  if (error?.code === "request_timeout" || error?.name === "TimeoutError" || detail.includes("超时")) {
+    return "服务器响应超时，可保留当前页面稍后重试。";
+  }
+  if (Number(error?.status) === 530) {
+    return "公网通道暂时未连上本机服务，请确认已运行“启动WYJ网站”后重试。";
+  }
+  if ([502, 503, 504].includes(Number(error?.status))) {
+    return "服务通道正在恢复，请稍候几秒后重试。";
+  }
   return BACKEND_NETWORK_MESSAGE;
 }
 
@@ -2838,13 +2937,16 @@ function markBackendReachable(data = {}) {
 
 async function requestBackendStatus() {
   let lastError = new Error(BACKEND_NETWORK_MESSAGE);
-  for (const delay of STATUS_RETRY_DELAYS_MS) {
+  for (const baseDelay of STATUS_RETRY_BASE_DELAYS_MS) {
+    const delay = retryDelayWithJitter(baseDelay);
     if (delay) await waitForDelay(delay);
     try {
       const response = await fetchWithTimeout("/api/status", { cache: "no-store" }, STATUS_TIMEOUT_MS);
       const data = await response.json().catch(() => ({}));
       if (response.ok && data.ok) return data;
       const error = new Error(data.error || `服务器返回 ${response.status}`);
+      error.status = response.status;
+      error.code = data.code || "status_unavailable";
       if (error.message.includes("LOCAL_API_BASE")) throw error;
       lastError = error;
     } catch (error) {
@@ -2916,6 +3018,77 @@ async function api(path, body = {}, options = {}) {
     throw error;
   }
   return data;
+}
+
+
+function uploadApi(path, body = {}, options = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const controller = options.controller || new AbortController();
+    const abortRequest = () => xhr.abort();
+    let completed = false;
+    const finish = (callback) => {
+      if (completed) return;
+      completed = true;
+      controller.signal.removeEventListener("abort", abortRequest);
+      callback();
+    };
+    xhr.open("POST", path, true);
+    xhr.timeout = options.timeoutMs || 180000;
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.setRequestHeader("X-Session-Token", state.session);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && typeof options.onProgress === "function") {
+        options.onProgress(Math.max(0, Math.min(1, event.loaded / event.total)), event.loaded, event.total);
+      }
+    };
+    xhr.onload = () => finish(() => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch (_error) { data = {}; }
+      if (xhr.status < 500) markBackendReachable(data);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        if (typeof options.onProgress === "function") options.onProgress(1, 1, 1);
+        resolve(data);
+        return;
+      }
+      if (xhr.status === 401) {
+        clearSession();
+        showAuth("登录已失效，请重新登录");
+      }
+      const error = new Error(data.error || "请求失败");
+      error.code = data.code || "request_failed";
+      error.status = xhr.status;
+      if (error.code === "membership_required") openMembershipModal();
+      reject(error);
+    });
+    xhr.onerror = () => finish(() => {
+      backendAvailable = false;
+      const error = new Error(backendErrorMessage(new Error("network error")));
+      error.code = "network_error";
+      reject(error);
+    });
+    xhr.ontimeout = () => finish(() => {
+      const error = new Error("上传超时，请检查网络后重试");
+      error.code = "upload_timeout";
+      reject(error);
+    });
+    xhr.onabort = () => finish(() => {
+      const error = new Error("上传已取消");
+      error.name = "AbortError";
+      error.code = "upload_cancelled";
+      reject(error);
+    });
+    if (controller.signal.aborted) {
+      xhr.abort();
+      return;
+    }
+    controller.signal.addEventListener("abort", abortRequest, { once: true });
+    try {
+      xhr.send(JSON.stringify(body));
+    } catch (error) {
+      finish(() => reject(error));
+    }
+  });
 }
 
 async function publicApi(path, body = {}, options = {}) {
@@ -3970,7 +4143,7 @@ async function submitAnswer(event) {
         $("resultTitle").className = "result-title";
         $("resultTitle").textContent = "首次准备释义";
         $("resultGloss").textContent = "正在调用本地 AI，保存后续离线复习所需的标准答案";
-        const data = await api("/api/rubric", { word, quiz_session: state.quizSession });
+        const data = await api("/api/rubric", { word, quiz_session: state.quizSession }, { timeoutMs: AI_TIMEOUT_MS });
         const rubric = data.rubric || {};
         info.correct_answer = limitText(rubric.gloss) || info.correct_answer;
         info.accepted = sanitizeAccepted(rubric.accepted);
@@ -4031,7 +4204,7 @@ async function submitAnswer(event) {
       rubric: cachedRubric(word),
       mode: state.gradingMode,
       language: state.quizLanguage,
-    }, { controller: judgeController, timeoutMs: API_TIMEOUT_MS });
+    }, { controller: judgeController, timeoutMs: AI_TIMEOUT_MS });
     if (result.rubric) cacheRubric(word, result.rubric);
 
     if (result.correct) {
@@ -4513,6 +4686,23 @@ function refreshBackendState() {
   return backendRefreshPromise;
 }
 
+function markBackendDisconnected(message = "设备当前没有网络连接，联网后会自动重连。") {
+  backendAvailable = false;
+  aiAvailable = false;
+  backendFailureMessage = message;
+  if ($("modelLabel")) $("modelLabel").textContent = "本地复习";
+  $("statusDot")?.classList.remove("online");
+}
+
+function scheduleBackendRecovery(baseDelayMs = 250) {
+  if (navigator.onLine === false) return;
+  window.clearTimeout(backendRecoveryTimer);
+  backendRecoveryTimer = window.setTimeout(() => {
+    backendRecoveryTimer = null;
+    refreshBackendState();
+  }, retryDelayWithJitter(baseDelayMs));
+}
+
 async function boot() {
   if (state.account?.id) loadAccountLocalState();
   else resetLocalViewState();
@@ -4685,20 +4875,24 @@ async function boot() {
       api,
       apiGet,
       publicApi,
+      uploadApi,
       copyText: writeClipboardText,
       formatDate: formatLocalDateTime,
       navigate: (path) => pushRoute(path),
     });
     toolsInitialized = true;
   }
-  loadMembershipPlans().catch(() => {});
-
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register(`/sw.js?v=${APP_VERSION}`).catch(() => {});
   }
-  window.addEventListener("online", () => refreshBackendState());
+  window.addEventListener("offline", () => markBackendDisconnected());
+  window.addEventListener("online", () => scheduleBackendRecovery(150));
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted || !backendAvailable) scheduleBackendRecovery(200);
+  });
+  navigator.connection?.addEventListener?.("change", () => scheduleBackendRecovery(300));
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && (state.session || !backendAvailable)) refreshBackendState();
+    if (document.visibilityState === "visible" && (state.session || !backendAvailable)) scheduleBackendRecovery(150);
   });
   window.setInterval(() => {
     if (document.visibilityState === "visible" && navigator.onLine !== false) refreshBackendState();

@@ -148,8 +148,8 @@ class AccountApiTests(unittest.TestCase):
 
     def test_status_endpoint_handles_concurrent_burst(self):
         with mock.patch("server.ollama_is_ready", return_value=True):
-            with ThreadPoolExecutor(max_workers=24) as pool:
-                results = list(pool.map(lambda _: self.request("GET", "/api/status"), range(120)))
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                results = list(pool.map(lambda _: self.request("GET", "/api/status"), range(300)))
         self.assertTrue(all(status == 200 and data.get("ok") for status, data in results))
         self.assertTrue(all(data.get("build") == server.APP_BUILD for _, data in results))
 
@@ -189,6 +189,34 @@ class AccountApiTests(unittest.TestCase):
         self.assertGreater(len(content), 1000)
         xref_offset = int(content.rsplit(b"startxref\n", 1)[1].splitlines()[0])
         self.assertEqual(content[xref_offset:xref_offset + 5], b"xref\n")
+
+    def test_pdf_export_handles_parallel_requests(self):
+        _, _, session = self.new_user()
+        payload = {
+            "wrongBook": {
+                f"parallel-{index}-学校": {
+                    "wrong_count": index + 1,
+                    "last_answer": "がっこう",
+                    "correct_answer": "学校; school",
+                    "accepted": ["学校", "school"],
+                }
+                for index in range(8)
+            },
+            "title": "WYJ的网站并发 PDF 验收",
+            "meta": {"language": "japanese", "practice_mode": "dictation"},
+        }
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            results = list(pool.map(
+                lambda _: self.request_raw("POST", "/api/export-pdf", payload, session),
+                range(24),
+            ))
+
+        for status, headers, content in results:
+            self.assertEqual(status, 200)
+            self.assertIn("application/pdf", headers.get("Content-Type", ""))
+            self.assertTrue(content.startswith(b"%PDF-1.4"))
+            self.assertTrue(content.rstrip().endswith(b"%%EOF"))
 
     def test_admin_login_is_strict_and_admin_api_is_protected(self):
         status, _ = self.request("POST", "/api/login", {"username": "WYJ", "secret": ADMIN_SECRET})
@@ -734,6 +762,7 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(by_code["dual_language_monthly"]["name"], "双语言包月")
         self.assertEqual(by_code["all_access_monthly"]["price_cents"], 3000)
         self.assertEqual(by_code["japanese_lifetime"]["price_cents"], 7000)
+        self.assertEqual(by_code["japanese_lifetime"]["name"], "日语单项永久会员")
         self.assertEqual(by_code["all_access_lifetime"]["price_cents"], 10000)
         self.assertIn("tools_access", by_code["tools_monthly"]["entitlements"])
         self.assertNotIn("language_all_access", by_code["tools_monthly"]["entitlements"])
@@ -741,7 +770,9 @@ class AccountApiTests(unittest.TestCase):
         self.assertNotIn("tools_access", by_code["dual_language_monthly"]["entitlements"])
         self.assertIn("language_japanese_access", by_code["japanese_lifetime"]["entitlements"])
         self.assertNotIn("language_english_access", by_code["japanese_lifetime"]["entitlements"])
+        self.assertNotIn("language_all_access", by_code["japanese_lifetime"]["entitlements"])
         self.assertNotIn("tools_access", by_code["japanese_lifetime"]["entitlements"])
+        self.assertNotIn("dual_language_lifetime", by_code)
         self.assertEqual(
             {item["code"] for item in plans["payment_methods"]},
             {"wechat", "alipay"},
@@ -765,7 +796,8 @@ class AccountApiTests(unittest.TestCase):
             self.new_user()[2],
         )
         self.assertEqual(status, 400, rejected)
-        self.assertEqual(rejected["code"], "plan_invalid")
+        self.assertEqual(rejected["code"], "plan_retired")
+        self.assertIn("已停止销售", rejected["error"])
 
         _, _, session = self.new_user()
         status, order = self.request(
@@ -1074,13 +1106,13 @@ class AccountApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
 
-        with ThreadPoolExecutor(max_workers=16) as pool:
+        with ThreadPoolExecutor(max_workers=24) as pool:
             results = list(
                 pool.map(
                     lambda index: self.request(
                         "POST", "/api/tools/recent", {"tool_id": f"stress-tool-{index}"}, session
                     ),
-                    range(40),
+                    range(200),
                 )
             )
 
@@ -1165,6 +1197,88 @@ class AccountApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 201, posted)
         self.assertEqual(posted["room"]["messages"][0]["message"], "你好")
+
+    def test_temporary_file_twenty_megabyte_round_trip_and_limit(self):
+        _, account, session = self.new_user()
+        status, _ = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "all_access_lifetime"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200)
+        content = (b"WYJ-20MB\n" * ((20 * 1024 * 1024) // 9 + 1))[: 20 * 1024 * 1024]
+        status, created = self.request(
+            "POST",
+            "/api/temporary/file",
+            {
+                "file_name": "twenty-megabytes.txt",
+                "mime_type": "text/plain",
+                "base64": base64.b64encode(content).decode("ascii"),
+                "minutes": 5,
+                "max_downloads": 2,
+            },
+            session,
+        )
+        self.assertEqual(status, 201, created)
+        self.assertEqual(created["file"]["size_bytes"], len(content))
+        status, opened = self.request("POST", "/api/share/file/read", {"id": created["file"]["id"]})
+        self.assertEqual(status, 200, opened)
+        restored = base64.b64decode(opened["file"]["base64"])
+        self.assertEqual(len(restored), 20 * 1024 * 1024)
+        self.assertEqual(restored[:64], content[:64])
+        self.assertEqual(restored[-64:], content[-64:])
+        with self.assertRaises(server.AccountError) as raised:
+            server.TEMPORARY_STORE.validate_file(
+                "too-large.txt", "text/plain", b"x" * (20 * 1024 * 1024 + 1)
+            )
+        self.assertEqual(raised.exception.code, "file_too_large")
+
+    def test_large_json_allowance_is_scoped_to_temporary_file_uploads(self):
+        status, response = self.request(
+            "POST",
+            "/api/login",
+            {"username": "x" * (server.MAX_JSON_BYTES + 1), "secret": "not-used"},
+        )
+        self.assertEqual(status, 413, response)
+        self.assertLess(server.MAX_JSON_BYTES, server.MAX_TEMP_FILE_JSON_BYTES)
+
+    def test_temporary_room_two_clients_keep_unique_ordered_messages(self):
+        _, account, session = self.new_user()
+        status, _ = self.request(
+            "POST",
+            "/api/admin/membership/manage",
+            {"user_id": account["id"], "action": "grant", "plan_code": "all_access_lifetime"},
+            self.admin_session,
+        )
+        self.assertEqual(status, 200)
+        status, created = self.request(
+            "POST", "/api/temporary/room", {"password": "two-clients", "minutes": 5, "max_messages": 60}, session
+        )
+        self.assertEqual(status, 201, created)
+        room_id = created["room"]["id"]
+        expected = [f"{author}-{index:02d}" for index in range(12) for author in ("甲", "乙")]
+
+        def post_message(message):
+            return self.request(
+                "POST",
+                "/api/share/room/post",
+                {"id": room_id, "password": "two-clients", "author": message[0], "message": message},
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(post_message, expected))
+        self.assertTrue(all(status == 201 for status, _ in results), results)
+        status, opened = self.request(
+            "POST", "/api/share/room/read", {"id": room_id, "password": "two-clients"}
+        )
+        self.assertEqual(status, 200, opened)
+        messages = opened["room"]["messages"]
+        self.assertEqual(len(messages), len(expected))
+        self.assertEqual({message["message"] for message in messages}, set(expected))
+        self.assertEqual(len({message["id"] for message in messages}), len(messages))
+        timestamps = [message["created_at"] for message in messages]
+        self.assertEqual(timestamps, sorted(timestamps))
 
     def test_cross_origin_post_is_rejected(self):
         status, data = self.request(

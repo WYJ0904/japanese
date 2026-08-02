@@ -199,22 +199,39 @@ async function main() {
   };
 
   const downloadedFiles = () => new Set(fs.readdirSync(DOWNLOAD_ROOT));
-  const verifyDownload = async (selector, timeout = 60_000) => {
+  const verifyDownload = async (selector, timeout = 60_000, expectedExtension = "") => {
     const before = downloadedFiles();
     await click(selector);
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       const after = downloadedFiles();
-      const added = [...after].find((name) => !before.has(name) && !name.endsWith(".crdownload"));
+      const added = [...after].find((name) => (
+        !before.has(name)
+        && !name.endsWith(".crdownload")
+        && (!expectedExtension || name.toLowerCase().endsWith(expectedExtension.toLowerCase()))
+      ));
       if (added) return added;
       await delay(100);
     }
-    throw new Error(`download did not finish for ${selector}`);
+    throw new Error(`download did not finish for ${selector}${expectedExtension ? ` (${expectedExtension})` : ""}`);
   };
 
   const navigate = async (pathname) => {
-    await send("Page.navigate", { url: `${BASE_URL}${pathname}` });
-    await waitFor("document.readyState !== 'loading' && document.querySelector('#appShell')", 15_000, pathname);
+    const navigation = await send("Page.navigate", { url: `${BASE_URL}${pathname}` });
+    if (navigation.errorText) {
+      throw new Error(`navigation failed for ${pathname}: ${navigation.errorText}`);
+    }
+    try {
+      await waitFor("document.readyState !== 'loading' && document.querySelector('#appShell')", 15_000, pathname);
+    } catch (error) {
+      const snapshot = await evaluate(`({
+        href: location.href,
+        readyState: document.readyState,
+        title: document.title,
+        body: (document.body?.innerText || '').slice(0, 240),
+      })`).catch(() => ({}));
+      throw new Error(`${error.message}; page=${JSON.stringify(snapshot)}`);
+    }
   };
 
   const useSession = async (session, pathname) => {
@@ -224,8 +241,16 @@ async function main() {
 
   const check = async (name, action) => {
     const started = Date.now();
-    await action();
-    checks.push({ name, status: "passed", milliseconds: Date.now() - started });
+    console.error(`[app-matrix] START ${name}`);
+    try {
+      await action();
+      const milliseconds = Date.now() - started;
+      checks.push({ name, status: "passed", milliseconds });
+      console.error(`[app-matrix] PASS ${name} (${milliseconds} ms)`);
+    } catch (error) {
+      console.error(`[app-matrix] FAIL ${name}: ${error.message}`);
+      throw error;
+    }
   };
 
   try {
@@ -291,10 +316,35 @@ async function main() {
     const userSession = await evaluate("localStorage.getItem('wyjAccountSession')");
     const userMe = await api("/api/me", null, userSession);
 
+    await check("offline state preserves the session and reconnects", async () => {
+      await send("Network.emulateNetworkConditions", {
+        offline: true,
+        latency: 0,
+        downloadThroughput: 0,
+        uploadThroughput: 0,
+      });
+      await evaluate("window.dispatchEvent(new Event('offline')); true");
+      await waitFor("backendAvailable === false", 3_000, "offline state");
+      assert.equal(await evaluate("location.pathname"), "/select");
+      assert.equal(await evaluate("localStorage.getItem('wyjAccountSession')"), userSession);
+
+      await send("Network.emulateNetworkConditions", {
+        offline: false,
+        latency: 80,
+        downloadThroughput: 1_500_000,
+        uploadThroughput: 750_000,
+      });
+      await evaluate("window.dispatchEvent(new Event('online')); true");
+      await waitFor("backendAvailable === true", 20_000, "automatic backend recovery");
+      assert.equal(await evaluate("location.pathname"), "/select");
+      assert.equal(await evaluate("localStorage.getItem('wyjAccountSession')"), userSession);
+    });
+
     await check("locked toolbox, direct-route guard and membership plans", async () => {
       await click('[data-module="tools"]');
       await waitFor("!document.querySelector('#membershipModal')?.classList.contains('hidden')", 12_000, "membership modal");
       assert.equal(await evaluate("location.pathname"), "/select");
+      await waitFor("document.querySelectorAll('#membershipPlanList [data-plan]').length === 6", 12_000, "membership plans");
       const plans = await evaluate(`[...document.querySelectorAll('#membershipPlanList [data-plan]')].map(node => ({ code: node.dataset.plan, text: node.textContent }))`);
       assert.deepEqual(plans.map((item) => item.code), ["trial_single_language", "dual_language_monthly", "tools_monthly", "all_access_monthly", "japanese_lifetime", "all_access_lifetime"]);
       assert.ok(plans.find((item) => item.code === "trial_single_language").text.includes("8"));
@@ -303,13 +353,14 @@ async function main() {
       assert.ok(plans.find((item) => item.code === "tools_monthly").text.includes("20"));
       assert.ok(plans.find((item) => item.code === "all_access_monthly").text.includes("30"));
       assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("70"));
-      assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("日语"));
+      assert.ok(plans.find((item) => item.code === "japanese_lifetime").text.includes("日语单项永久会员"));
       assert.ok(plans.find((item) => item.code === "all_access_lifetime").text.includes("100"));
       assert.equal(await evaluate("document.querySelectorAll('#paymentMethodList input[name=\"paymentMethod\"]').length"), 2);
       await click('[data-plan="trial_single_language"]');
       assert.equal(await evaluate("document.querySelector('#trialLanguageField').classList.contains('hidden')"), false);
       await click('[data-plan="all_access_monthly"]');
       assert.ok((await evaluate("document.querySelector('#purchaseSummary').textContent")).includes("30 CNY"));
+      await evaluate("window.__wyjOriginalImageDecode = HTMLImageElement.prototype.decode; HTMLImageElement.prototype.decode = undefined; true");
       await click("#submitRechargeBtn");
       await waitFor("!document.querySelector('#paymentOrderBox')?.classList.contains('hidden')", 12_000, "payment order");
       assert.ok((await evaluate("document.querySelector('#paymentAmount').textContent")).includes("30.00 CNY"));
@@ -332,6 +383,7 @@ async function main() {
       await waitFor("document.querySelector('#paymentStatus')?.textContent.includes('等待确认')", 12_000, "payment confirmation");
       await click('[data-close-modal="membershipModal"]');
       await waitFor("paymentQrObjectUrl === '' && !document.querySelector('#paymentQrImage').getAttribute('src')", 3_000, "payment QR object URL revoked");
+      await evaluate("HTMLImageElement.prototype.decode = window.__wyjOriginalImageDecode; delete window.__wyjOriginalImageDecode; true");
       await evaluate("location.href = '/tools'; true");
       await waitFor("location.pathname === '/select' && !document.querySelector('#membershipModal')?.classList.contains('hidden')", 12_000, "direct tools guard");
       await click('[data-close-modal="membershipModal"]');
@@ -364,7 +416,7 @@ async function main() {
       await setFiles("#wordFileInput", [wordsFile]);
       await waitFor("document.querySelector('#wordInput')?.value.includes('hello')", 5_000, "word import");
       const before = (await evaluate("document.querySelector('#wordInput').value.split(/\\n/).sort()"));
-      const exported = await verifyDownload("#exportWordsBtn", 10_000);
+      const exported = await verifyDownload("#exportWordsBtn", 10_000, ".txt");
       assert.ok(exported.endsWith(".txt"));
       await click("#shuffleBtn");
       const after = await evaluate("document.querySelector('#wordInput').value.split(/\\n/).sort()");
@@ -382,10 +434,13 @@ async function main() {
       assert.ok((await evaluate("document.querySelector('#wordLimitHint').textContent")).includes("最多测试 15"));
       if (!await evaluate("document.querySelector('#membershipModal')?.classList.contains('hidden')")) {
         await click('[data-close-modal="membershipModal"]');
+        await waitFor("document.querySelector('#membershipModal')?.classList.contains('hidden')", 3_000, "limit prompt closed");
       }
       await click("#startBtn");
-      await waitFor("!document.querySelector('#membershipModal')?.classList.contains('hidden') && /15|上限|会员/.test(document.querySelector('#rechargeMessage')?.textContent || '')", 12_000, "server limit prompt");
-      assert.ok((await evaluate("document.querySelector('#rechargeMessage').textContent")).match(/15|上限|会员/));
+      await waitFor("!document.querySelector('#membershipModal')?.classList.contains('hidden')", 12_000, "server limit modal");
+      await waitFor("/15|上限|会员/.test(document.querySelector('#rechargeMessage')?.textContent || '')", 12_000, "server limit message");
+      const limitMessage = await evaluate("document.querySelector('#rechargeMessage')?.textContent || ''");
+      assert.match(limitMessage, /15|上限|会员/, `unexpected limit message: ${limitMessage}`);
       await click('[data-close-modal="membershipModal"]');
       assert.equal(await evaluate("document.querySelector('#setupView').classList.contains('active')"), true);
       await setFields({ "#wordInput": "hello\nworld", "#practiceModeSelect": "meaning", "#gradingModeSelect": "normal" });
@@ -416,11 +471,11 @@ async function main() {
       await setFields({ "#wrongSearchInput": "hello" });
       assert.equal(await evaluate("document.querySelectorAll('#wrongList .wrong-item').length"), 1);
       await setFields({ "#wrongSearchInput": "" });
-      const pdfName = await verifyDownload("#exportBtn", 80_000);
+      const pdfName = await verifyDownload("#exportBtn", 80_000, ".pdf");
       assert.ok(pdfName.endsWith(".pdf"));
       const pdfBytes = fs.readFileSync(path.join(DOWNLOAD_ROOT, pdfName));
       assert.equal(pdfBytes.subarray(0, 4).toString("ascii"), "%PDF");
-      const jsonName = await verifyDownload("#exportWrongDataBtn", 10_000);
+      const jsonName = await verifyDownload("#exportWrongDataBtn", 10_000, ".json");
       assert.ok(jsonName.endsWith(".json"));
       await click("#clearWrongBtn");
       await click("#acceptConfirmBtn");
@@ -462,7 +517,7 @@ async function main() {
       assert.ok(Number(await evaluate("document.querySelector('#studyTotalRounds').textContent")) >= 2);
       await setFields({ "#studyGoalInput": 25 });
       assert.equal(await evaluate("document.querySelector('#studyGoalBar').max"), 25);
-      const statsName = await verifyDownload("#exportStudyBtn", 10_000);
+      const statsName = await verifyDownload("#exportStudyBtn", 10_000, ".json");
       assert.ok(statsName.endsWith(".json"));
       await click("#clearStudyBtn");
       await click("#acceptConfirmBtn");
@@ -577,7 +632,7 @@ async function main() {
       await click("#saveAdminMembershipBtn");
       await click("#acceptConfirmBtn");
       await waitFor("document.querySelector('#adminEditMessage')?.textContent.includes('立即生效')", 12_000, "membership grant");
-      assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("日语永久会员"));
+      assert.ok((await evaluate("document.querySelector('#adminCurrentMemberships').textContent")).includes("日语单项永久会员"));
       await click("#adminDisableToolsBtn");
       await click("#acceptConfirmBtn");
       await waitFor("document.querySelector('#adminEditMessage')?.textContent.includes('取消工具权限')", 10_000, "tools override off");
@@ -720,6 +775,11 @@ async function main() {
     await check("mobile layout and reduced-motion startup", async () => {
       await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
       await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+      await send("Network.setUserAgentOverride", {
+        userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50",
+        acceptLanguage: "zh-CN,zh;q=0.9,en;q=0.8",
+        platform: "iPhone",
+      });
       await navigate(`/login?mobile-matrix=${RUN_ID}`);
       const started = Date.now();
       await waitFor("!document.querySelector('#entryScreen')", 2_500, "reduced-motion splash");
@@ -733,6 +793,7 @@ async function main() {
       assert.ok(mobile.scrollWidth <= mobile.viewport + 1, JSON.stringify(mobile));
       assert.ok(mobile.bodyScrollWidth <= mobile.viewport + 1, JSON.stringify(mobile));
       assert.ok(mobile.inputWidth > 250, JSON.stringify(mobile));
+      assert.ok((await evaluate("navigator.userAgent")).includes("MicroMessenger"));
       const shot = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
       fs.writeFileSync(path.join(TEST_ROOT, `mobile-app-${RUN_ID}.png`), Buffer.from(shot.data, "base64"));
       await send("Emulation.clearDeviceMetricsOverride");

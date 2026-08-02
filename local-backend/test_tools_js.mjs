@@ -23,6 +23,7 @@ function run(code, exports) {
     Number,
     TextDecoder,
     TextEncoder,
+    URL,
     Uint8Array,
     Uint16Array,
     Uint32Array,
@@ -74,4 +75,30 @@ assert.ok(stripped.length < syntheticJpeg.length);
 assert.deepEqual([...stripped.slice(0, 8)], [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0xaa, 0xbb]);
 assert.match(jpeg.exifSummary(stripped), /APP1 区块：0/);
 
-console.log("tools.js self-checks: 16 passed");
+const qr = run(
+  section("function escapeWifiValue", "function temporaryQrContent"),
+  ["buildWifiPayload", "buildVcardPayload"],
+);
+assert.equal(
+  qr.buildWifiPayload({ name: ' WYJ;Lab:5G\\" ', security: "WPA", password: "safe;pass", hidden: true }),
+  'WIFI:T:WPA;S: WYJ\\;Lab\\:5G\\\\\\" ;P:safe\\;pass;H:true;;',
+);
+assert.equal(qr.buildWifiPayload({ name: "Guest WiFi", security: "nopass", password: "ignored" }), "WIFI:T:nopass;S:Guest WiFi;P:;H:false;;");
+assert.throws(() => qr.buildWifiPayload({ name: "x", security: "WPA", password: "short" }), /8/);
+assert.throws(() => qr.buildWifiPayload({ name: "x", security: "WEP", password: "bad" }), /WEP/);
+const vcard = qr.buildVcardPayload({
+  family: "王", given: "小明", phone: "+86 13800000000", email: "wyj@example.com",
+  organization: "WYJ, Lab", title: "开发;测试", street: "一号路", city: "上海",
+  region: "上海", postal: "200000", country: "中国", website: "https://thewyj.uk/contact",
+  note: "第一行\n第二行",
+});
+assert.match(vcard, /^BEGIN:VCARD\r\nVERSION:3\.0\r\n/);
+assert.match(vcard, /N:王;小明;;;/);
+assert.match(vcard, /ORG:WYJ\\, Lab/);
+assert.match(vcard, /TITLE:开发\\;测试/);
+assert.match(vcard, /ADR;TYPE=HOME:;;一号路;上海;上海;200000;中国/);
+assert.match(vcard, /NOTE:第一行\\n第二行/);
+assert.throws(() => qr.buildVcardPayload({ email: "broken" }), /邮箱/);
+assert.throws(() => qr.buildVcardPayload({ website: "javascript:alert(1)" }), /http/);
+
+console.log("tools.js self-checks: 27 passed");

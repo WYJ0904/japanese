@@ -49,6 +49,9 @@ class LauncherStabilityTests(unittest.TestCase):
         self.assertIn("-RedirectStandardInput $BackendStandardInputPath", text)
         self.assertIn("-RedirectStandardOutput $BackendStandardOutputPath", text)
         self.assertIn("-RedirectStandardError $BackendStandardErrorPath", text)
+        self.assertIn("-RedirectStandardInput $TunnelStandardInputPath", text)
+        self.assertIn("-RedirectStandardOutput $TunnelStandardOutputPath", text)
+        self.assertIn("-RedirectStandardError $TunnelStandardErrorPath", text)
         self.assertIn("$BackendStartupProbeDelayMilliseconds = 2000", text)
         self.assertEqual(text.count("$backendReady = Test-BackendReady"), 1)
         self.assertNotIn("Wait-ForBackendStartup", text)
@@ -180,8 +183,10 @@ class LauncherStabilityTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(readiness)
-        self.assertIn("$PagesStatusUrl", readiness.group("body"))
+        self.assertIn("$PublicBackendStatusUrls", readiness.group("body"))
         self.assertNotIn("$ApiStatusUrl", readiness.group("body"))
+        self.assertIn('"https://thewyj.uk/api/status"', launcher)
+        self.assertIn('"https://japanese-6pa.pages.dev/api/status"', launcher)
 
         watchdog = (ROOT / "desktop-tools" / "watch-wyj.ps1").read_text(
             encoding="utf-8"
@@ -192,7 +197,8 @@ class LauncherStabilityTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(public_urls)
-        self.assertIn("https://thewyj.uk/api/status", public_urls.group("body"))
+        self.assertIn('$CustomDomainStatusUrl = "https://thewyj.uk/api/status"', watchdog)
+        self.assertIn('$PagesFallbackStatusUrl = "https://japanese-6pa.pages.dev/api/status"', watchdog)
         self.assertNotIn(
             "https://api.thewyj.uk/api/status",
             public_urls.group("body"),
@@ -311,12 +317,15 @@ class LauncherStabilityTests(unittest.TestCase):
             ROOT / "desktop-tools" / "watch-wyj.ps1"
         ).read_text(encoding="utf-8")
         self.assertIn('$connectorConnections = Get-TunnelHaConnections', watchdog)
-        self.assertIn('$PublicProbeGraceFailures = 1', watchdog)
+        self.assertIn('$PublicProbeGraceFailures = 4', watchdog)
+        self.assertIn('$WebsiteFailureThreshold = 3', watchdog)
+        self.assertIn('$PagesFallbackStatusUrl = "https://japanese-6pa.pages.dev/api/status"', watchdog)
+        self.assertIn('retry delayed for {1} seconds', watchdog)
         self.assertIn('$localOk -and $connectorOk', watchdog)
         self.assertIn('connector metrics are not accepted as public availability', watchdog)
         self.assertNotIn('$localOk -and ($publicOk -or $connectorOk)', watchdog)
 
-    def test_source_selection_and_legacy_seventy_yuan_qr_fallback(self):
+    def test_source_selection_and_historical_seventy_yuan_qr_fallback(self):
         launcher = ROOT / "desktop-tools" / "start-wyj.ps1"
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
@@ -340,7 +349,7 @@ class LauncherStabilityTests(unittest.TestCase):
                     )
                 shutil.copy2(
                     ROOT / "icon-192.png",
-                    qr_source / f"{method}_dual_language_lifetime.png",
+                    qr_source / f"{method}_japanese_lifetime.png",
                 )
             script = textwrap.dedent(
                 f"""
@@ -353,8 +362,8 @@ class LauncherStabilityTests(unittest.TestCase):
                 $count = Sync-PrivatePaymentAssets
                 if ($count -ne 12) {{ throw "unexpected QR count: $count" }}
                 foreach ($method in @('wechat', 'alipay')) {{
-                    if (-not (Test-Path -LiteralPath (Join-Path $script:BackendRoot "data\\payment\\qrcodes\\${{method}}_japanese_lifetime.png") -PathType Leaf)) {{ throw 'Japanese QR fallback missing' }}
-                    if (-not (Test-Path -LiteralPath (Join-Path $script:BackendRoot "data\\payment\\qrcodes\\${{method}}_dual_language_lifetime.png") -PathType Leaf)) {{ throw 'historical QR compatibility missing' }}
+                    if (-not (Test-Path -LiteralPath (Join-Path $script:BackendRoot "data\\payment\\qrcodes\\${{method}}_japanese_lifetime.png") -PathType Leaf)) {{ throw 'current Japanese QR missing' }}
+                    if (-not (Test-Path -LiteralPath (Join-Path $script:BackendRoot "data\\payment\\qrcodes\\${{method}}_dual_language_lifetime.png") -PathType Leaf)) {{ throw 'historical dual-language QR fallback missing' }}
                 }}
                 """
             )

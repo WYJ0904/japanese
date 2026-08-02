@@ -54,7 +54,7 @@
 | `dual_language_monthly` | 20 CNY/月 | “双语言包月”：英语和日语全部测试会员功能，不包含工具箱 |
 | `tools_monthly` | 20 CNY/月 | 在线工具箱、批量处理、临时分享和配置保存，不包含语言测试会员功能 |
 | `all_access_monthly` | 30 CNY/月 | 全部语言会员功能、工具箱、批量处理、临时分享、配置保存 |
-| `japanese_lifetime` | 70 CNY | 日语测试会员功能永久有效，不包含英语或工具箱 |
+| `japanese_lifetime` | 70 CNY | “日语单项永久会员”：仅日语测试会员功能永久有效，不包含英语或工具箱 |
 | `all_access_lifetime` | 100 CNY | 全功能永久有效 |
 
 权益代码：
@@ -68,9 +68,9 @@
 - `save_tool_config`
 - `all_features_access`
 
-权限按有效会员记录合并，不使用单一 `isVip`。全功能永久和全功能包月覆盖全部模块；20 CNY 双语言包月与 20 CNY 工具箱包月互不越权；70 CNY 日语永久不包含英语或工具箱；单语言体验和其他有效会员可以叠加。包月会员到期后立即失去对应权益，但同时存在的其他会员权益仍会保留。超级管理员拥有全部权益。
+权限按有效会员记录合并，不使用单一 `isVip`。全功能永久和全功能包月覆盖全部模块；20 CNY 双语言包月与 20 CNY 工具箱包月互不越权；70 CNY 日语单项永久仅包含日语测试；单语言体验和其他有效会员可以叠加。包月会员到期后立即失去对应权益，但同时存在的其他会员权益仍会保留。超级管理员拥有全部权益。
 
-桌面启动器使用 Cloudflare 官方默认的 `auto` 传输协议，并要求用户实际访问的 `https://thewyj.uk/api/status` 连续通过真实 HTTP 健康检查。该路径会完整验证 Pages Function、Tunnel 和本机后端；`api.thewyj.uk` 直连只用于诊断，避免本机全局代理返回的假 502 触发错误重连。Tunnel 指标同样只用于诊断，不能代替公网可用性；一次短暂抖动会被守护程序容忍，连续失败则自动重连。
+桌面启动器使用 Cloudflare 官方 `auto` 协议并验证 `https://thewyj.uk/api/status`。当自定义域名在本地网络或代理下暂时不可达时，还会用 `https://japanese-6pa.pages.dev/api/status` 验证同一 Pages Function → Tunnel → 本机后端链路。守护程序要求多次连续失败才修复，修复延迟使用指数退避和随机抖动，避免把一次公网探测抖动放大成 Tunnel 重启风暴。
 
 ### 老会员兼容
 
@@ -79,11 +79,11 @@
 - 旧 `trial_single_language` 保持原语言和剩余时间；新订单按 8 CNY/月销售，旧待处理订单仍保留原 5 CNY 金额
 - 旧 `monthly` 迁移为 `legacy_all_monthly`，保持原双语言包月权限，不新增工具权限
 - 旧 `lifetime` 迁移为 `legacy_all_lifetime`，保持原双语言永久权限，不新增工具权限
-- 旧 `japanese_lifetime` 记录保持日语永久权益，不会静默增加英语；该方案现在也是 70 CNY 日语永久会员的新订单代码
-- 已存在的 `dual_language_lifetime` 记录和待处理订单继续保持原双语言永久权益，但该历史方案不再接受新订单
+- `japanese_lifetime` 是当前在售的 70 CNY 日语单项永久方案，内部代码保持稳定，不会增加英语或工具权限
+- 已存在的 `dual_language_lifetime` 记录和待处理订单继续保持历史双语言永久权益，但该代码不再新售
 - 旧待处理充值按原价格和原权益迁移，不会被静默改成新方案
 
-旧兼容方案不可由新用户购买。新 70 CNY 订单只能使用 `japanese_lifetime`；旧缓存页面提交 `monthly`、`lifetime` 或 `dual_language_lifetime` 会被服务端拒绝，避免价格或权益误开。
+旧兼容方案不可由新用户购买。新 70 CNY 订单只能使用 `japanese_lifetime`；旧缓存页面提交已退役的 `dual_language_lifetime` 时，服务端会明确提示刷新并重新选择方案，提交 `monthly` 或 `lifetime` 等未知代码也会被拒绝，避免价格或权益误开。
 
 ## 充值与管理员
 
@@ -150,9 +150,9 @@ MD5、SHA-1、SHA-256、SHA-512、文件信息、CSV/JSON 互转、文本编码�
 - 临时文件：过期时间、下载次数、下载后销毁、密码和类型/大小验证
 - 临时剪贴板：六位连接码、默认 10 分钟、可读取后销毁
 - 临时二维码：文本、URL、可直接填写的 Wi-Fi、vCard 联系人和动态失效链接
-- 临时留言房间：密码、最大消息数、自动过期、创建者清空、不公开列出
+- 临时留言房间：密码、最大消息数、自动过期、创建者清空、不公开列出，并以 4 秒轮询和指数退避在多设备间自动同步
 
-临时数据每 60 秒清理一次，也会在读取前清理。临时文件受 Pages 代理请求上限约束，当前最大 350 KB；允许 TXT、CSV、JSON、PDF、PNG、JPG、WebP、GIF 和 ZIP。服务端同时校验安全文件名、扩展名、MIME 和文件签名。
+临时数据每 60 秒清理一次，也会在读取前清理。临时文件最大 20 MB；允许 TXT、CSV、JSON、PDF、PNG、JPG、WebP、GIF 和 ZIP。服务端同时校验安全文件名、扩展名、MIME 和文件签名，Pages Function 为 JSON/Base64 开销保留 28 MB 请求体上限。
 
 ## 数据库与迁移
 
@@ -238,7 +238,7 @@ Pages Functions：
 - `VOCAB_PAYMENT_QR_DIR`：裁剪后支付二维码的私有目录；默认 `data/payment/qrcodes/`
 - `VOCAB_PAYMENT_QR_MAX_BYTES`：单张支付二维码最大字节数，默认 3 MB
 - `VOCAB_HOST`、`VOCAB_PORT`
-- `VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`
+- `VOCAB_MAX_JSON_BYTES`、`VOCAB_MAX_TEMP_FILE_JSON_BYTES`、`VOCAB_MAX_REJECT_DRAIN_BYTES`
 - `VOCAB_AI_MAX_CONCURRENCY`、`VOCAB_AI_QUEUE_TIMEOUT_SEC`
 - `OLLAMA_HOST`、`OLLAMA_MODEL`、`OLLAMA_TIMEOUT_SEC`
 
@@ -248,11 +248,11 @@ Pages Functions：
 
 本项目不配置开机自启动。电脑重启后可双击 `启动WYJ网站.cmd`。CMD 既支持脚本与入口放在同一目录，也支持桌面入口配合 `_wyj-tools` 子目录，不会因部署布局不同找不到启动器。
 
-V10.8.1 启动器把仓库源码和私有运行目录分开。源码按 `-SourceRoot`、`VOCAB_SOURCE_ROOT`、入口附近、本机 `launcher.json`、受限范围自动发现的顺序选择；运行目录按 `-RuntimeRoot`、`VOCAB_BACKEND_ROOT`、本机配置、现有旧版目录、当前账户本地应用数据目录的顺序选择。首次识别后会保存本机配置，继续使用原数据库、管理员账户和 Tunnel 工具，不搬移或覆盖私有数据。启动时会把 Tunnel 的本地上游从 `localhost:8765` 原子修复为 `127.0.0.1:8765`，避免 Windows 将 `localhost` 解析到后端未监听的 IPv6 地址。
+V11.0.0 启动器把仓库源码和私有运行目录分开。源码按 `-SourceRoot`、`VOCAB_SOURCE_ROOT`、入口附近、本机 `launcher.json`、受限范围自动发现的顺序选择；运行目录按 `-RuntimeRoot`、`VOCAB_BACKEND_ROOT`、本机配置、现有旧版目录、当前账户本地应用数据目录的顺序选择。首次识别后会保存本机配置，继续使用原数据库、管理员账户和 Tunnel 工具，不搬移或覆盖私有数据。启动时会把 Tunnel 的本地上游从 `localhost:8765` 原子修复为 `127.0.0.1:8765`，避免 Windows 将 `localhost` 解析到后端未监听的 IPv6 地址。
 
-V10.8.1 还会兼容 Clash Party。若 Clash Party 原来使用全局代理，启动器会切换为规则模式，只让 `cloudflared.exe` 和 `argotunnel.com` 直连，并用 `MATCH,GLOBAL` 保持其余流量原来的全局代理行为；同时把 `+.argotunnel.com` 加入 fake-IP 排除。若用户本来使用直连模式，启动器不会强制改动。当前运行中的 Clash Party 会通过本地命名管道热加载，并启动仅限本次手动会话的隐藏守护进程，`stdin`、`stdout`、`stderr` 分别重定向；关闭 Clash Party 或关机后会自然结束，不创建开机自启动。配置变更前的备份保存在 `%LOCALAPPDATA%\WYJJapanese\config-backups\mihomo-party`。
+V11.0.0 还会兼容 Clash Party。若 Clash Party 原来使用全局代理，启动器会切换为规则模式，只让 `cloudflared.exe` 和 `argotunnel.com` 直连，并用 `MATCH,GLOBAL` 保持其余流量原来的全局代理行为；同时把 `+.argotunnel.com` 加入 fake-IP 排除。若用户本来使用直连模式，启动器不会强制改动。当前运行中的 Clash Party 会通过本地命名管道热加载，并启动仅限本次手动会话的隐藏守护进程，`stdin`、`stdout`、`stderr` 分别重定向；关闭 Clash Party 或关机后会自然结束，不创建开机自启动。配置变更前的备份保存在 `%LOCALAPPDATA%\WYJJapanese\config-backups\mihomo-party`。
 
-启动时只原子同步白名单中的 Python 文件和 SQL 迁移，保留 `data/`、`tools/`、数据库和配置。若仓库私有目录中存在 12 张已清理支付二维码，启动器会按固定文件名复制到运行目录，不接触原始收款截图；旧的 70 CNY 付款码文件名可作为日语永久方案的本机兼容来源。随后依次恢复账户与支付后端、Cloudflare Tunnel 和本地 AI。后端以独立隐藏进程运行，stdin、stdout、stderr 分别重定向；启动器固定等待 2 秒并只执行一次健康检查，不等待服务器进程退出。AI 启动失败只降级 AI 功能，不会阻塞登录、会员或支付。守护程序在连续三次修复失败后暂停 30 分钟，避免后台无限重启。
+启动时只原子同步白名单中的 Python 文件和 SQL 迁移，保留 `data/`、`tools/`、数据库和配置。若仓库私有目录中存在 12 张已清理支付二维码，启动器会按固定文件名复制到运行目录，不接触原始收款截图；`japanese_lifetime` 是当前 70 CNY 方案，仍保留 `dual_language_lifetime` 二维码文件供历史订单读取。随后依次恢复账户与支付后端、Cloudflare Tunnel 和本地 AI。后端与 Tunnel 都以独立隐藏进程运行，stdin、stdout、stderr 分别重定向；启动器固定等待 2 秒并只执行一次本地健康检查，不等待服务器进程退出。AI 启动失败只降级 AI 功能，不会阻塞登录、会员或支付。守护程序在连续三次修复失败后暂停 30 分钟，避免后台无限重启。
 
 常用诊断与重新配置：
 
@@ -264,7 +264,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop-tools\start-wyj.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop-tools\start-wyj.ps1 -Configure -RuntimeRoot "你的私有运行目录"
 ```
 
-启动器会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏守护程序，电脑关机后自然停止。`启动日志.txt`、`守护日志.txt`、`后台标准输出.txt`、`后台标准错误.txt`、`后台启动错误.txt` 和失败时自动生成的 `启动错误报告.txt` 均放在 `启动WYJ网站.cmd` 同一目录；报告不包含数据库内容、登录密钥、Tunnel 凭据或付款码。
+启动器会删除历史遗留的开机启动快捷方式，但不会创建新的自启动项。手动启动后会运行隐藏守护程序，电脑关机后自然停止。`启动日志.txt`、`守护日志.txt`、`后台标准输出.txt`、`后台标准错误.txt`、`Tunnel标准输出.txt`、`Tunnel标准错误.txt`、`后台启动错误.txt` 和失败时自动生成的 `启动错误报告.txt` 均放在 `启动WYJ网站.cmd` 同一目录；报告不包含数据库内容、登录密钥、Tunnel 凭据或付款码。
 
 源码中对应文件：
 
@@ -297,9 +297,10 @@ node --check tools.js
 node --check sw.js
 node --check "functions/api/[[path]].js"
 node local-backend/test_tools_js.mjs
+node local-backend/test_proxy_js.mjs
 ```
 
-当前 Python 自动化套件共 127 项，另有 16 项 JavaScript 工具自检。`test_app_browser.mjs` 使用真实 Chrome 覆盖 13 条完整用户流程，`test_tools_browser.mjs` 会自行准备隔离样本，并逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）及实际下载。覆盖注册登录、登录位置审计、会话摘要迁移、封禁、管理员安全重置密钥、用户自助改密、密钥与哈希防泄露、老会员迁移、六种在售方案、支付方式锁定、私有二维码鉴权、完整支付状态机、原子审批与唯一履约、包月续期与永久会员幂等、权益隔离与合并、过期降级、管理员审计、本地优先分级搜索、NFKC/大小写/假名归一化、英语词形匹配、稳定排序、TTL/LRU 缓存、完整排除词缓存键、工具权限、收藏/历史/配置、临时生命周期、文件签名、跨站拒绝、限流、AI 兜底选词、日语汉字自动标音、纯假名直接出题、汉字与假名听写判卷、错题 PDF、HTML ID、PWA 缓存、390 像素手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理和 OpenCC 词典完整性。额外压力矩阵验证 300 次状态请求、200 次并发工具写入和 24 次并发 PDF 导出均为 0 错误。
+当前 Python 自动化套件共 133 项，另有 27 项 JavaScript 工具自检和 4 项 Pages 代理韧性检查。`test_app_browser.mjs` 使用真实 Chrome 覆盖 14 条完整用户流程，`test_tools_browser.mjs` 会自行准备隔离样本，并逐项运行 103 个工具（文本 29、文件 17、图片 30、随机 22、临时 5）及实际下载。覆盖注册登录、断网后会话保留与自动恢复、微信 WebView 兼容、登录位置审计、会话摘要迁移、封禁、管理员安全重置密钥、用户自助改密、密钥与哈希防泄露、老会员迁移、六种在售方案、支付方式锁定、私有二维码鉴权、完整支付状态机、原子审批与唯一履约、包月续期与永久会员幂等、权益隔离与合并、过期降级、管理员审计、本地优先分级搜索、NFKC/大小写/假名归一化、英语词形匹配、稳定排序、TTL/LRU 缓存、完整排除词缓存键、工具权限、收藏/历史/配置、20 MB 临时文件往返、双客户端留言自动同步、文件签名、跨站拒绝、限流、AI 兜底选词、日语汉字自动标音、纯假名直接出题、汉字与假名听写判卷、错题 PDF、HTML ID、PWA 缓存、390 像素手机布局、CSV 引号换行、MD5、颜色转换、JPEG 元数据清理、Wi-Fi/联系人二维码和 OpenCC 词典完整性。额外压力矩阵验证 300 次状态请求、200 次并发工具写入和 24 次并发 PDF 导出均为 0 错误。
 
 ## Cloudflare Pages 配置
 
@@ -312,7 +313,7 @@ node local-backend/test_tools_js.mjs
 
 部署步骤：
 
-1. 推送 `main` 到 `WYJ0904/japanese`。
+1. 推送 `main` 到 `WYJ0904/thewyj.uk`。
 2. Cloudflare Pages 连接该仓库和 `main`。
 3. 设置 `LOCAL_API_BASE=https://api.thewyj.uk`。
 4. 部署后检查 `/api/status`、登录、`/select`、无权限 `/tools` 拦截和管理员审批。
@@ -323,7 +324,7 @@ Pages 发布静态根目录，不生成 `dist`。`_redirects` 把 SPA 路由回�
 ## 当前限制
 
 - 网站账户、AI、会员和临时分享依赖这台电脑在线；电脑关机、休眠、断网或 Tunnel 离线时，世界其他地区也无法使用这些服务。
-- 临时文件目前为 350 KB 上限，原因是 Pages Function 代理和 JSON/Base64 开销；普通本地文件工具仍支持总计 50 MB。
+- 临时文件单个上限为 20 MB；前端、Python 后端和 Pages Function 代理均已为 Base64/JSON 开销预留一致容量，并提供读取、上传进度、取消和 180 秒超时。普通本地文件工具仍支持总计 50 MB。
 - 纯浏览器图片处理能力受设备内存和浏览器 Canvas 支持影响；超大图片应分批处理。
 - 简繁转换使用 OpenCC 官方字符词典并在浏览器本地执行；它是字符级转换，不包含地区词汇与上下文短语消歧。
 - 工具处理内容默认不上传，服务器因此无法恢复用户未主动保存的本地处理结果。

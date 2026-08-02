@@ -15,7 +15,13 @@ const HOP_BY_HOP_HEADERS = new Set([
 const NO_BODY_METHODS = new Set(["GET", "HEAD"]);
 const RETRYABLE_STATUS = new Set([502, 503, 504, 530]);
 const MAX_PROXY_BODY_BYTES = 600 * 1024;
-const IDEMPOTENT_RETRY_DELAYS_MS = [0, 120, 360];
+const MAX_TEMP_FILE_PROXY_BODY_BYTES = 28 * 1024 * 1024;
+const IDEMPOTENT_RETRY_BASE_DELAYS_MS = [0, 250, 900];
+const UPSTREAM_GET_TIMEOUT_MS = 10000;
+const UPSTREAM_DEFAULT_TIMEOUT_MS = 30000;
+const UPSTREAM_AI_TIMEOUT_MS = 125000;
+const UPSTREAM_VOCABULARY_TIMEOUT_MS = 245000;
+const UPSTREAM_UPLOAD_TIMEOUT_MS = 185000;
 const CLIENT_CONTEXT_HEADERS = new Set([
   "x-wyj-proxy",
   "x-wyj-client-ip",
@@ -85,7 +91,7 @@ function encodedContextHeader(value, maxLength = 120) {
   return encodeURIComponent(String(value || "").slice(0, maxLength));
 }
 
-function requestHeadersFor(request, target, requestContext = {}) {
+function requestHeadersFor(request, requestContext = {}) {
   const headers = new Headers();
   request.headers.forEach((value, key) => {
     const normalized = key.toLowerCase();
@@ -117,6 +123,31 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function retryDelayWithJitter(baseMilliseconds) {
+  if (!baseMilliseconds) return 0;
+  return baseMilliseconds + Math.floor(Math.random() * Math.max(50, baseMilliseconds * 0.35));
+}
+
+function upstreamTimeoutFor(requestPath, method) {
+  if (requestPath === "/api/vocabulary/suggest") return UPSTREAM_VOCABULARY_TIMEOUT_MS;
+  if (requestPath === "/api/temporary/file") return UPSTREAM_UPLOAD_TIMEOUT_MS;
+  if (["/api/judge", "/api/rubric", "/api/japanese/readings", "/api/export-pdf"].includes(requestPath)) {
+    return UPSTREAM_AI_TIMEOUT_MS;
+  }
+  if (NO_BODY_METHODS.has(method)) return UPSTREAM_GET_TIMEOUT_MS;
+  return UPSTREAM_DEFAULT_TIMEOUT_MS;
+}
+
+async function fetchWithTimeout(url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function onRequest(context) {
   const { env, request } = context;
 
@@ -137,50 +168,66 @@ export async function onRequest(context) {
     );
   }
 
+  const requestPath = new URL(request.url).pathname;
+  const maxBodyBytes = requestPath === "/api/temporary/file" ? MAX_TEMP_FILE_PROXY_BODY_BYTES : MAX_PROXY_BODY_BYTES;
   const declaredLength = Number(request.headers.get("Content-Length") || 0);
-  if (declaredLength > MAX_PROXY_BODY_BYTES) {
-    return json({ ok: false, error: "Request body is too large." }, 413);
+  if (declaredLength > maxBodyBytes) {
+    return json({ ok: false, error: requestPath === "/api/temporary/file" ? "请求内容过大，临时文件最大支持 20 MB。" : "请求内容过大。" }, 413);
   }
 
-  const body = NO_BODY_METHODS.has(request.method.toUpperCase()) ? undefined : await request.arrayBuffer();
-  if (body && body.byteLength > MAX_PROXY_BODY_BYTES) {
-    return json({ ok: false, error: "Request body is too large." }, 413);
+  const method = request.method.toUpperCase();
+  const idempotent = NO_BODY_METHODS.has(method);
+  const body = idempotent ? undefined : await request.arrayBuffer();
+  if (body && body.byteLength > maxBodyBytes) {
+    return json({ ok: false, error: requestPath === "/api/temporary/file" ? "请求内容过大，临时文件最大支持 20 MB。" : "请求内容过大。" }, 413);
   }
-  const retryDelays = NO_BODY_METHODS.has(request.method.toUpperCase()) ? IDEMPOTENT_RETRY_DELAYS_MS : [0];
-  const attempts = bases.flatMap((base) => retryDelays.map((delay) => ({ base, delay })));
-
-  for (let index = 0; index < attempts.length; index += 1) {
-    const { base, delay } = attempts[index];
+  const rounds = idempotent ? IDEMPOTENT_RETRY_BASE_DELAYS_MS : [0];
+  const candidateBases = idempotent ? bases : bases.slice(0, 1);
+  const timeoutMs = upstreamTimeoutFor(requestPath, method);
+  for (let round = 0; round < rounds.length; round += 1) {
+    const delay = retryDelayWithJitter(rounds[round]);
     if (delay) await sleep(delay);
-    const target = targetUrlFor(request, base);
-    const init = {
-      method: request.method,
-      headers: requestHeadersFor(request, target, request.cf || context.cf || {}),
-      redirect: "manual",
-    };
-
-    if (body) init.body = body;
-
-    try {
-      const response = await fetch(target.toString(), init);
-      if (index < attempts.length - 1 && RETRYABLE_STATUS.has(response.status)) {
-        if (response.body) await response.body.cancel().catch(() => {});
-        continue;
+    for (let baseIndex = 0; baseIndex < candidateBases.length; baseIndex += 1) {
+      const base = candidateBases[baseIndex];
+      const target = targetUrlFor(request, base);
+      const init = {
+        method: request.method,
+        headers: requestHeadersFor(request, request.cf || context.cf || {}),
+        redirect: "manual",
+      };
+      if (body) init.body = body;
+      const hasMoreAttempts = round < rounds.length - 1 || baseIndex < candidateBases.length - 1;
+      try {
+        const response = await fetchWithTimeout(target.toString(), init, timeoutMs);
+        if (hasMoreAttempts && RETRYABLE_STATUS.has(response.status)) {
+          if (response.body) await response.body.cancel().catch(() => {});
+          continue;
+        }
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeadersFor(response),
+        });
+      } catch (_) {
+        // GET/HEAD may continue to a fallback; writes are deliberately never replayed.
       }
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeadersFor(response),
-      });
-    } catch (_) {}
+    }
   }
 
   return json(
     {
       ok: false,
       error: "Could not reach the local backend through configured Cloudflare Tunnel URLs.",
+      code: "upstream_unreachable",
       retryable: true,
     },
     502,
   );
 }
+
+export const __testing = {
+  configuredBases,
+  fetchWithTimeout,
+  retryDelayWithJitter,
+  upstreamTimeoutFor,
+};

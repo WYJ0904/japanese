@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$LauncherVersion = "10.8.1"
+$LauncherVersion = "11.0.0"
 $FrontendRoot = ""
 $BackendSourceRoot = ""
 $StateRoot = Join-Path $env:LOCALAPPDATA "WYJJapanese"
@@ -29,6 +29,9 @@ $BackendFailureLogPath = Join-Path $LauncherEntryRoot "后台启动错误.txt"
 $BackendStandardInputPath = Join-Path $StateRoot "backend-stdin.empty"
 $BackendStandardOutputPath = Join-Path $LauncherEntryRoot "后台标准输出.txt"
 $BackendStandardErrorPath = Join-Path $LauncherEntryRoot "后台标准错误.txt"
+$TunnelStandardInputPath = Join-Path $StateRoot "tunnel-stdin.empty"
+$TunnelStandardOutputPath = Join-Path $LauncherEntryRoot "Tunnel标准输出.txt"
+$TunnelStandardErrorPath = Join-Path $LauncherEntryRoot "Tunnel标准错误.txt"
 $script:MihomoPartyRoot = Join-Path $env:APPDATA "mihomo-party"
 $MihomoGuardScriptPath = Join-Path $StateRoot "mihomo-tunnel-guard.ps1"
 $MihomoGuardPidPath = Join-Path $StateRoot "mihomo-tunnel-guard.pid"
@@ -47,10 +50,12 @@ $SiteUrl = "https://thewyj.uk"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
 $ApiStatusUrl = "https://api.thewyj.uk/api/status"
 $PagesStatusUrl = "https://thewyj.uk/api/status"
+$PagesFallbackStatusUrl = "https://japanese-6pa.pages.dev/api/status"
+$PublicBackendStatusUrls = @($PagesStatusUrl, $PagesFallbackStatusUrl)
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
 $OllamaModel = "qwen3:8b"
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/10.8.1"
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/11.0.0"
 
 $script:BackendRoot = ""
 $script:CloudflaredExe = ""
@@ -1447,10 +1452,13 @@ function Sync-PrivatePaymentAssets {
                 }
             }
         }
-        $legacySource = Join-Path $sourceRoot "${method}_dual_language_lifetime.png"
-        $legacyDestination = Join-Path $destinationRoot "${method}_dual_language_lifetime.png"
-        if (Test-PngFile -Path $legacySource) {
-            $null = Copy-FileIfChanged -Source $legacySource -Destination $legacyDestination
+        $historicalSource = Join-Path $sourceRoot "${method}_dual_language_lifetime.png"
+        if (-not (Test-PngFile -Path $historicalSource)) {
+            $historicalSource = Join-Path $sourceRoot "${method}_japanese_lifetime.png"
+        }
+        $historicalDestination = Join-Path $destinationRoot "${method}_dual_language_lifetime.png"
+        if (Test-PngFile -Path $historicalSource) {
+            $null = Copy-FileIfChanged -Source $historicalSource -Destination $historicalDestination
         }
     }
     if ($validCount -eq 12) {
@@ -1556,10 +1564,13 @@ function Ensure-Backend {
 }
 
 function Test-PublicBackendReady {
-    # The Pages endpoint is the real user path and already validates the
-    # complete Pages Function -> Tunnel -> local backend chain. A local global
-    # proxy may intercept the origin-only hostname and return a false 502.
-    return (Test-ApiOk -Url $PagesStatusUrl -TimeoutSec 6)
+    # Both URLs validate Pages Function -> Tunnel -> local backend. The Pages
+    # hostname prevents a local custom-domain DNS/proxy issue from restarting
+    # an otherwise healthy tunnel.
+    foreach ($statusUrl in $PublicBackendStatusUrls) {
+        if (Test-ApiOk -Url $statusUrl -TimeoutSec 6) { return $true }
+    }
+    return $false
 }
 
 function Get-TunnelHaConnections {
@@ -1708,7 +1719,14 @@ function Start-TunnelProcess {
         "run", "japanese-local-backend"
     )
     Write-LaunchLog ("启动 Tunnel 传输协议: " + $Protocol.ToUpperInvariant())
-    return Start-Process -FilePath $script:CloudflaredExe -ArgumentList $arguments -WorkingDirectory $script:BackendRoot -WindowStyle Hidden -PassThru
+    if (-not (Test-Path -LiteralPath $TunnelStandardInputPath -PathType Leaf)) {
+        New-Item -ItemType File -Path $TunnelStandardInputPath -Force | Out-Null
+    }
+    return Start-Process -FilePath $script:CloudflaredExe -ArgumentList $arguments `
+        -WorkingDirectory $script:BackendRoot -WindowStyle Hidden -PassThru `
+        -RedirectStandardInput $TunnelStandardInputPath `
+        -RedirectStandardOutput $TunnelStandardOutputPath `
+        -RedirectStandardError $TunnelStandardErrorPath
 }
 
 function Get-ManagedTunnelProcesses {

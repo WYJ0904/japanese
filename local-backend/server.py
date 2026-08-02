@@ -37,8 +37,10 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ERROR_LOG_PATH = DATA_DIR / "server-error.log"
 USERS_DB_PATH = Path(os.environ.get("VOCAB_USERS_DB", str(DATA_DIR / "users.sqlite3")))
 USERS_TEXT_PATH = Path(os.environ.get("VOCAB_USERS_TXT", str(BASE_DIR / "users.txt")))
-APP_BUILD = "2026-07-28-network-stability"
+APP_BUILD = "2026-08-02-network-resilience"
 MAX_JSON_BYTES = int(os.environ.get("VOCAB_MAX_JSON_BYTES", str(512 * 1024)))
+DEFAULT_MAX_TEMP_FILE_JSON_BYTES = ((MAX_TEMP_FILE_BYTES + 2) // 3) * 4 + 128 * 1024
+MAX_TEMP_FILE_JSON_BYTES = int(os.environ.get("VOCAB_MAX_TEMP_FILE_JSON_BYTES", str(DEFAULT_MAX_TEMP_FILE_JSON_BYTES)))
 MAX_REJECT_DRAIN_BYTES = max(MAX_JSON_BYTES, int(os.environ.get("VOCAB_MAX_REJECT_DRAIN_BYTES", str(2 * 1024 * 1024))))
 MAX_TEXT_LEN = 240
 MAX_RUBRIC_TEXT_LEN = 500
@@ -50,6 +52,7 @@ REGISTER_MAX_ATTEMPTS = 20
 TEMP_RATE_WINDOW_SEC = 60
 TEMP_RATE_MAX_REQUESTS = 60
 TEMP_READ_MAX_REQUESTS = 20
+TEMP_ROOM_MAX_REQUESTS = 180
 SESSION_TTL_SEC = int(os.environ.get("VOCAB_SESSION_TTL_SEC", str(12 * 60 * 60)))
 SESSION_MAX_ITEMS = max(10, int(os.environ.get("VOCAB_SESSION_MAX_ITEMS", "100")))
 
@@ -363,7 +366,10 @@ def register_limited(handler, record=False):
 def temporary_limited(handler, scope="write"):
     now = time.time()
     key = (request_client_key(handler), str(scope or "write"))
-    maximum = TEMP_READ_MAX_REQUESTS if scope == "read" else TEMP_RATE_MAX_REQUESTS
+    maximum = {
+        "read": TEMP_READ_MAX_REQUESTS,
+        "room": TEMP_ROOM_MAX_REQUESTS,
+    }.get(scope, TEMP_RATE_MAX_REQUESTS)
     with STATE_LOCK:
         active = [item for item in TEMP_REQUESTS.get(key, []) if now - item < TEMP_RATE_WINDOW_SEC]
         if len(active) >= maximum:
@@ -2063,8 +2069,10 @@ class VocabHandler(BaseHTTPRequestHandler):
             raise BadRequest("invalid content length") from exc
         if length <= 0:
             return {}
-        if length > MAX_JSON_BYTES:
-            if length <= MAX_REJECT_DRAIN_BYTES:
+        request_path = urllib.parse.urlsplit(self.path).path
+        max_bytes = MAX_TEMP_FILE_JSON_BYTES if request_path == "/api/temporary/file" else MAX_JSON_BYTES
+        if length > max_bytes:
+            if length <= max(MAX_REJECT_DRAIN_BYTES, max_bytes):
                 remaining = length
                 while remaining > 0:
                     chunk = self.rfile.read(min(64 * 1024, remaining))
@@ -2073,7 +2081,7 @@ class VocabHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
             else:
                 self.close_connection = True
-            raise PayloadTooLarge(f"request body too large; max {MAX_JSON_BYTES} bytes")
+            raise PayloadTooLarge(f"request body too large; max {max_bytes} bytes")
         raw = decode_http_body(self.rfile.read(length))
         return json.loads(raw or "{}")
 
@@ -2356,7 +2364,8 @@ class VocabHandler(BaseHTTPRequestHandler):
                 "/api/share/room/read",
                 "/api/share/room/post",
             }:
-                if temporary_limited(self, "read"):
+                rate_scope = "room" if request_path.startswith("/api/share/room/") else "read"
+                if temporary_limited(self, rate_scope):
                     json_response(
                         self,
                         HTTPStatus.TOO_MANY_REQUESTS,

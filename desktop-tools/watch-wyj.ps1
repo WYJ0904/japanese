@@ -15,7 +15,7 @@ public static class WYJPowerState {
 }
 "@
 
-$WatchdogVersion = "3.5.0"
+$WatchdogVersion = "4.0.0"
 $Launcher = Join-Path $PSScriptRoot "start-wyj.ps1"
 $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $EntryRoot = if (-not [string]::IsNullOrWhiteSpace($env:WYJ_LAUNCHER_ENTRY_DIR)) {
@@ -28,17 +28,19 @@ $ProbeTempRoot = [IO.Path]::GetTempPath()
 $PythonProbeScriptPath = Join-Path $ProbeTempRoot "wyj-watchdog-http-health-probe.py"
 $LocalStatusUrl = "http://127.0.0.1:8765/api/status"
 $OllamaStatusUrl = "http://127.0.0.1:11434/api/tags"
-$PublicStatusUrls = @(
-    "https://thewyj.uk/api/status"
-)
+$CustomDomainStatusUrl = "https://thewyj.uk/api/status"
+$PagesFallbackStatusUrl = "https://japanese-6pa.pages.dev/api/status"
+$PublicStatusUrls = @($CustomDomainStatusUrl, $PagesFallbackStatusUrl)
 $TunnelMetricsUrl = "http://127.0.0.1:20241/metrics"
 $WebsiteRepairCooldownSeconds = 120
 $AiRepairCooldownSeconds = 600
 $RepairFailureLimit = 3
 $RepairSuspendSeconds = 1800
 $RepairTimeoutMilliseconds = 480000
-$PublicProbeGraceFailures = 1
-$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/3.5"
+$PublicProbeGraceFailures = 4
+$WebsiteFailureThreshold = 3
+$HealthySamplesToResetBackoff = 4
+$HealthProbeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 WYJHealthProbe/4.0"
 
 function Repair-DuplicatePathEnvironment {
     try {
@@ -215,11 +217,12 @@ function Get-RepairDelaySeconds {
         [ValidateRange(1, 100)][int]$FailureStreak,
         [ValidateRange(1, 3600)][int]$BaseCooldownSeconds
     )
-    if ($FailureStreak -ge $RepairFailureLimit) {
-        return $RepairSuspendSeconds
-    }
+    if ($FailureStreak -ge $RepairFailureLimit) { return $RepairSuspendSeconds }
     $multiplier = [Math]::Pow(2, [Math]::Max(0, $FailureStreak - 1))
-    return [int][Math]::Min($RepairSuspendSeconds, $BaseCooldownSeconds * $multiplier)
+    $baseDelay = [int][Math]::Min($RepairSuspendSeconds, $BaseCooldownSeconds * $multiplier)
+    $jitterMaximum = [Math]::Max(2, [int][Math]::Ceiling($baseDelay * 0.2))
+    $jitter = Get-Random -Minimum 0 -Maximum $jitterMaximum
+    return [int][Math]::Min($RepairSuspendSeconds, $baseDelay + $jitter)
 }
 
 function Test-LauncherBusy {
@@ -302,6 +305,8 @@ try {
     Write-WatchdogLog ("watchdog V" + $WatchdogVersion + " started")
     $websiteFailures = 0
     $publicValidationFailures = 0
+    $customDomainFailures = 0
+    $healthySamples = 0
     $aiFailures = 0
     $websiteRepairFailureStreak = 0
     $aiRepairFailureStreak = 0
@@ -311,42 +316,53 @@ try {
     while ($true) {
         Start-Sleep -Seconds $IntervalSeconds
         $localOk = Test-Endpoint -Url $LocalStatusUrl -RequireOk
-        $publicOk = $true
-        foreach ($publicStatusUrl in $PublicStatusUrls) {
-            if (-not (Test-Endpoint -Url $publicStatusUrl -RequireOk)) {
-                $publicOk = $false
-                break
-            }
-        }
+        $customPublicOk = Test-Endpoint -Url $PublicStatusUrls[0] -RequireOk
+        $fallbackPublicOk = if ($customPublicOk) { $false } else { Test-Endpoint -Url $PublicStatusUrls[1] -RequireOk }
+        $publicOk = ($customPublicOk -or $fallbackPublicOk)
         $connectorConnections = Get-TunnelHaConnections
         $connectorOk = ($connectorConnections -gt 0)
         $ollamaOk = Test-Endpoint -Url $OllamaStatusUrl
 
         if ($localOk -and $publicOk) {
             $websiteFailures = 0
-            $websiteRepairFailureStreak = 0
             $publicValidationFailures = 0
+            $healthySamples++
+            if ($healthySamples -ge $HealthySamplesToResetBackoff) {
+                $websiteRepairFailureStreak = 0
+            }
+            if (-not $customPublicOk -and $fallbackPublicOk) {
+                $customDomainFailures++
+                if ($customDomainFailures -eq 1 -or $customDomainFailures -eq $PublicProbeGraceFailures) {
+                    Write-WatchdogLog "custom domain probe failed while Pages fallback stayed healthy; tunnel restart skipped"
+                }
+            } else {
+                $customDomainFailures = 0
+            }
         } elseif ($localOk -and $connectorOk) {
+            $healthySamples = 0
             $publicValidationFailures++
             if ($publicValidationFailures -le $PublicProbeGraceFailures) {
                 $websiteFailures = 0
-                Write-WatchdogLog (
-                    "public HTTP validation failed once; " +
-                    "cloudflared still reports $connectorConnections active connection(s), allowing one grace interval"
-                )
+                if ($publicValidationFailures -eq 1 -or $publicValidationFailures -eq $PublicProbeGraceFailures) {
+                    Write-WatchdogLog (
+                        "public HTTP validation failure $publicValidationFailures/$PublicProbeGraceFailures; " +
+                        "cloudflared reports $connectorConnections active connection(s), allowing recovery time"
+                    )
+                }
             } else {
                 $websiteFailures++
-                Write-WatchdogLog (
-                    "website health failure {0}/2 local={1} public={2} tunnelConnections={3}; " +
-                    "connector metrics are not accepted as public availability" -f
+                Write-WatchdogLog ((
+                    "website health failure {0}/$WebsiteFailureThreshold local={1} public={2} tunnelConnections={3}; " +
+                    "connector metrics are not accepted as public availability") -f
                     $websiteFailures, $localOk, $publicOk, $connectorConnections
                 )
             }
         } else {
+            $healthySamples = 0
             $publicValidationFailures = 0
             $websiteFailures++
-            Write-WatchdogLog (
-                "website health failure {0}/2 local={1} public={2} tunnelConnections={3}" -f
+            Write-WatchdogLog ((
+                "website health failure {0}/$WebsiteFailureThreshold local={1} public={2} tunnelConnections={3}") -f
                 $websiteFailures, $localOk, $publicOk, $connectorConnections
             )
         }
@@ -362,7 +378,7 @@ try {
         }
 
         $now = Get-Date
-        if ($websiteFailures -ge 2 -and $now -ge $nextWebsiteRepairAt) {
+        if ($websiteFailures -ge $WebsiteFailureThreshold -and $now -ge $nextWebsiteRepairAt) {
             if (Test-LauncherBusy) {
                 Write-WatchdogLog "website repair deferred: launcher is already running"
                 $websiteFailures = 0

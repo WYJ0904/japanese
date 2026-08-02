@@ -410,6 +410,26 @@ class AccountStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.quiz_limit(self.store.get_user(dual_user["id"]), "japanese"))
         self.assertEqual(self.store.get_user(dual_user["id"])["membership"], "monthly")
 
+    def test_admin_membership_changes_survive_restarts_without_false_migration_failure(self):
+        user = self.register("restart-membership")
+        self.store.admin_manage_membership(
+            self.admin, user["id"], "grant", "dual_language_lifetime"
+        )
+
+        restarted = AccountStore(self.store.database_path, self.text_path)
+        payload = restarted.user_payload(restarted.get_user(user["id"]))
+        self.assertIn("language_all_access", payload["entitlements"])
+        self.assertNotIn("tools_access", payload["entitlements"])
+
+        restarted_admin = restarted.get_user(self.admin["id"])
+        restarted.admin_manage_membership(
+            restarted_admin, user["id"], "cancel", "dual_language_lifetime"
+        )
+        restarted_again = AccountStore(self.store.database_path, self.text_path)
+        payload = restarted_again.user_payload(restarted_again.get_user(user["id"]))
+        self.assertEqual(payload["membership"], "free")
+        self.assertNotIn("language_all_access", payload["entitlements"])
+
     def test_login_audit_is_bounded_protected_and_contains_no_secrets(self):
         user = self.register("audit-user", "AuditSecret1")
         context = {
@@ -681,7 +701,7 @@ class AccountStoreTests(unittest.TestCase):
         renewed_expiry = parse_time(renewed["expires_at"])
         self.assertGreater(renewed_expiry, original_expiry + timedelta(days=27))
 
-    def test_repeated_lifetime_payment_reuses_membership_without_duplicate_rights(self):
+    def test_repeated_japanese_lifetime_payment_reuses_membership_without_duplicate_rights(self):
         user = self.register("repeat-lifetime")
         request_ids = []
         for method in ("wechat", "alipay"):
