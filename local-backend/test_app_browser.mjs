@@ -254,45 +254,44 @@ async function main() {
   };
 
   try {
-    await check("startup, splash doors and unauthenticated route", async () => {
+    await check("brief branded startup and unauthenticated navigation", async () => {
       await navigate(`/?app-matrix=${RUN_ID}`);
       await waitFor("document.querySelector('#entryScreen')", 3_000, "initial splash");
       const initial = await evaluate(`(() => {
         const entry = document.querySelector('#entryScreen');
         const shell = document.querySelector('#appShell');
-        const scenes = [...document.querySelectorAll('.splash-door-scene')].map(node => node.getBoundingClientRect());
-        const image = document.querySelector('.splash-art');
+        const image = document.querySelector('.entry-logo');
         const imageStyle = getComputedStyle(image);
         return {
           entryVisible: getComputedStyle(entry).display !== 'none',
           shellHidden: shell.getAttribute('aria-hidden') === 'true' && shell.classList.contains('app-shell-pending'),
-          viewportWidth: document.documentElement.clientWidth,
-          scenes: scenes.map(rect => ({ x: Math.round(rect.x), width: Math.round(rect.width) })),
           imageReady: image.complete && image.naturalWidth > 0,
           objectFit: imageStyle.objectFit,
-          mask: imageStyle.webkitMaskImage || imageStyle.maskImage,
+          legacyDoors: document.querySelectorAll('.splash-door').length,
+          legacyBrandText: document.body.textContent.includes('77 79 6A'),
         };
       })()`);
       assert.equal(initial.entryVisible, true);
       assert.equal(initial.shellHidden, true);
       assert.equal(initial.imageReady, true);
       assert.equal(initial.objectFit, "contain");
-      assert.ok(initial.mask.includes("radial-gradient"));
-      assert.equal(initial.scenes.length, 2);
-      assert.ok(initial.scenes.every((scene) => scene.x === 0 && scene.width >= initial.viewportWidth), JSON.stringify(initial));
+      assert.equal(initial.legacyDoors, 0);
+      assert.equal(initial.legacyBrandText, false);
       await waitFor("!document.querySelector('#entryScreen')", 6_000, "splash removal");
       await waitFor("location.pathname === '/login' && !document.querySelector('#authPanel')?.classList.contains('hidden')", 8_000, "login route");
-      assert.equal(await evaluate("document.querySelector('#accountBar').classList.contains('hidden')"), true);
+      assert.equal(await evaluate("!document.querySelector('#accountBar').classList.contains('hidden')"), true);
+      assert.equal(await evaluate("!document.querySelector('#navGuestActions').classList.contains('hidden')"), true);
+      assert.equal(await evaluate("document.querySelector('#accountMenu').classList.contains('hidden')"), true);
       const pwa = await evaluate(`(async () => {
         const registration = await navigator.serviceWorker.ready;
         const cacheNames = await caches.keys();
         const cachedLogo = await caches.match('/assets/logo.png');
-        const cachedSplash = await caches.match('/assets/splash-screen.png');
-        return { active: Boolean(registration.active), cacheNames, cachedLogo: Boolean(cachedLogo), cachedSplash: Boolean(cachedSplash) };
+        const cachedProductStyles = await caches.match('/product-ui.css?v=20260803-clean-product-design');
+        return { active: Boolean(registration.active), cacheNames, cachedLogo: Boolean(cachedLogo), cachedProductStyles: Boolean(cachedProductStyles) };
       })()`);
       assert.equal(pwa.active, true);
       assert.equal(pwa.cachedLogo, true);
-      assert.equal(pwa.cachedSplash, true);
+      assert.equal(pwa.cachedProductStyles, true);
       const desktopShot = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
       fs.writeFileSync(path.join(TEST_ROOT, `desktop-app-${RUN_ID}.png`), Buffer.from(desktopShot.data, "base64"));
     });

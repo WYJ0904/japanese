@@ -1,4 +1,4 @@
-const APP_VERSION = "2026-08-02-network-resilience";
+const APP_VERSION = "2026-08-03-clean-product-design";
 const NORMAL_RESULT_VISIBLE_MS = 8000;
 const AI_RESULT_VISIBLE_MS = 10000;
 const SKIP_RESULT_VISIBLE_MS = 5000;
@@ -657,7 +657,24 @@ function renderAccountUi() {
   const badge = $("accountBadge");
   if (!badge) return;
   const summary = accountMembershipSummary(account);
-  $("accountBar")?.classList.toggle("hidden", !account);
+  $("accountBar")?.classList.remove("hidden");
+  $("navGuestActions")?.classList.toggle("hidden", Boolean(account));
+  $("accountMenu")?.classList.toggle("hidden", !account);
+  if (!account && $("accountMenu")) $("accountMenu").open = false;
+  if ($("navHomeLabel")) $("navHomeLabel").textContent = account ? "个人首页" : "首页";
+  const activeNavigation = location.pathname.startsWith("/language")
+    ? "language"
+    : location.pathname.startsWith("/tools")
+      ? "tools"
+      : ["/", "/select", "/login", "/register"].includes(location.pathname)
+        ? "home"
+        : "";
+  document.querySelectorAll(".site-nav-links [data-site-nav]").forEach((link) => {
+    const active = link.dataset.siteNav === activeNavigation;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
   badge.textContent = account ? `${account.username} · ${summary.name}` : "未登录";
   $("membershipBtn")?.classList.toggle("hidden", !account);
   $("accountBtn")?.classList.toggle("hidden", !account);
@@ -838,6 +855,8 @@ function showAuthMode(mode, updateRoute = false) {
   $("registerForm").classList.toggle("hidden", !register);
   $("showLoginBtn").classList.toggle("active", !register);
   $("showRegisterBtn").classList.toggle("active", register);
+  $("showLoginBtn").setAttribute("aria-selected", String(!register));
+  $("showRegisterBtn").setAttribute("aria-selected", String(register));
   $("authTitle").textContent = register ? "注册账户" : "账户登录";
   $("loginError").textContent = "";
   if (updateRoute) pushRoute(register ? "/register" : "/login");
@@ -2086,30 +2105,28 @@ function runSplashSequence(revealContent) {
   }
 
   const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-  const visibleMs = reducedMotion ? 260 : 2000;
-  const openingMs = reducedMotion ? 300 : 1150;
-  const images = Array.from(screen.querySelectorAll(".splash-art"));
-
-  const markImageFailed = () => {
-    screen.classList.add("image-failed");
-    screen.querySelectorAll(".splash-fallback").forEach((fallback) => {
-      fallback.setAttribute("aria-hidden", "false");
-    });
-  };
-  images.forEach((image) => image.addEventListener("error", markImageFailed, { once: true }));
-  if (images.some((image) => image.complete && !image.naturalWidth)) markImageFailed();
+  const visibleMs = reducedMotion ? 0 : 450;
+  const exitMs = reducedMotion ? 0 : 180;
+  const image = $("splashImage");
+  const markImageFailed = () => screen.classList.add("image-failed");
+  image?.addEventListener("error", markImageFailed, { once: true });
+  if (image?.complete && !image.naturalWidth) markImageFailed();
 
   return new Promise((resolve) => {
     window.setTimeout(() => {
       revealContent?.();
+      const finish = () => {
+        screen.setAttribute("aria-hidden", "true");
+        screen.remove();
+        resolve();
+      };
+      if (reducedMotion) {
+        finish();
+        return;
+      }
       window.requestAnimationFrame(() => {
-        screen.classList.add("is-opening");
-        window.setTimeout(() => {
-          screen.classList.add("is-hidden");
-          screen.setAttribute("aria-hidden", "true");
-          screen.remove();
-          resolve();
-        }, openingMs);
+        screen.classList.add("is-exiting");
+        window.setTimeout(finish, exitMs);
       });
     }, visibleMs);
   });
@@ -4703,6 +4720,29 @@ function scheduleBackendRecovery(baseDelayMs = 250) {
   }, retryDelayWithJitter(baseDelayMs));
 }
 
+function closeAccountMenu() {
+  const menu = $("accountMenu");
+  if (menu) menu.open = false;
+}
+
+async function navigateFromSiteNav(destination) {
+  closeAccountMenu();
+  if (destination === "home") {
+    if (state.session && state.account) showModulePicker(true);
+    else showAuth("", { path: "/login" });
+    return;
+  }
+  if (destination === "language") {
+    if (state.session && state.account) showProjectPicker(true);
+    else showAuth("请先登录后使用语言学习", { path: "/login" });
+    return;
+  }
+  if (destination === "tools") {
+    if (state.session && state.account) await showTools("/tools", true);
+    else showAuth("请先登录后使用在线工具", { path: "/login" });
+  }
+}
+
 async function boot() {
   if (state.account?.id) loadAccountLocalState();
   else resetLocalViewState();
@@ -4721,11 +4761,17 @@ async function boot() {
   $("registerForm").addEventListener("submit", registerAccount);
   $("showLoginBtn").addEventListener("click", () => showAuthMode("login", true));
   $("showRegisterBtn").addEventListener("click", () => showAuthMode("register", true));
-  $("membershipBtn").addEventListener("click", async () => { pushRoute("/recharge"); await openMembershipModal(); });
-  $("accountBtn").addEventListener("click", () => { pushRoute("/account"); openModal("accountModal"); });
-  $("homeBtn").addEventListener("click", () => showModulePicker(true));
-  $("adminBtn").addEventListener("click", () => showAdminPanel(true));
-  $("logoutBtn").addEventListener("click", logoutAccount);
+  $("navLoginBtn").addEventListener("click", () => showAuth("", { mode: "login", path: "/login" }));
+  $("navRegisterBtn").addEventListener("click", () => showAuth("", { mode: "register", path: "/register" }));
+  document.querySelectorAll("[data-site-nav]").forEach((link) => link.addEventListener("click", async (event) => {
+    event.preventDefault();
+    await navigateFromSiteNav(link.dataset.siteNav);
+  }));
+  $("membershipBtn").addEventListener("click", async () => { closeAccountMenu(); pushRoute("/recharge"); await openMembershipModal(); });
+  $("accountBtn").addEventListener("click", () => { closeAccountMenu(); pushRoute("/account"); openModal("accountModal"); });
+  $("homeBtn").addEventListener("click", () => { closeAccountMenu(); showModulePicker(true); });
+  $("adminBtn").addEventListener("click", () => { closeAccountMenu(); showAdminPanel(true); });
+  $("logoutBtn").addEventListener("click", () => { closeAccountMenu(); logoutAccount(); });
   $("submitRechargeBtn").addEventListener("click", submitRechargeRequest);
   $("confirmPaymentBtn").addEventListener("click", confirmRechargePayment);
   $("cancelPaymentOrderBtn").addEventListener("click", cancelRechargeOrder);
@@ -4740,9 +4786,16 @@ async function boot() {
     if (event.key !== "Escape") return;
     const openModals = [...document.querySelectorAll(".modal-layer:not(.hidden)")];
     const modal = openModals[openModals.length - 1];
-    if (!modal) return;
+    if (!modal) {
+      closeAccountMenu();
+      return;
+    }
     if (modal.id === "confirmModal") confirmAction = null;
     closeModal(modal.id);
+  });
+  document.addEventListener("click", (event) => {
+    const menu = $("accountMenu");
+    if (menu?.open && !menu.contains(event.target)) closeAccountMenu();
   });
   $("changeSecretForm").addEventListener("submit", changeOwnSecret);
   $("toggleCurrentSecretBtn").addEventListener("click", () => setSecretFieldsVisibility(["currentSecretInput"], "toggleCurrentSecretBtn", $("currentSecretInput").type === "password"));
@@ -4754,7 +4807,11 @@ async function boot() {
   $("leaveAdminBtn").addEventListener("click", leaveAdminPanel);
   $("adminUserSearch").addEventListener("input", () => renderAdminUsers());
   document.querySelectorAll("[data-admin-view]").forEach((button) => button.addEventListener("click", () => {
-    document.querySelectorAll("[data-admin-view]").forEach((item) => item.classList.toggle("active", item === button));
+    document.querySelectorAll("[data-admin-view]").forEach((item) => {
+      const active = item === button;
+      item.classList.toggle("active", active);
+      item.setAttribute("aria-selected", String(active));
+    });
     document.querySelectorAll(".admin-view").forEach((view) => view.classList.toggle("active", view.id === button.dataset.adminView));
   }));
   $("saveAdminMembershipBtn").addEventListener("click", saveAdminMembership);

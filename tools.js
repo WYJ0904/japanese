@@ -2,12 +2,24 @@
   "use strict";
 
   const CATEGORY_DEFINITIONS = [
-    { id: "text", name: "文本处理工具箱", mark: "Aa", description: "清理、转换、提取、编码与 JSON 处理" },
-    { id: "file", name: "文件处理中心", mark: "F", description: "哈希、转换、拆分、合并、PDF 与 ZIP" },
-    { id: "image", name: "图片与设计工具", mark: "◫", description: "压缩、格式、尺寸、裁剪、水印与配色" },
-    { id: "random", name: "随机生成器中心", mark: "#", description: "安全密码、抽签、分组、颜色、日期与骰子" },
-    { id: "temporary", name: "临时工具", mark: "T", description: "临时文本、文件、剪贴板、二维码与留言房间" },
+    { id: "text", name: "文本处理工具箱", description: "清理、转换、提取、编码与 JSON 处理" },
+    { id: "file", name: "文件处理中心", description: "哈希、转换、拆分、合并、PDF 与 ZIP" },
+    { id: "image", name: "图片与设计工具", description: "压缩、格式、尺寸、裁剪、水印与配色" },
+    { id: "random", name: "随机生成器中心", description: "安全密码、抽签、分组、颜色、日期与骰子" },
+    { id: "temporary", name: "临时工具", description: "临时文本、文件、剪贴板、二维码与留言房间" },
   ];
+
+  const ICON_PATHS = {
+    text: '<path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+    file: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+    image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m4 17 5-5 4 4 2-2 5 5"/>',
+    random: '<path d="M4 7h3l10 10h3"/><path d="m17 14 3 3-3 3M4 17h3l3-3M14 10l3-3h3M17 4l3 3-3 3"/>',
+    temporary: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    bookmark: '<path d="M7 4h10v16l-5-3-5 3z"/>',
+    delete: '<path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6M10 11v5m4-5v5"/>',
+  };
+
+  const iconSvg = (name, className = "ui-icon") => `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICON_PATHS[name] || ""}</svg>`;
 
   async function fetchStaticText(url, timeoutMs = 10000) {
     const controller = typeof AbortController === "undefined" ? null : new AbortController();
@@ -320,7 +332,7 @@
     target.innerHTML = CATEGORY_DEFINITIONS.map((category) => {
       const count = TOOLS.filter((tool) => tool.category === category.id).length;
       return `<button class="tool-category-card${currentCategory === category.id ? " active" : ""}" type="button" data-tool-category="${category.id}">
-        <span class="tool-category-mark" aria-hidden="true">${category.mark}</span>
+        <span class="tool-category-mark" aria-hidden="true">${iconSvg(category.id)}</span>
         <span><strong>${category.name}</strong><small>${category.description}</small><em>${count} 个工具</em></span>
       </button>`;
     }).join("");
@@ -340,8 +352,8 @@
     const favorite = favoriteFor(tool.id);
     const category = categoryFor(tool);
     return `<article class="tool-card" data-tool-card="${tool.id}">
-      <button class="tool-open" type="button" data-open-tool="${tool.id}"><span>${category.mark}</span><strong>${tool.name}</strong><small>${tool.description}</small><em>${category.name}</em></button>
-      <button class="tool-card-favorite${favorite ? " active" : ""}" type="button" data-toggle-favorite="${tool.id}" aria-label="${favorite ? "取消收藏" : "收藏"}">${favorite ? "★" : "☆"}</button>
+      <button class="tool-open" type="button" data-open-tool="${tool.id}"><span>${iconSvg(category.id)}</span><strong>${tool.name}</strong><small>${tool.description}</small><em>${category.name}</em></button>
+      <button class="tool-card-favorite${favorite ? " active" : ""}" type="button" data-toggle-favorite="${tool.id}" aria-label="${favorite ? "取消收藏" : "收藏"}">${iconSvg("bookmark", "ui-icon bookmark-icon")}</button>
     </article>`;
   }
 
@@ -368,7 +380,7 @@
     favoriteSection?.classList.toggle("hidden", !favoriteTools.length);
     recentSection?.classList.toggle("hidden", !recentTools.length);
     if (byId("favoriteToolsList")) {
-      byId("favoriteToolsList").innerHTML = favoriteTools.map((tool) => `<button type="button" data-open-tool="${tool.id}">${favoriteFor(tool.id)?.pinned ? "● " : ""}${tool.name}</button>`).join("");
+      byId("favoriteToolsList").innerHTML = favoriteTools.map((tool) => `<button type="button" data-open-tool="${tool.id}">${favoriteFor(tool.id)?.pinned ? "已固定 · " : ""}${tool.name}</button>`).join("");
       bindToolButtons(byId("favoriteToolsList"));
     }
     if (byId("recentToolsList")) {
@@ -413,7 +425,7 @@
     const configs = configsFor(toolId);
     return `<section class="tool-config-box">
       <div><input id="toolConfigName" maxlength="80" placeholder="配置名称" /><button id="saveToolConfigBtn" type="button">保存当前参数</button></div>
-      <div class="saved-config-list" id="savedToolConfigList">${configs.map((item) => `<span><button type="button" data-load-config="${item.id}">${escapeHtml(item.name)}</button><button type="button" data-delete-config="${item.id}" aria-label="删除配置">×</button></span>`).join("") || "<small>暂无已保存配置</small>"}</div>
+      <div class="saved-config-list" id="savedToolConfigList">${configs.map((item) => `<span><button type="button" data-load-config="${item.id}">${escapeHtml(item.name)}</button><button type="button" data-delete-config="${item.id}" aria-label="删除配置">${iconSvg("delete")}</button></span>`).join("") || "<small>暂无已保存配置</small>"}</div>
     </section>`;
   }
 

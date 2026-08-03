@@ -1,20 +1,21 @@
-const CACHE = "wyj-shell-20260802-network-resilience";
+const CACHE = "wyj-shell-20260803-clean-product-design";
 const NAVIGATION_TIMEOUT_MS = 5000;
 const ASSET_TIMEOUT_MS = 10000;
 const CORE_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=20260802-network-resilience",
-  "/app.js?v=20260802-network-resilience",
-  "/tools.js?v=20260802-network-resilience",
+  "/styles.css?v=20260803-clean-product-design",
+  "/product-ui.css?v=20260803-clean-product-design",
+  "/app.js?v=20260803-clean-product-design",
+  "/tools.js?v=20260803-clean-product-design",
   "/vendor/qrcode.js?v=2.0.4",
   "/vendor/opencc-st-characters.txt",
   "/vendor/opencc-ts-characters.txt",
-  "/manifest.webmanifest?v=20260802-network-resilience",
+  "/manifest.webmanifest?v=20260803-clean-product-design",
   "/icon-192.png",
   "/icon-512.png",
 ];
-const OPTIONAL_BRAND_ASSETS = ["/assets/logo.png", "/assets/splash-screen.png"];
+const OPTIONAL_BRAND_ASSETS = ["/assets/logo.png"];
 
 async function fetchWithDeadline(input, timeoutMs) {
   if (typeof AbortController === "undefined") return fetch(input);

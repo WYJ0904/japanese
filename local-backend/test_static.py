@@ -28,6 +28,7 @@ class StaticSiteTests(unittest.TestCase):
         cls.app = (ROOT / "app.js").read_text(encoding="utf-8")
         cls.tools = (ROOT / "tools.js").read_text(encoding="utf-8")
         cls.styles = (ROOT / "styles.css").read_text(encoding="utf-8")
+        cls.product_styles = (ROOT / "product-ui.css").read_text(encoding="utf-8")
         cls.worker = (ROOT / "sw.js").read_text(encoding="utf-8")
 
     def test_html_ids_are_unique_and_app_references_exist(self):
@@ -45,6 +46,7 @@ class StaticSiteTests(unittest.TestCase):
             "moduleAccessMessage", "paymentMethodList", "paymentMethod",
             "paymentQrWrap", "paymentQrImage", "paymentQrMessage", "aiSearchInput",
             "aiSearchResults", "cancelPaymentOrderBtn",
+            "navGuestActions", "navLoginBtn", "navRegisterBtn", "accountMenu",
         }
         self.assertEqual(sorted(required - html_ids), [])
 
@@ -53,6 +55,8 @@ class StaticSiteTests(unittest.TestCase):
         self.assertEqual(manifest["name"], "WYJ\u7684\u7f51\u7ad9")
         self.assertEqual(manifest["short_name"], "WYJ")
         self.assertEqual(manifest["start_url"], "/")
+        self.assertEqual(manifest["background_color"], "#f6f8fb")
+        self.assertEqual(manifest["theme_color"], "#ffffff")
         cache_source = self.worker.split("const CORE_SHELL = [", 1)[1].split("];", 1)[0]
         cache_source += self.worker.split("const OPTIONAL_BRAND_ASSETS = [", 1)[1].split("];", 1)[0]
         cached_paths = re.findall(r'"(/[^"?]+)(?:\?[^\"]+)?"', cache_source)
@@ -61,16 +65,32 @@ class StaticSiteTests(unittest.TestCase):
                 continue
             self.assertTrue((ROOT / path.lstrip("/")).exists(), path)
         self.assertIn("/assets/logo.png", self.worker)
-        self.assertIn("/assets/splash-screen.png", self.worker)
+        self.assertNotIn("/assets/splash-screen.png", self.worker)
         self.assertRegex(self.worker, r'const CACHE = "wyj-shell-[^"]+"')
-        release_token = "20260802-network-resilience"
-        for asset in ("manifest.webmanifest", "styles.css", "tools.js", "app.js"):
+        release_token = "20260803-clean-product-design"
+        for asset in ("manifest.webmanifest", "styles.css", "product-ui.css", "tools.js", "app.js"):
             self.assertIn(f'/{asset}?v={release_token}', self.html)
             self.assertIn(f'/{asset}?v={release_token}', self.worker)
         self.assertIn(f'const CACHE = "wyj-shell-{release_token}"', self.worker)
-        self.assertIn('const APP_VERSION = "2026-08-02-network-resilience"', self.app)
+        self.assertIn('const APP_VERSION = "2026-08-03-clean-product-design"', self.app)
         server = (ROOT / "local-backend" / "server.py").read_text(encoding="utf-8")
         self.assertIn('APP_BUILD = "2026-08-02-network-resilience"', server)
+
+    def test_clean_product_design_contract(self):
+        for legacy_markup in ("splash-door", "77 79 6A", "lock-mark", ">WORKSPACE<", ">LANGUAGE<"):
+            self.assertNotIn(legacy_markup, self.html)
+        for token in (
+            "--color-background", "--color-surface", "--color-text", "--color-text-muted",
+            "--color-border", "--color-primary", "--color-success", "--color-warning",
+            "--color-error", "--radius-control", "--radius-card", "--shadow-card",
+            "--space-4", "--font-md", "--duration-normal",
+        ):
+            self.assertIn(token, self.product_styles)
+        self.assertIn('id="accountBar" aria-label="主导航"', self.html)
+        self.assertIn('data-site-nav="language"', self.html)
+        self.assertIn('data-site-nav="tools"', self.html)
+        self.assertIn('class="auth-logo"', self.html)
+        self.assertNotRegex(self.html, r">\s*[文+×↕]\s*<")
 
     def test_tool_catalog_is_complete_and_unique(self):
         source = self.tools.split("const toolRows = {", 1)[1].split("const TOOLS =", 1)[0]
@@ -273,7 +293,8 @@ class StaticSiteTests(unittest.TestCase):
         self.assertIn('id="wordReading"', self.html)
         question_forms = self.app.split("async function ensureJapaneseQuestionForms", 1)[1].split("async function startQuiz", 1)[0]
         self.assertIn("if (!dictation) return hasJapaneseKanji(word) && !hasReading;", question_forms)
-        self.assertIn('$("accountBar")?.classList.toggle("hidden", !account);', self.app)
+        self.assertIn('$("navGuestActions")?.classList.toggle("hidden", Boolean(account));', self.app)
+        self.assertIn('$("accountMenu")?.classList.toggle("hidden", !account);', self.app)
         boot_source = self.app.split("async function boot()", 1)[1]
         self.assertIn("const shouldResumeWorkspace = Boolean(state.session && state.account);", boot_source)
         self.assertIn('if (shouldResumeWorkspace && state.session && state.account) pendingScreen = "workspace";', boot_source)

@@ -8,7 +8,7 @@
 
 ## 技术栈与部署结构
 
-- 前端：`index.html`、`styles.css`、`app.js`、`tools.js`
+- 前端：`index.html`、`styles.css`、`product-ui.css`、`app.js`、`tools.js`
 - PWA：`manifest.webmanifest`、`sw.js`
 - Pages Functions：`functions/api/[[path]].js`，把同源 `/api/*` 请求代理到固定 Tunnel
 - 后端：Python 3.8+ 标准库 `ThreadingHTTPServer`
@@ -23,7 +23,7 @@
 
 ```text
 打开或刷新
--> 全屏启动动画
+-> 短暂品牌加载提示
 -> 未登录进入 /login 或 /register
 -> 已登录进入 /select
 -> 选择语言测试或在线工具箱
