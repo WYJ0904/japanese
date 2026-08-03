@@ -2,51 +2,341 @@ name: Core CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: core-ci-${{ github.workflow }}-${{ github.ref }}
+  group: core-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  core-tests:
+  python-tests:
+    name: Python syntax and unittest
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Restore Python download cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-python-downloads-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-python-downloads-
+
+      - name: Check Python syntax
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            python -m compileall -q local-backend scripts
+            echo "Python syntax check passed."
+          } 2>&1 | tee artifacts/python-syntax.log
+
+      - name: Run Python unittest suite
+        run: |
+          set -euo pipefail
+          cd local-backend
+          python -m unittest discover -p "test_*.py" -v 2>&1 | tee ../artifacts/python-unittest.log
+
+      - name: Upload Python reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-reports-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  javascript-static-tests:
+    name: JavaScript and static site checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Restore Node download cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-downloads-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-downloads-
+
+      - name: Check JavaScript syntax
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            node --check app.js
+            node --check tools.js
+            node --check sw.js
+            node --check "functions/api/[[path]].js"
+            node --check local-backend/test_tools_js.mjs
+            node --check local-backend/test_proxy_js.mjs
+            node --check local-backend/test_app_browser.mjs
+            node --check local-backend/test_tools_browser.mjs
+          } 2>&1 | tee artifacts/javascript-syntax.log
+
+      - name: Test JavaScript tools
+        run: |
+          set -euo pipefail
+          node local-backend/test_tools_js.mjs 2>&1 | tee artifacts/javascript-tools.log
+
+      - name: Test Pages API proxy
+        run: |
+          set -euo pipefail
+          node local-backend/test_proxy_js.mjs 2>&1 | tee artifacts/pages-proxy.log
+
+      - name: Check HTML, PWA and tool catalog
+        run: |
+          set -euo pipefail
+          cd local-backend
+          python -m unittest test_static.py -v 2>&1 | tee ../artifacts/static-site.log
+
+      - name: Upload JavaScript and static reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: javascript-static-reports-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  sensitive-file-check:
+    name: Sensitive files and static naming
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Audit repository contents
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          python scripts/repository_audit.py 2>&1 | tee artifacts/repository-audit.log
+
+      - name: Upload repository audit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: repository-audit-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  browser-tests:
+    name: Browser flow (${{ matrix.suite }})
+    needs:
+      - python-tests
+      - javascript-static-tests
+      - sensitive-file-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: application
+            script: local-backend/test_app_browser.mjs
+          - suite: toolbox
+            script: local-backend/test_tools_browser.mjs
+    env:
+      WYJ_TEST_BASE: http://127.0.0.1:8892
+      WYJ_CDP_URL: http://127.0.0.1:9223
+      VOCAB_STATIC_DIR: ${{ github.workspace }}
+      OLLAMA_HOST: http://127.0.0.1:11435
+      OLLAMA_TIMEOUT_SEC: "5"
+      VOCAB_AI_QUEUE_TIMEOUT_SEC: "1"
+      NO_PROXY: 127.0.0.1,localhost
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
 
-      - name: Audit tracked files and membership naming
-        run: python scripts/repository_audit.py
+      - name: Restore browser-test download caches
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.npm
+          key: ${{ runner.os }}-browser-downloads-${{ hashFiles('**/requirements*.txt', '**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-browser-downloads-
 
-      - name: Run Python backend tests
-        working-directory: local-backend
-        run: python -m unittest discover -p "test_*.py" -v
-
-      - name: Check JavaScript syntax
+      - name: Prepare isolated browser data
         run: |
-          node --check app.js
-          node --check tools.js
-          node --check sw.js
-          node --check "functions/api/[[path]].js"
+          set -euo pipefail
+          runtime_root="${RUNNER_TEMP}/wyj-browser-${{ matrix.suite }}"
+          export VOCAB_USERS_DB="${runtime_root}/users.sqlite3"
+          export VOCAB_USERS_TXT="${runtime_root}/users.txt"
+          export VOCAB_PAYMENT_QR_DIR="${runtime_root}/payment/qrcodes"
+          mkdir -p artifacts "$runtime_root" "$VOCAB_PAYMENT_QR_DIR"
 
-      - name: Test Pages API proxy
-        run: node local-backend/test_proxy_js.mjs
+          admin_secret="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$admin_secret"
+          {
+            echo "VOCAB_USERS_DB=$VOCAB_USERS_DB"
+            echo "VOCAB_USERS_TXT=$VOCAB_USERS_TXT"
+            echo "VOCAB_PAYMENT_QR_DIR=$VOCAB_PAYMENT_QR_DIR"
+            echo "VOCAB_ADMIN_SECRET=$admin_secret"
+            echo "VOCAB_SHARE_HMAC_KEY=$admin_secret"
+            echo "WYJ_TEST_ADMIN_SECRET=$admin_secret"
+          } >> "$GITHUB_ENV"
 
-      - name: Test JavaScript tools
-        run: node local-backend/test_tools_js.mjs
+          python - <<'PY'
+          import base64
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path("local-backend").resolve()))
+          from membership import PURCHASABLE_PLAN_CODES
+          from payment_assets import PAYMENT_METHODS
+
+          pixel = base64.b64decode(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+          )
+          root = Path(os.environ["VOCAB_PAYMENT_QR_DIR"])
+          root.mkdir(parents=True, exist_ok=True)
+          for method in PAYMENT_METHODS:
+              for plan_code in PURCHASABLE_PLAN_CODES:
+                  (root / f"{method}_{plan_code}.png").write_bytes(pixel)
+          print(f"Prepared {len(PAYMENT_METHODS) * len(PURCHASABLE_PLAN_CODES)} synthetic QR fixtures.")
+          PY
+
+      - name: Start isolated backend, AI fixture and headless Chrome
+        run: |
+          set -euo pipefail
+          chrome_bin="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          if [[ -z "$chrome_bin" ]]; then
+            echo "No Chrome or Chromium executable is available on this runner." >&2
+            exit 1
+          fi
+
+          python local-backend/ci_ollama_stub.py --host 127.0.0.1 --port 11435 \
+            > "artifacts/ollama-fixture-${{ matrix.suite }}.log" \
+            2>&1 < /dev/null &
+          echo "$!" > "artifacts/ollama-fixture-${{ matrix.suite }}.pid"
+
+          python local-backend/server.py --host 127.0.0.1 --port 8892 \
+            > "artifacts/backend-${{ matrix.suite }}.log" \
+            2>&1 < /dev/null &
+          echo "$!" > "artifacts/backend-${{ matrix.suite }}.pid"
+
+          "$chrome_bin" \
+            --headless=new \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-background-networking \
+            --remote-allow-origins=* \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port=9223 \
+            --user-data-dir="${RUNNER_TEMP}/wyj-chrome-${{ matrix.suite }}" \
+            about:blank \
+            > "artifacts/chrome-${{ matrix.suite }}.log" \
+            2>&1 < /dev/null &
+          echo "$!" > "artifacts/chrome-${{ matrix.suite }}.pid"
+
+          python - <<'PY'
+          import json
+          import time
+          import urllib.request
+
+          endpoints = (
+              ("AI fixture", "http://127.0.0.1:11435/api/tags"),
+              ("backend", "http://127.0.0.1:8892/api/status"),
+              ("chrome", "http://127.0.0.1:9223/json/version"),
+          )
+          deadline = time.monotonic() + 30
+          pending = dict(endpoints)
+          while pending and time.monotonic() < deadline:
+              for name, url in tuple(pending.items()):
+                  try:
+                      with urllib.request.urlopen(url, timeout=1) as response:
+                          payload = json.loads(response.read().decode("utf-8"))
+                          if response.status == 200 and payload:
+                              pending.pop(name)
+                  except Exception:
+                      pass
+              if pending:
+                  time.sleep(0.25)
+          if pending:
+              raise SystemExit("Services did not become ready: " + ", ".join(sorted(pending)))
+          print("Isolated backend and Chrome are ready.")
+          PY
+
+      - name: Run real browser flow
+        run: |
+          set -euo pipefail
+          node "${{ matrix.script }}" 2>&1 | tee "artifacts/browser-${{ matrix.suite }}.log"
+
+      - name: Stop isolated services
+        if: always()
+        run: |
+          for pid_file in artifacts/*.pid; do
+            [[ -f "$pid_file" ]] || continue
+            pid="$(cat "$pid_file")"
+            kill "$pid" 2>/dev/null || true
+          done
+
+      - name: Upload browser reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-${{ matrix.suite }}-reports-${{ github.run_attempt }}
+          path: |
+            artifacts/
+            .tool-e2e/*.png
+          if-no-files-found: warn
+          retention-days: 7

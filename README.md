@@ -1,5 +1,7 @@
 # WYJ的网站
 
+[![Core CI](https://github.com/WYJ0904/thewyj.uk/actions/workflows/ci.yml/badge.svg)](https://github.com/WYJ0904/thewyj.uk/actions/workflows/ci.yml)
+
 这是部署在 Cloudflare Pages 上的语言测试与在线工具箱。前端是纯 HTML/CSS/JavaScript，账户、会员、临时分享、PDF 和本地 AI 由 Python 标准库后端提供，公网通过 Cloudflare Tunnel 访问本机后端。
 
 正式网站：<https://thewyj.uk>
@@ -309,9 +311,18 @@ node local-backend/test_tools_js.mjs
 node local-backend/test_proxy_js.mjs
 ```
 
-`.github/workflows/ci.yml` 会在每次 push 和 pull request 上运行上述 Python 核心测试、JavaScript 语法检查、Pages API 代理测试、工具逻辑测试及仓库敏感文件/静态名称审计。CI 不读取本机目录，也不需要二维码、数据库、账号、密钥或 Tunnel 凭据。
+`.github/workflows/ci.yml` 在推送到 `main`、所有 Pull Request 以及手动触发时运行。进入仓库的 **Actions -> Core CI -> Run workflow** 可手动执行。工作流分为：
 
-两个浏览器矩阵依赖一个隔离后端和启用了 CDP 的本地 Chrome，因此不作为 Linux CI 的强制步骤。准备好 `WYJ_TEST_BASE`、`WYJ_CDP_URL` 和仅用于隔离测试库的 `WYJ_TEST_ADMIN_SECRET` 后，本地运行：
+- `Python syntax and unittest`：Python 语法检查和完整 `unittest`；
+- `JavaScript and static site checks`：JavaScript 语法、工具测试、Pages 代理测试，以及 HTML、PWA 和工具目录检查；
+- `Sensitive files and static naming`：检查敏感运行文件、凭据特征、旧仓库名和会员静态名称；
+- `Browser flow (application/toolbox)`：两个并行的真实无头 Chrome 流程，分别覆盖完整网站流程和 103 个在线工具。
+
+浏览器 job 会为每个矩阵项创建独立的临时 SQLite、随机测试管理员密钥、合成的 1 像素二维码和确定性的 Ollama 兼容测试夹具，只访问 `127.0.0.1` 上的隔离服务，不读取真实账户、生产服务、真实 Ollama、Cloudflare Tunnel 或真实收款二维码。测试夹具仅让既有浏览器流程稳定覆盖 AI 入口，不进行真实模型推理。依赖缓存仅保存 `pip`/`npm` 下载缓存，不缓存源码、测试输出或通过结果。每个 job 无论成功失败都会上传关键日志，保留 7 天。
+
+本地运行浏览器矩阵时，需要先启动一个使用隔离数据库和测试管理员密钥的后端，并以 `--remote-debugging-port=9223` 启动 Chrome。准备好 `WYJ_TEST_BASE`、`WYJ_CDP_URL` 和仅用于隔离测试库的 `WYJ_TEST_ADMIN_SECRET` 后执行：
+
+若本机没有 Ollama，可在单独终端运行 `python local-backend/ci_ollama_stub.py --host 127.0.0.1 --port 11435`，并在启动隔离后端前设置 `OLLAMA_HOST=http://127.0.0.1:11435`。该夹具只适用于测试，不能作为生产 AI 服务。
 
 ```powershell
 node local-backend/test_app_browser.mjs
@@ -322,15 +333,15 @@ node local-backend/test_tools_browser.mjs
 
 ## Cloudflare Pages 配置
 
-### GitHub 仓库改名待办
+### GitHub 仓库
 
-当前 GitHub 仓库仍是 `WYJ0904/japanese`，目标名称是 `WYJ0904/thewyj.uk`；代码提交不能代替 Repository Settings 中的改名。仓库所有者需要进入 **Settings -> General -> Repository name**，输入 `thewyj.uk` 并确认 Rename。完成后在本地仓库执行：
+当前仓库为 `WYJ0904/thewyj.uk`。新环境可直接克隆：
 
 ```powershell
-git remote set-url origin https://github.com/WYJ0904/thewyj.uk.git
+git clone https://github.com/WYJ0904/thewyj.uk.git
 ```
 
-随后在 Cloudflare Pages 的 Git 集成页面确认仓库仍连接到改名后的项目和 `main` 分支；在改名前继续使用当前 `WYJ0904/japanese` 仓库。
+已有本地副本可用 `git remote set-url origin https://github.com/WYJ0904/thewyj.uk.git` 更新远端。Cloudflare Pages 的 Git 集成应连接此仓库的 `main` 分支；网站域名仍为 `thewyj.uk`。
 
 | 设置 | 值 |
 | --- | --- |
@@ -341,7 +352,7 @@ git remote set-url origin https://github.com/WYJ0904/thewyj.uk.git
 
 部署步骤：
 
-1. 推送 `main` 到当前 GitHub 仓库；完成上述改名后其地址应为 `WYJ0904/thewyj.uk`。
+1. 推送 `main` 到 `WYJ0904/thewyj.uk`。
 2. Cloudflare Pages 连接该仓库和 `main`。
 3. 设置 `LOCAL_API_BASE=https://api.thewyj.uk`。
 4. 部署后检查 `/api/status`、登录、`/select`、无权限 `/tools` 拦截和管理员审批。

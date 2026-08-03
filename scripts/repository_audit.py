@@ -23,6 +23,10 @@ SECRET_PATTERNS = {
     "GitHub token": re.compile(r"gh[pousr]_[A-Za-z0-9_]{30,}"),
     "API key": re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
     "AWS access key": re.compile(r"AKIA[0-9A-Z]{16}"),
+    "Cloudflare or Tunnel token": re.compile(
+        r"(?im)\b(?:CLOUDFLARE_API_TOKEN|CF_API_TOKEN|TUNNEL_TOKEN|CF_TUNNEL_TOKEN)"
+        r"\s*[:=]\s*['\"]?[A-Za-z0-9._~-]{20,}"
+    ),
 }
 PRIVATE_PATH_PATTERNS = (
     re.compile(r"[A-Za-z]:[\\/]Users[\\/][^\\/\r\n]+", re.IGNORECASE),
@@ -57,13 +61,22 @@ def sensitive_path_reason(relative: str) -> str:
         marker in name for marker in (".sqlite-", ".sqlite3-", ".db-")
     ):
         return "database"
-    if lower.startswith("local-backend/data/") or name == "users.txt":
+    if "data" in parts or name == "users.txt":
         return "account runtime data"
-    if "/payment/qrcodes/" in f"/{lower}" and suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+    if (
+        "/payment/qrcodes/" in f"/{lower}"
+        or (("payment" in lower or "收款" in lower) and ("qr" in name or "二维码" in name))
+    ) and suffix in {".png", ".jpg", ".jpeg", ".webp"}:
         return "private payment QR image"
-    if suffix in {".pem", ".key", ".p12", ".pfx"} or name == "credentials.json":
+    if (
+        suffix in {".pem", ".key", ".p12", ".pfx"}
+        or name == "credentials.json"
+        or (".cloudflared" in parts and suffix in {".json", ".yml", ".yaml", ".pem"})
+    ):
         return "credential material"
-    if suffix == ".log" or any(marker in name for marker in ("日志", "错误报告", "后台启动错误")):
+    if suffix in {".log", ".trace"} or name.endswith((".out", ".err")) or any(
+        marker in name for marker in ("日志", "错误报告", "后台启动错误")
+    ):
         return "runtime log or error report"
     return ""
 
@@ -103,7 +116,11 @@ def main() -> int:
         for label, pattern in SECRET_PATTERNS.items():
             if pattern.search(text):
                 errors.append(f"{relative}: contains a possible {label}")
-        if not is_audit_script and relative != "README.md" and any(
+        if Path(relative).name.lower() in {"config.yml", "config.yaml"} and re.search(
+            r"(?im)^\s*tunnel\s*:", text
+        ) and re.search(r"(?im)^\s*credentials-file\s*:", text):
+            errors.append(f"{relative}: contains a Cloudflare Tunnel configuration")
+        if not is_audit_script and any(
             pattern.search(text) for pattern in OLD_REPOSITORY_PATTERNS
         ):
             errors.append(f"{relative}: contains the old GitHub repository name")
@@ -133,14 +150,12 @@ def main() -> int:
         errors.append("account_store.py: legacy membership compatibility is undocumented")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    if "当前 GitHub 仓库仍是 `WYJ0904/japanese`" not in readme:
-        errors.append("README.md: current repository rename status is missing")
-    if readme.count("WYJ0904/japanese") != 2:
-        errors.append("README.md: old repository name must appear only in the two rename-status notes")
-    if "github.com/WYJ0904/japanese" in readme or "japanese.git" in readme:
+    if any(pattern.search(readme) for pattern in OLD_REPOSITORY_PATTERNS):
         errors.append("README.md: an obsolete clone URL remains")
-    if "git remote set-url origin https://github.com/WYJ0904/thewyj.uk.git" not in readme:
-        errors.append("README.md: post-rename remote command is missing")
+    if "https://github.com/WYJ0904/thewyj.uk.git" not in readme:
+        errors.append("README.md: current clone URL is missing")
+    if "actions/workflows/ci.yml/badge.svg" not in readme:
+        errors.append("README.md: CI status badge is missing")
 
     if errors:
         print("Repository audit failed:", file=sys.stderr)

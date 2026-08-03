@@ -44,6 +44,7 @@ latest-url.txt
 .tool-e2e/
 work/
 outputs/
+artifacts/
 
 # Account backend runtime data (contains private account and session data)
 local-backend/data/
